@@ -1,0 +1,9 @@
+{
+  "name": "NMR 1H/13C (TPSS)",
+  "calctype": "NMR",
+  "method_label": "TPSS_pcSseg-2",
+  "variant": "1H-13C",
+  "favorite": false,
+  "created_at": null,
+  "template": "# 1H and 13C NMR shieldings. TPSS/pcSseg-2, AutoAux.\n\n! TPSS pcSseg-2 AUTOAUX NMR VeryTightSCF\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n\n%eprnmr\n     NUCLEI = ALL H {SHIFT}\n     NUCLEI = ALL C {SHIFT}\nEND\n"
+}

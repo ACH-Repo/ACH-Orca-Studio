@@ -1,0 +1,12 @@
+# Minimal runtime dependencies for ORCA Studio.
+#
+# Install on Lido after `module load python`:
+#     pip install --user -r requirements.txt
+#
+# tkinter ships with the standard library python build on Lido (no install needed).
+# If `import tkinter` fails: ask the cluster admins which module exposes Tk,
+# or use the conda python in your home dir.
+
+rdkit
+openbabel-wheel
+matplotlib

@@ -1,0 +1,9 @@
+{
+  "name": "UV-Vis TD-DFT (CAM-B3LYP)",
+  "calctype": "TDDFT",
+  "method_label": "CAM-B3LYP_def2-TZVP",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# UV-Vis excitations (20 roots). TD-DFT with CAM-B3LYP/def2-TZVP.\n\n! CAM-B3LYP def2-TZVP RIJCOSX def2/J\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n%tddft\n  nroots 20\n  maxdim 5\nend\n\n!!##COORDS_SEC##!!\n"
+}

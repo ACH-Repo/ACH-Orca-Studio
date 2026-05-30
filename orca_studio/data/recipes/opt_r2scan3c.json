@@ -1,0 +1,9 @@
+{
+  "name": "OPT fast (r2SCAN-3c)",
+  "calctype": "OPT",
+  "method_label": "r2SCAN-3c",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Fast, robust geometries. r2SCAN-3c composite (own basis + D4 + gCP).\n\n! r2SCAN-3c TightOpt\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n"
+}

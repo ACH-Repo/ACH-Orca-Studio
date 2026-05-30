@@ -1,0 +1,9 @@
+{
+  "name": "TS OPT (B3LYP)",
+  "calctype": "OPTTS",
+  "method_label": "B3LYP_def2-TZVPP",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Transition-state search (needs a good TS guess geometry). Computes a Hessian first; B3LYP-D4/def2-TZVPP.\n\n! B3LYP def2-TZVPP RIJCOSX def2/J D4 OptTS Freq\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n%geom\n  Calc_Hess true\n  Recalc_Hess 5\nend\n\n!!##COORDS_SEC##!!\n"
+}

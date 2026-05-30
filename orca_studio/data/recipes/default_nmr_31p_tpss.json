@@ -1,0 +1,9 @@
+{
+  "name": "DEFAULT 31P NMR (TPSS)",
+  "calctype": "NMR",
+  "method_label": "TPSS_pcSseg-2",
+  "variant": "31P",
+  "favorite": true,
+  "created_at": null,
+  "template": "# DEFAULT 31P NMR shielding. TPSS/pcSseg-2, AutoAux.\n\n! TPSS pcSseg-2 AUTOAUX NMR VeryTightSCF\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n\n%eprnmr\n     NUCLEI = ALL P {SHIFT}\nEND\n"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "OPT solvated water (B3LYP)",
+  "calctype": "OPT",
+  "method_label": "B3LYP_def2-TZVPP",
+  "variant": "CPCM-water",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Optimization in implicit water (CPCM). B3LYP-D4/def2-TZVPP.\n\n! B3LYP def2-TZVPP RIJCOSX def2/J D4 TightOpt CPCM(water)\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n"
+}

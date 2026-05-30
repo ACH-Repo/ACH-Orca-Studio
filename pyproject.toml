@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orca_studio"
+version = "1.0.0"
+description = "Desktop GUI for building, launching, monitoring, and analysing ORCA quantum-chemistry calculations on SLURM clusters"
+requires-python = ">=3.9"
+dependencies = [
+    "rdkit",
+    "openbabel-wheel",
+    "matplotlib",
+]
+
+[project.scripts]
+orca-studio = "orca_studio.__main__:_cli"
+
+[tool.setuptools]
+packages = ["orca_studio", "orca_studio.core", "orca_studio.ui"]
+
+[tool.setuptools.package-data]
+orca_studio = ["data/*.sh", "data/recipes/*.json"]

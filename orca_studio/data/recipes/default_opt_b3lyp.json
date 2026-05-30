@@ -1,0 +1,9 @@
+{
+  "name": "DEFAULT OPT (B3LYP)",
+  "calctype": "OPT",
+  "method_label": "B3LYP_def2-TZVPP",
+  "variant": "",
+  "favorite": true,
+  "created_at": null,
+  "template": "# DEFAULT geometry optimization. B3LYP-D4/def2-TZVPP, RIJCOSX, TightOpt.\n\n! B3LYP def2-TZVPP RIJCOSX def2/J D4 TightOpt\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n"
+}

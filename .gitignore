@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Editors / IDEs
+.vscode/
+.idea/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# User-generated working data (produced by the app, not part of it)
+/calcs/
+/XYZ_INI/
+submit_all.sh
+*.out
+*.gbw
+
+# Per-user app config (lives in ~/.orca_studio.json anyway; never commit one)
+.orca_studio.json

@@ -1,0 +1,9 @@
+{
+  "name": "OPT (wB97X-D4)",
+  "calctype": "OPT",
+  "method_label": "wB97X-D4_def2-TZVP",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Range-separated hybrid geometries. wB97X-D4/def2-TZVP.\n\n! wB97X-D4 def2-TZVP RIJCOSX def2/J TightOpt\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n"
+}

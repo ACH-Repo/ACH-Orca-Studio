@@ -1,0 +1,9 @@
+{
+  "name": "SP energy (DLPNO-MP2)",
+  "calctype": "SP",
+  "method_label": "DLPNO-MP2_def2-TZVPP",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Correlated single-point energy. DLPNO-MP2/def2-TZVPP.\n\n! DLPNO-MP2 def2-TZVPP def2-TZVPP/C def2/JK RIJK TightSCF\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n"
+}

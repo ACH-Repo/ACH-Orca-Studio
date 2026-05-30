@@ -1,0 +1,9 @@
+{
+  "name": "NMR 31P (DLPNO-MP2)",
+  "calctype": "NMR",
+  "method_label": "DLPNO-MP2_def2-SVP",
+  "variant": "NoFrozenCore",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Correlated 31P NMR. DLPNO-MP2/def2-SVP, no frozen core.\n\n! RIJK DLPNO-MP2 def2-SVP def2/JK def2-SVP/C TightSCF NMR Nofrozencore\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n%Method\n  WriteJSONPropertyfile True\nEnd\n\n!!##COORDS_SEC##!!\n\n%eprnmr\n     NUCLEI = ALL P {SHIFT}\nEND\n"
+}
