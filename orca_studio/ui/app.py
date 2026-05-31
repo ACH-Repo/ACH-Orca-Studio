@@ -433,6 +433,8 @@ class App(object):
         btns = ttk.Frame(top)
         btns.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
         ttk.Button(btns, text="Close", command=top.destroy).pack(side=tk.RIGHT)
+        from orca_studio.ui.modal import fit_to_content
+        fit_to_content(top)
 
     def on_quit(self):
         if self._confirm_discard():

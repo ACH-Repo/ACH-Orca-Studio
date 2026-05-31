@@ -83,6 +83,8 @@ class LivePlotWindow(tk.Toplevel):
         ttk.Button(btns, text="Close", command=self._on_close).pack(side=tk.RIGHT)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        from orca_studio.ui.modal import fit_to_content
+        fit_to_content(self)   # don't let the controls clip at high UI scaling
         # Populate once realised; matplotlib's own resize keeps the figure
         # fitted to the window (device ratio pinned above).
         self.after(0, self._first_draw)
