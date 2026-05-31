@@ -58,6 +58,15 @@ class PlannedCalc(object):
     job_id: Optional[str] = None       # SLURM job id once submitted
     rundir: Optional[str] = None       # relative dir holding the .inp/.slurm/.out
     parent_id: Optional[str] = None    # id of the calc this derives from (None = root)
+    # Conditional gate from a Workflow pipeline. When set, this calc only runs
+    # if the gate's predicate holds on the output of calc `source`:
+    #   {"source": "<calc_id>", "predicate": "no_imaginary_freqs"}
+    gate: Optional[dict] = None
+    # The Workflow graph node that produced this calc (None for calcs made by
+    # hand in the Calculations tab). Together with molecule_filename it gives a
+    # stable identity, so re-running a pipeline reuses calcs instead of
+    # duplicating them.
+    origin_node: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d):
@@ -65,6 +74,8 @@ class PlannedCalc(object):
         d.setdefault("job_id", None)
         d.setdefault("rundir", None)
         d.setdefault("parent_id", None)
+        d.setdefault("gate", None)
+        d.setdefault("origin_node", None)
         return cls(**d)
 
     def children(self, project):

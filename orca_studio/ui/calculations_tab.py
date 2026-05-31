@@ -30,6 +30,7 @@ from orca_studio.core import local_runner as local_runner_mod
 from orca_studio.core import orca_parser
 from orca_studio.core import slurm as slurm_mod
 from orca_studio.core import slurm_runtime
+from orca_studio.core import workflow as wf_mod
 from orca_studio.core.project import Molecule, PlannedCalc, new_calc_id
 from orca_studio.ui.modal import make_modal
 from orca_studio.ui.plot_window import LivePlotWindow
@@ -40,15 +41,20 @@ from orca_studio.ui.tooltip import tip
 # Sentinel job id for jobs run by the local runner (vs a numeric SLURM id).
 LOCAL_JOB = "local"
 
+# States a calc can't move on from on its own (the pipeline driver stops on them).
+_TERMINAL_TAGS = ("done", "error", "skipped", "interrupted")
+
 
 # Row background by lifecycle state.
 _TAGS = {
-    "notbuilt": "#fffde7",  # pale yellow — planned / has issue
-    "waiting": "#eeeeee",   # grey — derived, waiting on parent
-    "built": "",            # white — built, not submitted
-    "running": "#e3f2fd",   # pale blue — queued / running
-    "done": "#e8f5e9",      # pale green — terminated normally
-    "error": "#ffebee",     # pale red — error in output
+    "notbuilt": "#fffde7",     # pale yellow — planned / has issue
+    "waiting": "#eeeeee",      # grey — derived, waiting on parent / condition
+    "built": "",               # white — built, not submitted
+    "running": "#e3f2fd",      # pale blue — queued / running
+    "done": "#e8f5e9",         # pale green — terminated normally
+    "error": "#ffebee",        # pale red — error in output
+    "skipped": "#ede7f6",      # pale purple — condition not met, won't run
+    "interrupted": "#ffe0b2",  # pale orange — stopped before finishing
 }
 
 
@@ -67,7 +73,20 @@ class CalculationsTab(ttk.Frame):
         self._local_mode = not slurm_runtime.sbatch_available()
         self._local_runner = None      # type: Optional[local_runner_mod.LocalRunner]
         self._local_poll_id = None
+        # Live pipeline driver (Workflow tab "Run pipeline"): calc ids under
+        # automatic build→run→gate-evaluate control, plus its polling handle.
+        self._pipeline_ids = set()     # type: set
+        self._pipeline_poll_id = None
+        self._pipeline_reports = []    # type: list
         self._build()
+
+    def reconcile_after_load(self):
+        """Called after a project is opened: query job status so calcs that were
+        'running' when the app last closed are re-evaluated (a local job, or a
+        cluster job no longer in the queue, shows as 'interrupted' rather than
+        forever 'running')."""
+        self._parse_cache.clear()
+        self.on_refresh_status()
 
     # ------------------------------------------------------------------ UI
 
@@ -337,40 +356,105 @@ class CalculationsTab(ttk.Frame):
             return ("planned", "notbuilt", False, False)
         if not calc.job_id:
             return ("built, not submitted", "built", False, False)
-        # Local-run jobs: prefer the runner's live state while it's queued or
-        # running; once finished, fall through to parse the .out for the real
-        # convergence result (which also survives an app restart).
-        if calc.job_id == LOCAL_JOB and self._local_runner is not None:
-            st = self._local_runner.state(calc.id)
-            if st == local_runner_mod.QUEUED:
-                return ("local: queued", "running", False, True)
-            if st == local_runner_mod.RUNNING:
-                return ("local: running", "running", False, True)
-            if st == local_runner_mod.CANCELLED:
-                return ("local: cancelled", "error", False, False)
+        # Local-run jobs: only THIS app's runner can have one running. If the
+        # runner isn't tracking it as live, it can't still be running (local jobs
+        # die with the app) — so an incomplete .out means it was interrupted.
+        if calc.job_id == LOCAL_JOB:
+            if self._local_runner is not None:
+                st = self._local_runner.state(calc.id)
+                if st == local_runner_mod.QUEUED:
+                    return ("local: queued", "running", False, True)
+                if st == local_runner_mod.RUNNING:
+                    return ("local: running", "running", False, True)
+                if st == local_runner_mod.CANCELLED:
+                    return ("local: cancelled", "interrupted", False, False)
+            parsed = self._parse_out(calc)
+            if parsed is None:
+                return ("interrupted — no output (local run was lost)", "interrupted", False, False)
+            if parsed.get("has_error"):
+                return ("error in output", "error", False, False)
+            if parsed.get("terminated_normally"):
+                return ("done — terminated normally", "done", True, False)
+            return ("interrupted — local run stopped before finishing",
+                    "interrupted", False, False)
+        # Cluster job (numeric id). squeue is the source of truth for "running".
         sq = self._squeue_states
         if sq and calc.job_id in sq:
             return ("queue: {}".format(sq[calc.job_id]), "running", False, True)
         parsed = self._parse_out(calc)
-        if parsed is None:
-            return ("submitted (job {})".format(calc.job_id), "running", False, True)
-        if parsed.get("has_error"):
-            return ("error in output", "error", True, False)
-        if parsed.get("terminated_normally"):
-            return ("done — terminated normally", "done", True, False)
-        return ("running — {}".format(orca_parser.short_status(parsed)), "running", False, True)
+        if parsed is not None:
+            if parsed.get("has_error"):
+                return ("error in output", "error", False, False)
+            if parsed.get("terminated_normally"):
+                return ("done — terminated normally", "done", True, False)
+            # .out exists but incomplete. If we've actually queried squeue and the
+            # job isn't there, it left the queue without finishing = interrupted.
+            if sq is not None:
+                return ("interrupted — job left the queue before finishing",
+                        "interrupted", False, False)
+            return ("running — {}".format(orca_parser.short_status(parsed)), "running", False, True)
+        # No .out. If squeue was queried and the job is gone, it never produced
+        # output = interrupted; otherwise it's freshly submitted.
+        if sq is not None:
+            return ("interrupted — job not in queue, no output", "interrupted", False, False)
+        return ("submitted (job {})".format(calc.job_id), "running", False, True)
+
+    def _gate_status(self, calc):
+        # type: (PlannedCalc) -> str
+        """Conditional gate state: 'none' (no gate) | 'pending' | 'open' | 'closed'.
+
+        A gate ({source: calc_id, predicate: name}) comes from a Workflow
+        Condition node: this calc runs only once the source calc finishes and
+        the predicate holds on its output.
+        """
+        gate = getattr(calc, "gate", None)
+        if not gate:
+            return "none"
+        source = self.app.project.calc_by_id(gate.get("source"))
+        if source is None:
+            return "open"  # source vanished — don't trap the calc forever
+        _, src_tag, sdone, sactive = self._own_state(source)
+        if sdone:
+            return wf_mod.gate_outcome(gate.get("predicate", "terminated_ok"), True,
+                                       self._read_out(source))
+        # The source failed/was interrupted and isn't coming back → the condition
+        # can never be satisfied, so the gate is permanently closed.
+        if not sactive and src_tag in ("error", "interrupted"):
+            return "closed"
+        return "pending"
+
+    def _gate_label(self, calc):
+        gate = getattr(calc, "gate", None)
+        if not gate:
+            return ""
+        source = self.app.project.calc_by_id(gate.get("source"))
+        pred = wf_mod.PREDICATES.get(gate.get("predicate", ""), gate.get("predicate", "condition"))
+        return "{} → {}".format(self._short(source) if source else "?", pred)
 
     def _display_state(self, calc):
         # type: (PlannedCalc) -> Tuple[str, str]
         mol = self.app.project.molecule_by_filename(calc.molecule_filename)
         recipe = self.app.get_recipe(calc.recipe_name)
         ok, issue = self._validate(calc, mol, recipe)
+        # Conditional gate takes precedence while the calc hasn't run: a closed
+        # gate means it never will; a pending one means it's waiting on a sibling.
+        if not calc.job_id:
+            gst = self._gate_status(calc)
+            if gst == "closed":
+                return ("skipped — condition not met", "skipped")
+            if gst == "pending":
+                gate = calc.gate or {}
+                src = self.app.project.calc_by_id(gate.get("source"))
+                return ("waiting for condition ({})".format(self._short(src) if src else "?"),
+                        "waiting")
         if not calc.exported:
             if calc.parent_id:
                 parent = self.app.project.calc_by_id(calc.parent_id)
                 if parent is not None:
-                    _, _, pdone, _ = self._own_state(parent)
+                    _, ptag, pdone, pactive = self._own_state(parent)
                     if not pdone:
+                        if not pactive and ptag in ("error", "interrupted"):
+                            return ("skipped — upstream didn't finish", "skipped")
                         return ("waiting for parent ({})".format(self._short(parent)), "waiting")
             if not ok:
                 return (issue, "notbuilt")
@@ -757,6 +841,17 @@ class CalculationsTab(ttk.Frame):
                 self._log("SKIP {}: job is active, not rebuilding".format(self._short(calc)))
                 n_skip += 1
                 continue
+            # Guard: conditional gate from a workflow Condition node.
+            gst = self._gate_status(calc)
+            if gst == "closed":
+                self._log("SKIP {}: condition not met — won't run".format(self._short(calc)))
+                n_skip += 1
+                continue
+            if gst == "pending":
+                self._log("SKIP {}: waiting on condition ({})".format(
+                    self._short(calc), self._gate_label(calc)))
+                n_skip += 1
+                continue
             ok, issue = self._validate(calc, mol, recipe)
             if not ok:
                 self._log("SKIP {}: {}".format(self._short(calc), issue))
@@ -862,11 +957,13 @@ class CalculationsTab(ttk.Frame):
     def on_submit(self):
         root = self.app.project.root()
         targets = self._selected_or_all()
-        candidates = [c for c in targets if c.exported and c.slurm_path and not c.job_id]
+        candidates = [c for c in targets if c.exported and c.slurm_path and not c.job_id
+                      and self._gate_status(c) != "closed"]
         if not candidates:
             messagebox.showinfo("Nothing to submit",
                                 "No built, un-submitted calculations matched. Build first; "
-                                "already-submitted jobs aren't re-submitted.")
+                                "already-submitted jobs aren't re-submitted. Calcs whose "
+                                "workflow condition failed are skipped.")
             return
         if not slurm_runtime.sbatch_available():
             messagebox.showerror("sbatch not found",
@@ -917,12 +1014,14 @@ class CalculationsTab(ttk.Frame):
     def on_run_local(self):
         root = self.app.project.root()
         targets = self._selected_or_all()
-        candidates = [c for c in targets if c.exported and c.inp_path and not c.job_id]
+        candidates = [c for c in targets if c.exported and c.inp_path and not c.job_id
+                      and self._gate_status(c) != "closed"]
         if not candidates:
             messagebox.showinfo(
                 "Nothing to run",
                 "No built, un-run calculations matched. Build first; calcs that already have a "
-                "result aren't re-run (rebuild them to run again).")
+                "result aren't re-run (rebuild them to run again). Calcs whose workflow "
+                "condition failed are skipped.")
             return
         orca = self._ensure_orca_path()
         if not orca:
@@ -948,6 +1047,10 @@ class CalculationsTab(ttk.Frame):
             # Only run buildable ones (skip derived whose geometry isn't ready).
             mol = self.app.project.molecule_by_filename(calc.molecule_filename)
             recipe = self.app.get_recipe(calc.recipe_name)
+            if self._gate_status(calc) == "pending":
+                self._log("SKIP {}: waiting on condition ({})".format(
+                    self._short(calc), self._gate_label(calc)))
+                continue
             ok, issue = self._validate(calc, mol, recipe)
             if not ok:
                 self._log("SKIP {}: {}".format(self._short(calc), issue))
@@ -972,10 +1075,23 @@ class CalculationsTab(ttk.Frame):
         if not messagebox.askyesno("Stop local run",
                                    "Stop the running job and clear the local queue?"):
             return
+        self._stop_pipeline()
         self._local_runner.cancel_all()
         self._local_runner.poll()
         self.refresh()
-        self.app.set_status("Local run stopped.")
+        self.app.set_status("Local run stopped. Unfinished calcs are marked interrupted — "
+                            "re-run the pipeline to resume them.")
+
+    def _stop_pipeline(self):
+        """Halt the live pipeline driver (leaves calc states as-is; a later
+        Run pipeline resumes the unfinished ones)."""
+        if self._pipeline_poll_id is not None:
+            try:
+                self.after_cancel(self._pipeline_poll_id)
+            except Exception:
+                pass
+            self._pipeline_poll_id = None
+        self._pipeline_ids = set()
 
     def _start_local_poll(self):
         if self._local_poll_id is not None:
@@ -1017,6 +1133,226 @@ class CalculationsTab(ttk.Frame):
             return None
         config_mod.set_value("orca_path", chosen)
         return chosen
+
+    # ------------------------------------------------- live pipeline driver
+
+    def start_pipeline(self, calc_ids, reports=None):
+        # type: (list, Optional[list]) -> None
+        """Take a set of calcs under automatic control: build and launch each as
+        its parent geometry and conditional gate allow, evaluating Condition
+        gates live as their source calcs finish. Re-running is a *resume*: calcs
+        already finished are left alone, ones still genuinely running keep going,
+        and interrupted/unfinished ones are re-armed so only they restart — no
+        duplicate queueing. Called by the Workflow tab's "Run pipeline" button."""
+        ids = [cid for cid in calc_ids if self.app.project.calc_by_id(cid) is not None]
+        if not ids:
+            return
+        self._pipeline_ids = set(ids)
+        self._pipeline_reports = list(reports or [])
+        if self._local_mode:
+            # Make sure we have an ORCA exe before we start the engine.
+            orca = self._ensure_orca_path()
+            if not orca:
+                self._pipeline_ids = set()
+                self._log("Pipeline cancelled — no ORCA executable selected.")
+                return
+            conc = 1
+            if hasattr(self, "concurrency_var"):
+                conc = max(1, int(self.concurrency_var.get()))
+            if self._local_runner is None or self._local_runner.orca_exe != orca:
+                self._local_runner = local_runner_mod.LocalRunner(orca, max_concurrent=conc)
+            else:
+                self._local_runner.max_concurrent = conc
+            self._local_runner.poll()
+        elif not slurm_runtime.sbatch_available():
+            messagebox.showerror("sbatch not found",
+                                 "Pipeline execution needs sbatch (cluster) or a local ORCA. "
+                                 "Neither is available here.")
+            self._pipeline_ids = set()
+            return
+        else:
+            # Know which jobs are genuinely still queued before deciding what to resume.
+            self._squeue_states = slurm_runtime.query_states()
+        n_resume = self._rearm_pipeline()
+        self._log_clear()
+        self._log("Pipeline started: {} calc(s) under automatic control{}.".format(
+            len(ids), " (resuming {} unfinished)".format(n_resume) if n_resume else ""))
+        self._pipeline_tick()
+
+    def _rearm_pipeline(self):
+        """Reset interrupted/unfinished calcs so the driver re-runs only them.
+        Leaves finished and genuinely-active calcs untouched. Returns how many
+        were re-armed."""
+        n = 0
+        for cid in self._pipeline_ids:
+            calc = self.app.project.calc_by_id(cid)
+            if calc is None or not calc.exported or not calc.job_id:
+                continue
+            _, _, done, active = self._own_state(calc)
+            if done or active:
+                continue
+            # interrupted / cancelled / errored → clear the job id to re-launch
+            calc.job_id = None
+            n += 1
+        return n
+
+    def pipeline_active(self):
+        return bool(self._pipeline_ids)
+
+    def _pipeline_tick(self):
+        self._pipeline_poll_id = None
+        # Refresh the status sources the driver reads to decide readiness.
+        if self._local_mode:
+            if self._local_runner is not None:
+                self._local_runner.poll()
+        else:
+            self._squeue_states = slurm_runtime.query_states()
+
+        try:
+            template = slurm_mod.load_template()
+        except Exception as e:
+            self._log("Pipeline halted — slurm template missing: {}".format(e))
+            self.refresh()
+            return
+
+        acted = False           # built or launched something this tick
+        active_exists = False   # something is genuinely queued/running
+        for cid in list(self._pipeline_ids):
+            calc = self.app.project.calc_by_id(cid)
+            if calc is None:
+                self._pipeline_ids.discard(cid)
+                continue
+            _, tag = self._display_state(calc)
+            if tag in _TERMINAL_TAGS:
+                continue  # done / error / skipped / interrupted — settled
+            if calc.exported and self._own_state(calc)[3]:
+                active_exists = True
+                continue
+            gst = self._gate_status(calc)
+            if gst in ("pending", "closed"):
+                continue  # gate decides later (pending) or never (closed→skipped)
+
+            mol = self.app.project.molecule_by_filename(calc.molecule_filename)
+            recipe = self.app.get_recipe(calc.recipe_name)
+            if not calc.exported:
+                ok, _issue = self._validate(calc, mol, recipe)
+                if not ok:
+                    continue  # parent geometry not ready yet — wait
+                if not self._pipeline_build(calc, mol, recipe, template):
+                    continue
+                acted = True
+            if calc.exported and not calc.job_id:
+                self._pipeline_launch(calc, mol)
+                acted = True
+
+        self.app.mark_dirty()
+        self.refresh()
+        if hasattr(self.app, "workflow_tab"):
+            try:
+                self.app.workflow_tab.refresh_live()
+            except Exception:
+                pass
+
+        # Keep ticking while anything is running or we just kicked something off.
+        # When nothing is active and a full pass launched nothing, we're settled
+        # (any still-unfinished calc is blocked by a failed upstream).
+        if active_exists or acted:
+            self._pipeline_poll_id = self.after(2000, self._pipeline_tick)
+        else:
+            self._finish_pipeline()
+
+    def _finish_pipeline(self):
+        done = sum(1 for cid in self._pipeline_ids
+                   if self.app.project.calc_by_id(cid) is not None
+                   and self._own_state(self.app.project.calc_by_id(cid))[2])
+        total = len(self._pipeline_ids)
+        self._log("Pipeline settled — {}/{} finished OK.".format(done, total))
+        try:
+            self._generate_pipeline_reports()
+        except Exception as e:
+            self._log("Report generation failed: {}".format(e))
+        self.app.set_status("Pipeline finished ({}/{} OK).".format(done, total))
+
+    def _generate_pipeline_reports(self):
+        """When the pipeline settles, write one merged JSON (+CSV) per Report
+        node, gathering every calc wired into it plus its geometry-ancestor
+        chain (so a Report fed by NMR also captures the OPT/FREQ it came from)."""
+        import re
+        from orca_studio.core import reporting
+        specs = getattr(self, "_pipeline_reports", None)
+        if not specs:
+            return
+        root = self.app.project.root()
+        for spec in specs:
+            node_ids = spec.get("node_ids") or []
+            contrib = {}  # calc id -> calc
+            for c in self.app.project.planned_calcs:
+                if getattr(c, "origin_node", None) in node_ids:
+                    cur, guard = c, 0
+                    while cur is not None and guard < 50:
+                        guard += 1
+                        contrib[cur.id] = cur
+                        cur = (self.app.project.calc_by_id(cur.parent_id)
+                               if cur.parent_id else None)
+            if not contrib:
+                continue
+            contexts = []
+            for c in contrib.values():
+                recipe = self.app.get_recipe(c.recipe_name)
+                rundir_abs = os.path.join(root, c.rundir) if c.rundir else None
+                contexts.append(reporting.CalcContext(
+                    calc_id=c.id,
+                    label="{} {}".format(recipe.calctype if recipe else "?", c.molecule_filename),
+                    molecule=c.molecule_filename,
+                    calctype=recipe.calctype if recipe else "?",
+                    method=recipe.method_label if recipe else "?",
+                    out_path=self._out_path(c),
+                    rundir_abs=rundir_abs,
+                ))
+            keys = [e.key for e in reporting.EXTRACTORS]
+            report = reporting.assemble_report(contexts, keys)
+            name = re.sub(r"[^A-Za-z0-9_.-]+", "_", (spec.get("name") or "report").strip()) or "report"
+            json_path = os.path.join(root, name + ".json")
+            reporting.write_json(report, json_path)
+            try:
+                reporting.write_csv(report, os.path.join(root, name + ".csv"))
+            except Exception:
+                pass
+            self._log("Report written: {} ({} calc(s))".format(json_path, len(contexts)))
+
+    def _pipeline_build(self, calc, mol, recipe, template):
+        try:
+            inp_rel, slurm_rel, rundir_rel = self._build_one(calc, mol, recipe, template)
+            calc.inp_path = inp_rel
+            calc.slurm_path = slurm_rel
+            calc.rundir = rundir_rel
+            calc.exported = True
+            calc.job_id = None
+            self._log("PIPELINE built {}".format(self._short(calc)))
+            return True
+        except Exception as e:
+            self._log("PIPELINE build failed {}: {}".format(self._short(calc), e))
+            return False
+
+    def _pipeline_launch(self, calc, mol):
+        root = self.app.project.root()
+        if self._local_mode:
+            if self._local_runner is None:
+                return
+            rundir_abs = os.path.join(root, calc.rundir)
+            inp_abs = os.path.join(root, calc.inp_path)
+            out_abs = os.path.join(rundir_abs, calc.molecule_filename + "-" + LOCAL_JOB + ".out")
+            calc.job_id = LOCAL_JOB
+            self._local_runner.forget(calc.id)
+            self._local_runner.submit(calc.id, inp_abs, out_abs, rundir_abs)
+            self._log("PIPELINE running {} (local)".format(self._short(calc)))
+        else:
+            job_id, err = slurm_runtime.submit(calc.slurm_path, root)
+            if job_id:
+                calc.job_id = job_id
+                self._log("PIPELINE submitted {} -> job {}".format(self._short(calc), job_id))
+            else:
+                self._log("PIPELINE submit failed {}: {}".format(self._short(calc), err))
 
     # ------------------------------------------------------- double-click plot
 

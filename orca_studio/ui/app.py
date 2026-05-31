@@ -353,6 +353,12 @@ class App(object):
             self.email_var.set(self.usermail)
         self.reload_recipes()
         self.refresh_all_tabs()
+        # Re-evaluate job status so calcs left 'running' at last close are shown
+        # as interrupted (local jobs and cluster jobs gone from the queue).
+        try:
+            self.calculations_tab.reconcile_after_load()
+        except Exception:
+            pass
         self.mark_clean()
         self.set_status("Opened {}".format(path))
 

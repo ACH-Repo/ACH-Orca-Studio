@@ -18,6 +18,7 @@ ORCA Studio turns the usual "write an input file, scp it, sbatch it, squeue it, 
 - **Generate and submit** SLURM jobs into a tidy `calcs/<mol>/<category>/<type>/<method>/` tree; derive follow-up calculations (FREQ/NMR/SP) from a finished optimisation in one click.
 - **Watch jobs live** — double-click a running job for a self-updating SCF / geometry-convergence plot.
 - **Extract results** — energies, geometries, frequencies, NMR shieldings, thermochemistry — into a JSON + CSV report, and plot simulated IR and NMR spectra.
+- **Or draw a pipeline** — wire `Molecules → Optimize → Frequencies → Condition → Property → Report` in the Workflow tab and let it build, launch, branch, and resume itself.
 
 It is designed to run **on the cluster login node** and be displayed on your own machine through an X-forwarding SSH client (e.g. MobaXterm), so it calls `sbatch`/`squeue` directly and reads job output straight off the shared filesystem. It **also runs on a normal Windows/Linux/macOS PC** for the build / visualise / report parts (see [Running on a PC](#running-on-a-pc)).
 
@@ -86,32 +87,75 @@ orca-studio myproject.json
 
 ---
 
-## The five tabs
+## The six tabs
 
 | Tab | What it does |
 |-----|--------------|
 | **Molecules** | Build 3D structures from SMILES (auto charge/multiplicity, optional "coord-gen SMILES" metal-swap trick), paste a whole list from ChemDraw, see a 2D depiction, double-click to open in Avogadro/molden. |
 | **Recipes** | A searchable, sortable, favouritable library of ORCA input templates. A recipe = calc type (OPT/FREQ/NMR/…) + method label + optional variant + the template text. |
-| **Calculations** | The job lifecycle in one place: plan calcs, **derive** follow-ups from finished ones (inherits the optimised geometry), build `.inp`/`.slurm`, submit via `sbatch`, refresh status via `squeue` (F5), double-click for a live plot. Right-click a finished FREQ/NMR for a simulated spectrum. |
+| **Calculations** | The job lifecycle in one place: plan calcs, **derive** follow-ups from finished ones (inherits the optimised geometry), build `.inp`/`.slurm`, submit via `sbatch` (or **Run locally** on a PC), refresh status via `squeue` (F5), double-click for a live plot. Right-click a finished FREQ/NMR for a simulated spectrum. |
 | **Report** | Pick finished calculations and extractors (energy, geometry, trajectory, frequencies + IR, NMR shieldings, thermochemistry, dipole, HOMO–LUMO) and write a `<name>.json` + flat `<name>.csv` summary. |
 | **⚗ Benchmark** | A bulk generator: fan a set of molecules out across many theory levels in a couple of clicks (see note). |
+| **🔀 Workflow** | A visual node-graph pipeline editor (KNIME-style): wire `Molecules → Optimize → Frequencies → Condition → Property → Report`, then **Run pipeline** to build, launch, and advance each step automatically — including **conditional branches** (e.g. only run NMR if the FREQ job found no imaginary modes). See [The Workflow tab](#the-workflow-tab) (also evolving). |
 
-> **⚗ The Benchmark tab is experimental.** It works, but its design is the
-> least settled part of the app and **may change substantially in future
-> versions** as the workflow around large method/basis sweeps evolves. Treat it
-> as a convenience for generating many calculations at once, not a stable API.
+> **⚗🔀 The Benchmark and Workflow tabs are newer and still evolving.** Both
+> work, but they are the least settled parts of the app and **may change
+> substantially in future versions**. Treat them as conveniences, not a stable
+> API.
+
+---
+
+## The Workflow tab
+
+The Workflow tab is a visual **node-graph pipeline editor**. Instead of clicking through OPT → derive FREQ → check → derive NMR by hand, you draw the recipe once as a graph and let the app run it.
+
+```
+ Molecules ──▶ Optimize ──▶ Frequencies ──▶ Condition ──▶ Property ──▶ Report
+                                            (no imag. freq?)   (NMR/SP)
+```
+
+Each node is a step; **green ports carry a geometry, orange ports carry results**. You wire an output port to a compatible input port, and the geometry flows down the chain (each calc inherits the optimised geometry of the one before it).
+
+### Node types
+
+- **Molecules** — the source; choose *all* molecules or a specific selection.
+- **Optimize / Frequencies / Property (SP/NMR/…)** — calculation steps; pick a recipe on each.
+- **Condition** — a gate on the branch below it. It tests the calc feeding it and only lets the branch run if the test passes. Predicates: *no imaginary frequencies* (a true minimum), *has an imaginary frequency* (e.g. a transition state), or *terminated normally*.
+- **Report** — collects results. It accepts **multiple inputs**, so several calcs can feed into one merged report.
+
+### Editing the graph
+
+| Action | How |
+|--------|-----|
+| Add a node | Buttons on the toolbar, **F3** (search at the cursor), or drag a wire into empty space |
+| Connect | Drag from an output port onto an input port — or drop on empty space to pick + connect a new node (Blender-style search), or select two nodes and press **J** |
+| Move | Drag a node (drags the whole selection if several are selected) |
+| Select | Click; **Ctrl+click** to multi-select; **drag a box** in empty space; **Ctrl+A** for all |
+| Pan | Middle-drag or right-drag the canvas |
+| Context menu | **Right-click** a node/edge/empty space (connect, disconnect, delete, add-here) |
+| Delete | Select and press **Delete** |
+
+### Running it
+
+- **Run pipeline** expands the graph across your molecules and runs it live: each step builds and launches as soon as its input geometry is ready, conditions are evaluated the moment their feeding job finishes, and nodes recolour by state (grey = waiting, blue = running, green = done, red = error, purple = skipped, orange = interrupted). It works the same on the cluster (`sbatch`) and on a PC (local ORCA).
+- **Generate only** creates the planned calculations and jumps to the Calculations tab without launching, in case you want to review or edit them first.
+
+### Resuming, independent networks, and reports
+
+- **Stop & resume.** If you stop a pipeline (or close the app) and later hit **Run pipeline** again, it *continues* rather than restarting: finished steps are reused, and only the unfinished/interrupted ones run again — no duplicate jobs.
+- **Independent networks.** Several disconnected graphs on the same canvas (each with its own Molecules source) expand and run as separate pipelines.
+- **Merged report.** When a pipeline finishes, every Report node writes a `<name>.json` + `.csv` to the project root, gathering all the calculations wired into it *plus the optimisation/frequency steps they came from*.
+- **Interrupted jobs are flagged.** A job that was running when the app closed is shown as **interrupted** (not stuck on "running") when you reopen the project, and a resume re-runs exactly those.
 
 ---
 
 ## Running on a PC
 
-Once installed (see [Installation → On a Windows PC](#on-a-windows-pc)), the same app runs on a normal desktop; the cluster-only actions degrade gracefully:
+Once installed (see [Installation → On a Windows PC](#on-a-windows-pc)), the same app runs on a normal desktop; the cluster-only actions adapt automatically:
 
-- **Submit / Refresh status** need `sbatch`/`squeue`; off-cluster they report that SLURM isn't available. You can still build the `.inp`/`.slurm` files and run them however you like.
+- **Run locally** replaces Submit when `sbatch` isn't found: point the app at your local `orca` executable once (remembered in `~/.orca_studio.json`) and it runs the built jobs through a serial queue — one at a time by default — streaming each `.out` so the live plots, reports, and the Workflow pipeline all work just as they do on the cluster. The button label and behaviour switch on their own based on whether `sbatch`/`squeue` are present.
 - **Avogadro** opens locally: double-click a molecule, point it at your `Avogadro2.exe` once, and it's remembered in `~/.orca_studio.json`.
 - **Coordinate generation, recipes, spectra, and reports** all work the same.
-
-A dedicated PC build that runs ORCA locally (instead of submitting to SLURM) is on the roadmap for a future version.
 
 ---
 
@@ -143,6 +187,8 @@ ACH-Orca-Studio/
 │   │   ├── orca_parser.py    # parse ORCA 6 output (SCF, geometry, freqs, NMR, …)
 │   │   ├── reporting.py      # result extractors → JSON + CSV
 │   │   ├── spectra.py        # line-broadening math (no numpy needed)
+│   │   ├── local_runner.py   # serial local-ORCA job queue (PC mode)
+│   │   ├── workflow.py       # node-graph pipeline model + conditional expansion
 │   │   ├── project.py        # project.json model (molecules, planned calcs)
 │   │   └── config.py         # per-user config (~/.orca_studio.json)
 │   ├── ui/                   # Tkinter widgets, one module per tab + helpers
@@ -158,6 +204,7 @@ ACH-Orca-Studio/
 - **The SLURM template** copies the input to the compute node's local `/scratch`, runs ORCA there, and copies results back on exit. ORCA's stdout is wrapped in `stdbuf -oL` so the `.out` on the shared filesystem updates line-by-line *during* the run — that's what makes the live plots possible. The output streams to `<rundir>/<jobname>-<jobid>.out`.
 - **Live monitoring** reads that `.out` directly (no SSH, no callbacks) and re-parses it on a timer. The parser is regex-based and was verified against real ORCA 6.0.1 output for OPT, single-point, FREQ, and NMR jobs.
 - **Derived calculations** carry a `parent_id` and a `geometry_source` of `parent:<id>`; at build time the child reads the parent's optimised `<mol>.xyz`. A child can't be built until its parent has produced that geometry — a natural gate that mirrors the OPT → confirm → FREQ → SP/NMR workflow.
+- **The Workflow pipeline** expands the node graph into ordinary planned calculations (each tagged with its graph node, so re-running *resumes* instead of duplicating). A Condition node attaches a *gate* — `{source, predicate}` — to the calcs below it, and the driver evaluates that predicate on the source job's `.out` the moment it finishes, opening or permanently closing the branch. Because a local job can only be "running" while the app that launched it is alive, reopening a project re-evaluates job state so anything left mid-run reads as *interrupted* rather than stuck on "running".
 - **Spectra** are simulated by broadening the parsed stick lines (Lorentzian/Gaussian) — no `orca_mapspc` needed. The NMR window plots several molecules at once and highlights the one a peak belongs to on hover.
 - **No outbound network code.** The app never opens a connection; it only calls local `sbatch`/`squeue` and reads local files. Everything reaches your screen through your own X-forwarding SSH client.
 

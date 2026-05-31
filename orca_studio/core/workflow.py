@@ -50,6 +50,13 @@ NODE_TYPES = {
         "kind": "calc",
         "config": {"recipe": ""},
     },
+    "condition": {
+        "label": "Condition",
+        "inputs": [("in", "geometry")],
+        "outputs": [("pass", "geometry")],
+        "kind": "gate",
+        "config": {"predicate": "no_imaginary_freqs"},
+    },
     "report": {
         "label": "Report",
         "inputs": [("results", "results")],
@@ -60,6 +67,51 @@ NODE_TYPES = {
 }
 
 CALC_NODE_TYPES = {t for t, d in NODE_TYPES.items() if d["kind"] == "calc"}
+
+
+# Condition predicates: evaluated at runtime on the .out of the calculation
+# feeding the condition. label is for the picker; the eval is in eval_predicate.
+PREDICATES = {
+    "no_imaginary_freqs": "No imaginary frequencies (a true minimum)",
+    "has_imaginary_freqs": "Has an imaginary frequency (e.g. a transition state)",
+    "terminated_ok": "Terminated normally",
+}
+
+
+def eval_predicate(name, out_text):
+    # type: (str, str) -> bool
+    """Evaluate a condition predicate against a calculation's .out text."""
+    from orca_studio.core import orca_parser as P
+    if not out_text:
+        return False
+    if name == "terminated_ok":
+        return bool(P._TERM_OK.search(out_text))
+    if name in ("no_imaginary_freqs", "has_imaginary_freqs"):
+        vibs = P.real_frequencies(P.parse_frequencies(out_text))
+        n_imag = sum(1 for f in vibs if f < 0)
+        if name == "no_imaginary_freqs":
+            return len(vibs) > 0 and n_imag == 0
+        return n_imag > 0
+    return True
+
+
+def gate_outcome(predicate, source_done, source_out_text):
+    # type: (str, bool, Optional[str]) -> str
+    """Resolve a conditional gate to 'pending' | 'open' | 'closed'.
+
+    A gated calc runs only when its source calc has finished AND the predicate
+    holds. While the source is still running we don't know yet (pending).
+    """
+    if not source_done:
+        return "pending"
+    return "open" if eval_predicate(predicate, source_out_text or "") else "closed"
+
+
+def _geometry_input_port(node):
+    for name, t in node.inputs():
+        if t == "geometry":
+            return name
+    return None
 
 
 def _new_id():
@@ -156,6 +208,12 @@ class Workflow(object):
                 return n
         return None
 
+    def edge(self, edge_id):
+        for e in self.edges:
+            if e.id == edge_id:
+                return e
+        return None
+
     def edges_into(self, node_id, port=None):
         return [e for e in self.edges if e.dst_node == node_id
                 and (port is None or e.dst_port == port)]
@@ -191,9 +249,14 @@ class Workflow(object):
             return False, "port missing"
         if st != dt:
             return False, "type mismatch ({} -> {})".format(st, dt)
-        # an input port accepts a single edge
-        if self.edges_into(dst_node, dst_port):
+        # 'results' inputs fan in (a Report merges many results into one file);
+        # 'geometry' inputs take a single structure.
+        if dt != "results" and self.edges_into(dst_node, dst_port):
             return False, "input already connected"
+        # don't allow the exact same edge twice
+        for e in self.edges_into(dst_node, dst_port):
+            if e.src_node == src_node and e.src_port == src_port:
+                return False, "already connected"
         if self._would_cycle(src_node, dst_node):
             return False, "would create a cycle"
         return True, ""
@@ -255,14 +318,23 @@ class Workflow(object):
                     issues.append("{} node has no recipe selected.".format(n.label))
                 if not self.edges_into(n.id, "geometry"):
                     issues.append("{} node has no geometry input connected.".format(n.label))
+            elif n.type == "condition":
+                fin = self.edges_into(n.id, "in")
+                if not fin:
+                    issues.append("Condition node has no input connected.")
+                else:
+                    feeder = self.node(fin[0].src_node)
+                    if feeder is None or feeder.type not in CALC_NODE_TYPES:
+                        issues.append("Condition must be fed by a calculation node (so there's "
+                                      "a result to test).")
         if self.topo_order() is None:
             issues.append("The graph contains a cycle.")
         return issues
 
 
 def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory):
-    # type: (Workflow, List[str], callable) -> Tuple[list, List[str]]
-    """Statically expand a condition-free workflow into PlannedCalcs.
+    # type: (Workflow, List[str], callable) -> Tuple[list, List[str], Dict[str, list]]
+    """Expand a workflow into PlannedCalcs, attaching conditional gates.
 
     For each molecule, walk the calc nodes in topological order. A calc node
     whose geometry comes from the Molecules source uses geometry_source
@@ -270,57 +342,130 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory):
     'parent:<that node's calc for this molecule>'.
 
     `planned_calc_factory(molecule, recipe_name, category, geometry_source,
-    parent_id)` builds a PlannedCalc (passed in to keep this module free of UI
-    imports). Returns (calcs, warnings).
+    parent_id, gate, origin_node)` builds OR reuses a PlannedCalc (passed in to
+    keep this module free of UI imports). `gate` is None, or {"source": calc_id,
+    "predicate": name} when the geometry path crosses a Condition node — the calc
+    then runs only if that predicate holds on the source calc's output.
+    `origin_node` is the graph node id, so the factory can reuse an existing calc
+    for the same (node, molecule) instead of creating a duplicate.
+
+    Disconnected sub-graphs run as independent networks: each calc node is
+    grouped by the Molecules source its geometry traces back to, and each source
+    contributes its own molecule set.
+
+    Returns (calcs, warnings, node_map) where node_map maps each calc node id to
+    the list of calc ids it produced (one per molecule), for live UI coloring.
     """
     warnings = []
     order = workflow.topo_order()
     if order is None:
-        return [], ["Graph has a cycle — cannot expand."]
+        return [], ["Graph has a cycle — cannot expand."], {}
 
     sources = [n for n in workflow.nodes if n.type == "molecules"]
     if not sources:
-        return [], ["No Molecules source node."]
-    source_id = sources[0].id
+        return [], ["No Molecules source node."], {}
 
-    # Determine the molecule set from the source node config.
-    mols = list(molecule_filenames)
-    cfg = sources[0].config
-    if cfg.get("mode") == "selection" and cfg.get("filenames"):
-        sel = set(cfg["filenames"])
-        mols = [m for m in mols if m in sel]
-    if not mols:
-        return [], ["The Molecules node selects no molecules."]
-
-    calc_nodes = [workflow.node(nid) for nid in order
-                  if workflow.node(nid).type in CALC_NODE_TYPES]
-    # skip condition/sink nodes (M1: report not executed here)
     for n in workflow.nodes:
         if n.type == "report":
-            warnings.append("Report node isn't run by Generate yet — use the Report tab "
-                            "after the calcs finish.")
+            warnings.append("Report results are written when the pipeline finishes (Run "
+                            "pipeline). 'Generate only' just creates the calculations.")
             break
 
+    def root_source(node):
+        """Walk the geometry path all the way back (through calc / condition
+        nodes too) to the Molecules source feeding this node, or None."""
+        cur = node
+        guard = 0
+        while guard < 200:
+            guard += 1
+            port = _geometry_input_port(cur)
+            ein = workflow.edges_into(cur.id, port) if port else []
+            if not ein:
+                return None
+            src = workflow.node(ein[0].src_node)
+            if src is None:
+                return None
+            if src.type == "molecules":
+                return src.id
+            cur = src
+
+    def resolve(node, node_calc):
+        """Walk back along the geometry path, passing through condition /
+        frequencies / property nodes (none of which produce a *new* optimized
+        geometry) to the nearest optimize node (parent) or the molecules source
+        (initial). If the path crosses a condition node, attach a gate keyed on
+        the calc feeding that condition."""
+        gate = None
+        cur = node
+        guard = 0
+        while guard < 200:
+            guard += 1
+            port = _geometry_input_port(cur)
+            ein = workflow.edges_into(cur.id, port) if port else []
+            if not ein:
+                return "initial", None, gate
+            src = workflow.node(ein[0].src_node)
+            if src is None or src.type == "molecules":
+                return "initial", None, gate
+            if src.type == "optimize":
+                pid = node_calc.get(src.id)
+                if pid:
+                    return "parent:" + pid, pid, gate
+                return "initial", None, gate
+            if src.type == "condition":
+                if gate is None:
+                    cin = workflow.edges_into(src.id, "in")
+                    if cin:
+                        fid = node_calc.get(cin[0].src_node)
+                        if fid:
+                            gate = {"source": fid,
+                                    "predicate": src.config.get("predicate", "terminated_ok")}
+                cur = src
+                continue
+            if src.type in ("frequencies", "property"):
+                cur = src
+                continue
+            return "initial", None, gate
+
+    # All calc nodes in topological order, grouped by the Molecules source they
+    # trace back to — each group is an independent network.
+    calc_nodes = [workflow.node(nid) for nid in order
+                  if workflow.node(nid).type in CALC_NODE_TYPES]
+    groups = {}  # source_id -> [calc node, ...] in topo order
+    for cn in calc_nodes:
+        if not workflow.edges_into(cn.id, "geometry"):
+            continue  # validated elsewhere
+        rs = root_source(cn)
+        if rs is None:
+            warnings.append("{} isn't connected to a Molecules source — skipped."
+                            .format(cn.label))
+            continue
+        groups.setdefault(rs, []).append(cn)
+
     calcs = []
-    for mol in mols:
-        node_calc = {}  # node_id -> calc id for this molecule
-        for node in calc_nodes:
-            geom_edges = workflow.edges_into(node.id, "geometry")
-            if not geom_edges:
-                continue  # validated elsewhere; skip
-            src = geom_edges[0].src_node
-            if src == source_id:
-                geometry_source = "initial"
-                parent_id = None
-            elif src in node_calc:
-                parent_id = node_calc[src]
-                geometry_source = "parent:" + parent_id
-            else:
-                # geometry source is a non-calc node we don't expand → fall back
-                geometry_source = "initial"
-                parent_id = None
-            calc = planned_calc_factory(mol, node.config.get("recipe", ""),
-                                        workflow.category, geometry_source, parent_id)
-            node_calc[node.id] = calc.id
-            calcs.append(calc)
-    return calcs, warnings
+    node_map = {}  # node_id -> [calc id, ...] across molecules (for live coloring)
+    for src in sources:
+        group = groups.get(src.id)
+        if not group:
+            continue
+        mols = list(molecule_filenames)
+        cfg = src.config
+        if cfg.get("mode") == "selection" and cfg.get("filenames"):
+            sel = set(cfg["filenames"])
+            mols = [m for m in mols if m in sel]
+        if not mols:
+            warnings.append("A Molecules node selects no molecules — its network was skipped.")
+            continue
+        for mol in mols:
+            node_calc = {}  # node_id -> calc id for this molecule
+            for node in group:
+                geometry_source, parent_id, gate = resolve(node, node_calc)
+                calc = planned_calc_factory(mol, node.config.get("recipe", ""),
+                                            workflow.category, geometry_source, parent_id,
+                                            gate, node.id)
+                node_calc[node.id] = calc.id
+                node_map.setdefault(node.id, []).append(calc.id)
+                calcs.append(calc)
+    if not calcs and not warnings:
+        warnings.append("No calculation nodes are connected to a Molecules source.")
+    return calcs, warnings, node_map
