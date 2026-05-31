@@ -6,6 +6,7 @@ bar at the bottom.
 """
 
 import os
+import sys
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -157,6 +158,16 @@ class App(object):
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        # Make the main tab labels larger/bolder — they're the primary navigation
+        # and otherwise look small next to the in-tab buttons.
+        try:
+            import tkinter.font as tkfont
+            base = tkfont.nametofont("TkDefaultFont").actual("size")
+            ttk.Style(self.root).configure(
+                "TNotebook.Tab", padding=[14, 7],
+                font=("TkDefaultFont", abs(base) + 3, "bold"))
+        except Exception:
+            pass
 
         from orca_studio.ui.molecules_tab import MoleculesTab
         from orca_studio.ui.recipes_tab import RecipesTab
@@ -442,13 +453,58 @@ class App(object):
         return True
 
 
-def main(project_path=None):
-    # type: (Optional[str]) -> None
-    root = tk.Tk()
+def _enable_windows_dpi_awareness():
+    """On Windows, declare the process DPI-aware *before* the Tk window exists.
+
+    Otherwise, on a scaled display (125 % / 150 % …) Windows bitmap-stretches the
+    whole window, while matplotlib's TkAgg backend *also* renders the figure at
+    the Tk scaling factor — so embedded plots get scaled twice and appear drawn
+    at two sizes, one ghosted behind the other. Making the process DPI-aware
+    stops the OS double-scaling so the plot is drawn once, crisply. No-op off
+    Windows (the cluster's X11 path doesn't have this problem)."""
+    if sys.platform != "win32":
+        return
     try:
-        root.tk.call("tk", "scaling", 1.2)
+        import ctypes
+        # PROCESS_SYSTEM_DPI_AWARE = 1 (enough to stop the double-scaling).
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def _apply_ui_scaling(root):
+    """Pick a Tk scaling factor that matplotlib and Tk agree on, so fonts are a
+    sensible size and embedded figures render once at the right size."""
+    try:
+        if sys.platform == "win32":
+            # Now that we're DPI-aware, scale by the real display density. An
+            # 84-dpi reference sits between "too small" (dpi/96) and the
+            # strictly-correct but oversized point size (dpi/72) — comfortable on
+            # a 150 % display (~1.7×). Embedded matplotlib figures are decoupled
+            # from this (their device pixel ratio is pinned to 1.0), so it only
+            # affects widget/font size, not plot rendering.
+            dpi = float(root.winfo_fpixels("1i")) or 96.0
+            scaling = min(2.1, max(1.0, dpi / 84.0))
+            root.tk.call("tk", "scaling", scaling)
+        else:
+            root.tk.call("tk", "scaling", 1.2)
+        # Keep Treeview rows tall enough for the (now scaled) font.
+        import tkinter.font as tkfont
+        fnt = tkfont.nametofont("TkDefaultFont")
+        ttk.Style(root).configure("Treeview",
+                                  rowheight=int(fnt.metrics("linespace") * 1.35) + 2)
     except tk.TclError:
         pass
+
+
+def main(project_path=None):
+    # type: (Optional[str]) -> None
+    _enable_windows_dpi_awareness()
+    root = tk.Tk()
+    _apply_ui_scaling(root)
     App(root, project_path=project_path)
     root.mainloop()
 

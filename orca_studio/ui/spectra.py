@@ -34,6 +34,28 @@ def _load_mpl():
     return Figure, FigureCanvasTkAgg
 
 
+def pin_device_pixel_ratio(canvas):
+    """Stop matplotlib from sizing the figure by the global Tk 'scaling' factor.
+
+    On HiDPI Windows, matplotlib derives the figure's device-pixel-ratio from
+    `tk scaling` (which we set larger for readable fonts), so the figure renders
+    ~1.2–1.5× too big and overflows the window — and a recompute on the next
+    <Configure> makes it grow a moment after opening. Pinning the ratio to 1.0
+    means the figure size is driven purely by the Tk widget size (matplotlib's
+    own resize handler fits it), independent of the UI font scaling.
+
+    We override `_set_device_pixel_ratio` to always apply 1.0: matplotlib's
+    <Configure> handler still recomputes the ratio from `tk scaling` and calls
+    this, but the override forces it back to 1.0 (reassigning the recompute
+    method itself wouldn't help — its binding captured the original)."""
+    try:
+        orig = canvas._set_device_pixel_ratio
+        canvas._set_device_pixel_ratio = lambda ratio, _o=orig: _o(1.0)
+        canvas._set_device_pixel_ratio(1.0)   # apply now
+    except Exception:
+        pass
+
+
 def _mpl_unavailable_window(parent, err):
     top = tk.Toplevel(parent)
     top.title("Plotting unavailable")
@@ -71,8 +93,28 @@ def _crop_whitespace(arr):
     return a[r0:r1 + 1, c0:c1 + 1]
 
 
+def _whiten_to_transparent(arr):
+    """Turn the near-white background into transparent pixels so the structure
+    overlays the spectrum without blanking out the lines behind it."""
+    try:
+        import numpy as np
+    except Exception:
+        return arr
+    if arr is None or arr.ndim != 3:
+        return arr
+    a = arr.astype(float)
+    if a.max() > 1.5:           # 0–255 image → normalise to 0–1
+        a = a / 255.0
+    if a.shape[2] == 3:         # add an alpha channel
+        a = np.dstack([a, np.ones(a.shape[:2])])
+    white = np.all(a[:, :, :3] > 0.92, axis=2)
+    a[white, 3] = 0.0
+    return a
+
+
 def _smiles_to_array(smiles, size=(320, 240), crop=True):
-    """RDKit SMILES -> RGB(A) numpy array for matplotlib imshow, or None."""
+    """RDKit SMILES -> RGBA numpy array for matplotlib imshow, with the white
+    background made transparent, or None."""
     if not smiles:
         return None
     png, err = render_smiles_png(smiles, size=size)
@@ -88,13 +130,19 @@ def _smiles_to_array(smiles, size=(320, 240), crop=True):
             arr = _crop_whitespace(arr)
         except Exception:
             pass
+    try:
+        arr = _whiten_to_transparent(arr)
+    except Exception:
+        pass
     return arr
 
 
-def _place_structure_in_axes(ax, arr, corner="upper right", target_h=110):
-    """Pin a structure image to a corner *inside* the plot axes (not the figure),
-    at a fixed display height, undistorted and clipped to the axes so it can't
-    spill out. `corner` is 'upper right' or 'lower right'."""
+def _place_structure_in_axes(ax, arr, anchor=(0.985, 0.985), box_align=(1.0, 1.0),
+                             target_h=110):
+    """Pin a structure image *inside* the plot axes at a fixed display height,
+    undistorted and clipped to the axes so it can't spill out. `anchor` is the
+    (x, y) position in axes fraction and `box_align` how the image box aligns to
+    it (e.g. (0.5, 1.0) = centred horizontally, top edge on the anchor)."""
     if arr is None:
         return None
     try:
@@ -103,11 +151,7 @@ def _place_structure_in_axes(ax, arr, corner="upper right", target_h=110):
         return None
     zoom = float(target_h) / float(arr.shape[0])
     oi = OffsetImage(arr, zoom=zoom)
-    if corner == "lower right":
-        xy, box_align = (0.985, 0.03), (1.0, 0.0)
-    else:
-        xy, box_align = (0.985, 0.985), (1.0, 1.0)
-    ab = AnnotationBbox(oi, xy, xycoords="axes fraction", box_alignment=box_align,
+    ab = AnnotationBbox(oi, anchor, xycoords="axes fraction", box_alignment=box_align,
                         frameon=False, pad=0.0, zorder=5)
     ax.add_artist(ab)
     try:
@@ -124,7 +168,9 @@ class IRSpectrumWindow(tk.Toplevel):
         # type: (tk.Misc, str, List[float], List[float], Optional[List[float]], Optional[str]) -> None
         super().__init__(parent)
         self.title("IR spectrum — {}".format(title))
-        self.geometry("880x600")
+        self.geometry("1000x680")
+        self._mol_arr = None      # cached structure image (rendered once)
+        self._resize_after = None
         try:
             Figure, FigureCanvasTkAgg = _load_mpl()
         except Exception as e:
@@ -179,16 +225,27 @@ class IRSpectrumWindow(tk.Toplevel):
             side=tk.TOP, anchor=tk.W, padx=10, pady=(4, 0))
 
         self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        pin_device_pixel_ratio(self.canvas)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         self._peak_disp = []      # (display_x, center, intensity) for hover
         self._hover_artists = []
         self._ymax = 1.0
         self._imax = max(self._intens) or 1.0
-        self._redraw()
+        # Populate after the window is realised; matplotlib's own resize handler
+        # then keeps the figure fitted to the window (device ratio pinned above).
+        self.after(0, self._first_draw)
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         make_modal(self, parent)
+
+    def _first_draw(self):
+        self.update_idletasks()
+        self._redraw()
 
     def _toggle_mode(self):
         self.mode_var.set("transmission" if self.mode_var.get() == "absorbance" else "absorbance")
@@ -231,25 +288,27 @@ class IRSpectrumWindow(tk.Toplevel):
         ax.set_xlim(hi, lo)  # IR convention: high wavenumber on the left
         ax.set_xlabel("wavenumber (cm⁻¹)")
         ax.set_title("Simulated IR spectrum")
-        try:
-            self.fig.tight_layout()
-        except Exception:
-            pass
 
-        # Structure pinned inside the axes; flip to the bottom corner in
-        # transmission mode (peaks dip down, so the top is occupied there).
-        arr = _smiles_to_array(self._smiles, size=(260, 200))
-        corner = "lower right" if transmission else "upper right"
-        _place_structure_in_axes(ax, arr, corner=corner)
+        # Structure pinned over the ~2000 cm⁻¹ window — usually free of strong
+        # bands (between the X–H stretches and the fingerprint region), so it
+        # rarely covers a peak. Anchored top-centre on that wavenumber.
+        if self._mol_arr is None:
+            self._mol_arr = _smiles_to_array(self._smiles, size=(260, 200))
+        if hi != lo:
+            frac = (hi - 2000.0) / (hi - lo)        # 0 = left (hi), 1 = right (lo)
+            frac = min(0.82, max(0.18, frac))
+        else:
+            frac = 0.5
+        _place_structure_in_axes(ax, self._mol_arr, anchor=(frac, 0.98),
+                                 box_align=(0.5, 1.0), target_h=55)
 
         self.canvas.draw()
         self._cache_peaks()
 
     def _cache_peaks(self):
-        self._peak_disp = []
-        for c, it in zip(self._centers, self._intens):
-            dx, _ = self.ax.transData.transform((c, 0.0))
-            self._peak_disp.append((dx, c, it))
+        # Kept for back-compat; hover now works in data coordinates (below), so
+        # it's robust to HiDPI device-pixel scaling.
+        self._peak_disp = [(c, c, it) for c, it in zip(self._centers, self._intens)]
 
     def _clear_hover(self):
         for a in self._hover_artists:
@@ -260,13 +319,16 @@ class IRSpectrumWindow(tk.Toplevel):
         self._hover_artists = []
 
     def _on_motion(self, event):
-        if event.inaxes is not self.ax or event.x is None:
+        if event.inaxes is not self.ax or event.xdata is None:
             if self._hover_artists:
                 self._clear_hover(); self.canvas.draw_idle()
             return
-        # Collect peaks within a small window of the cursor (~1/6 of the old
-        # 45 px reach, so it only grabs the peak(s) right under the pointer).
-        near = [(c, it) for (dx, c, it) in self._peak_disp if abs(dx - event.x) <= 7.5]
+        # Grab the peak(s) right under the pointer, comparing in data units
+        # (cm⁻¹) so it's independent of the display's pixel scaling.
+        x0, x1 = self.ax.get_xlim()
+        tol = abs(x1 - x0) * 0.01 or 5.0
+        near = [(c, it) for c, it in zip(self._centers, self._intens)
+                if abs(c - event.xdata) <= tol]
         self._clear_hover()
         if not near:
             self.canvas.draw_idle()
@@ -397,7 +459,8 @@ class NMRSpectrumWindow(tk.Toplevel):
     def __init__(self, parent, entries, nucleus_label, reference):
         super().__init__(parent)
         self.title("NMR spectrum — {}".format(nucleus_label))
-        self.geometry("1120x700")
+        self.geometry("1200x760")
+        self._resize_after = None
         try:
             Figure, FigureCanvasTkAgg = _load_mpl()
         except Exception as e:
@@ -410,8 +473,11 @@ class NMRSpectrumWindow(tk.Toplevel):
             shifts = [S.nmr_shift(s, reference) for s in e["shieldings"]]
             if not shifts:
                 continue
+            name = e["name"]
             self.mols.append({
-                "name": e["name"],
+                "name": name,
+                # short label for the cramped thumbnail column (molecule part only)
+                "short": name.split(" / ")[0][:14],
                 "color": _COLORS[idx % len(_COLORS)],
                 "shifts": shifts,
                 "img": _smiles_to_array(e.get("smiles"), size=(300, 230)),
@@ -451,16 +517,26 @@ class NMRSpectrumWindow(tk.Toplevel):
         ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
 
         self.fig = Figure(figsize=(11.0, 6.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        pin_device_pixel_ratio(self.canvas)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        self._peak_points = []
         self._thumb_axes = []
         self._annot = None
         self._active = None
-        self._redraw()
+        # Populate once realised; matplotlib's resize keeps it fitted (device
+        # ratio pinned above).
+        self.after(0, self._first_draw)
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         make_modal(self, parent)
+
+    def _first_draw(self):
+        self.update_idletasks()
+        self._redraw()
 
     def _auto_range_vals(self):
         all_shifts = [s for m in self.mols for s in m["shifts"]]
@@ -494,21 +570,24 @@ class NMRSpectrumWindow(tk.Toplevel):
 
         self.fig.clear()
         n_mol = len(self.mols)
-        gs = self.fig.add_gridspec(max(1, n_mol), 5)
-        self.ax = self.fig.add_subplot(gs[:, 0:4])
+        # Thumbnails get a narrow column (~11 % of the width) so the structures
+        # stay small and the spectrum keeps the room.
+        gs = self.fig.add_gridspec(max(1, n_mol), 2, width_ratios=[8, 1])
+        self.ax = self.fig.add_subplot(gs[:, 0])
         self._thumb_axes = []
 
+        ymax = 0.0
         for m in self.mols:
             xs, ys = S.broaden(m["shifts"], None, grid_lo, grid_hi, n=1600, fwhm=fwhm)
             self.ax.plot(xs, ys, color=m["color"], lw=1.4)
-            for sh in m["shifts"]:
-                self.ax.vlines(sh, 0, 1.0, color=m["color"], lw=0.8, alpha=0.35)
+            if ys:
+                ymax = max(ymax, max(ys))
 
         xlabel = ("chemical shift δ (ppm)" if self.reference is not None
                   else "isotropic shielding σ (ppm)")
         # NMR convention: high shift / low shielding on the left (axis reversed).
         self.ax.set_xlim(view_hi, view_lo)
-        self.ax.set_ylim(0, 1.18)
+        self.ax.set_ylim(0, (ymax or 1.0) * 1.12)   # fit the tallest peak
         self.ax.set_xlabel(xlabel)
         self.ax.set_ylabel("intensity (a.u.)")
         self.ax.set_title("Simulated {} NMR".format(self.nucleus_label))
@@ -516,48 +595,41 @@ class NMRSpectrumWindow(tk.Toplevel):
         # and it otherwise overlaps the leftmost peaks.
 
         for mi, m in enumerate(self.mols):
-            tax = self.fig.add_subplot(gs[mi, 4])
+            tax = self.fig.add_subplot(gs[mi, 1])
             if m["img"] is not None:
                 tax.imshow(m["img"])
             else:
-                tax.text(0.5, 0.5, "(no structure)", ha="center", va="center", fontsize=8)
+                tax.text(0.5, 0.5, "(no structure)", ha="center", va="center", fontsize=7)
             tax.set_xticks([]); tax.set_yticks([])
-            tax.set_title(m["name"], fontsize=8, color=m["color"])
+            tax.set_title(m["short"], fontsize=7, color=m["color"])
             for sp in tax.spines.values():
                 sp.set_edgecolor(m["color"]); sp.set_linewidth(1.0)
             self._thumb_axes.append(tax)
 
-        try:
-            self.fig.tight_layout()
-        except Exception:
-            pass
         self.canvas.draw()
-        self._cache_peak_points()
         # reflect the active x-range in the entry boxes
         x0, x1 = self.ax.get_xlim()
         if self._user_xlim is None:
             self.xmin_var.set("{:.2f}".format(min(x0, x1)))
             self.xmax_var.set("{:.2f}".format(max(x0, x1)))
 
-    def _cache_peak_points(self):
-        self._peak_points = []
-        for mi, m in enumerate(self.mols):
-            for sh in m["shifts"]:
-                dx, dy = self.ax.transData.transform((sh, 0.5))
-                self._peak_points.append((dx, dy, mi))
-
     def _on_motion(self, event):
-        if event.inaxes is not self.ax or event.x is None:
+        if event.inaxes is not self.ax or event.xdata is None:
             self._set_active(None)
             return
+        # Work in data units (ppm) so it's symmetric about each peak and
+        # independent of the display's pixel scaling.
+        x0, x1 = self.ax.get_xlim()
+        tol = abs(x1 - x0) * 0.025 or 0.5
         best = None
         best_d = 1e9
-        for dx, dy, mi in self._peak_points:
-            d = abs(dx - event.x)
-            if d < best_d:
-                best_d = d
-                best = mi
-        self._set_active(best if best_d <= 18 else None)
+        for mi, m in enumerate(self.mols):
+            for sh in m["shifts"]:
+                d = abs(sh - event.xdata)
+                if d < best_d:
+                    best_d = d
+                    best = mi
+        self._set_active(best if best_d <= tol else None)
 
     def _set_active(self, mi):
         if mi == self._active:
@@ -567,7 +639,7 @@ class NMRSpectrumWindow(tk.Toplevel):
             active = (j == mi)
             for sp in tax.spines.values():
                 sp.set_linewidth(3.0 if active else 1.0)
-            tax.set_title(self.mols[j]["name"], fontsize=(10 if active else 8),
+            tax.set_title(self.mols[j]["short"], fontsize=(8 if active else 7),
                           fontweight=("bold" if active else "normal"),
                           color=self.mols[j]["color"])
         if self._annot is not None:

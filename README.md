@@ -1,6 +1,6 @@
 # ORCA Studio
 
-A desktop GUI for building, launching, and monitoring [ORCA](https://www.faccts.de/orca/) quantum-chemistry calculations on a SLURM cluster — from a SMILES string to a submitted job to a plotted IR/NMR spectrum, without leaving the window.
+A graphical **workbench** (front-end) for building, launching, and monitoring [ORCA](https://www.faccts.de/orca/) quantum-chemistry calculations on a SLURM cluster — from a SMILES string to a submitted job to a plotted IR/NMR spectrum, without leaving the window. It doesn't do the chemistry itself; it drives ORCA and SLURM and visualises their output.
 
 <!-- TODO: add a screenshot of the running app as the first visual.
      Suggested: the Calculations tab mid-run, or the Molecules tab showing a
@@ -131,14 +131,16 @@ Each node is a step; **green ports carry a geometry, orange ports carry results*
 | Connect | Drag from an output port onto an input port — or drop on empty space to pick + connect a new node (Blender-style search), or select two nodes and press **J** |
 | Move | Drag a node (drags the whole selection if several are selected) |
 | Select | Click; **Ctrl+click** to multi-select; **drag a box** in empty space; **Ctrl+A** for all |
-| Pan | Middle-drag or right-drag the canvas |
+| Navigate | **Scroll / two-finger swipe** pans (Shift = horizontal); **Ctrl+scroll / pinch** zooms; **arrow keys** pan; **+/−** zoom; **0** resets the view; middle/right-drag also pans |
 | Context menu | **Right-click** a node/edge/empty space (connect, disconnect, delete, add-here) |
 | Delete | Select and press **Delete** |
 
 ### Running it
 
-- **Run pipeline** expands the graph across your molecules and runs it live: each step builds and launches as soon as its input geometry is ready, conditions are evaluated the moment their feeding job finishes, and nodes recolour by state (grey = waiting, blue = running, green = done, red = error, purple = skipped, orange = interrupted). It works the same on the cluster (`sbatch`) and on a PC (local ORCA).
+- **Run pipeline** expands the graph across your molecules and runs it live: each step builds and launches as soon as its input geometry is ready, conditions are evaluated the moment their feeding job finishes, and nodes recolour by state and show a live **progress caption** (e.g. *running 2/3 → done 3/3*). Colours: grey = waiting, blue = running, green = done, red = error, purple = skipped, orange = interrupted. It works the same on the cluster (`sbatch`) and on a PC (local ORCA).
+- **Run just one pipeline.** With several independent networks on the canvas, **select any node** in one (or box-select it) before clicking Run pipeline, and only that network runs. With nothing selected, all networks run.
 - **Generate only** creates the planned calculations and jumps to the Calculations tab without launching, in case you want to review or edit them first.
+- **Inspect from the graph.** Select a finished calc node and the **Node settings** panel lists its results with one-click launchers — IR / NMR spectrum, the live progress plot, the optimised structure in your 3D viewer, and the raw `.out`.
 
 ### Resuming, independent networks, and reports
 
@@ -154,6 +156,7 @@ Each node is a step; **green ports carry a geometry, orange ports carry results*
 Once installed (see [Installation → On a Windows PC](#on-a-windows-pc)), the same app runs on a normal desktop; the cluster-only actions adapt automatically:
 
 - **Run locally** replaces Submit when `sbatch` isn't found: point the app at your local `orca` executable once (remembered in `~/.orca_studio.json`) and it runs the built jobs through a serial queue — one at a time by default — streaming each `.out` so the live plots, reports, and the Workflow pipeline all work just as they do on the cluster. The button label and behaviour switch on their own based on whether `sbatch`/`squeue` are present.
+- **Cores are capped to your CPU.** When building for a local run, a recipe's `%pal nprocs` is clamped to the number of cores the machine reports (falling back to 2), so a recipe that asks for 8 won't oversubscribe a 4-core laptop. On the cluster the recipe's value is used as-is.
 - **Avogadro** opens locally: double-click a molecule, point it at your `Avogadro2.exe` once, and it's remembered in `~/.orca_studio.json`.
 - **Coordinate generation, recipes, spectra, and reports** all work the same.
 

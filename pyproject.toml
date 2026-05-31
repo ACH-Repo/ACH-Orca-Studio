@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orca_studio"
-version = "1.1.0"
+version = "1.1.1"
 description = "Desktop GUI for building, launching, monitoring, and analysing ORCA quantum-chemistry calculations on SLURM clusters"
 requires-python = ">=3.9"
 dependencies = [

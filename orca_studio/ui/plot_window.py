@@ -17,15 +17,29 @@ from tkinter import ttk
 from orca_studio.core import orca_parser
 
 
+def _pin_device_pixel_ratio(canvas):
+    """Pin matplotlib's device pixel ratio to 1.0 so the figure is sized by the
+    Tk widget, not the global tk scaling (which we raise for readable fonts).
+    Without this the embedded figure renders too big on HiDPI Windows and
+    overflows the window. See spectra.pin_device_pixel_ratio for the details."""
+    try:
+        orig = canvas._set_device_pixel_ratio
+        canvas._set_device_pixel_ratio = lambda ratio, _o=orig: _o(1.0)
+        canvas._set_device_pixel_ratio(1.0)
+    except Exception:
+        pass
+
+
 class LivePlotWindow(tk.Toplevel):
     def __init__(self, parent, title, out_path, poll_ms=2000):
         super().__init__(parent)
         self.title("Progress — {}".format(title))
-        self.geometry("780x640")
+        self.geometry("900x720")
         self.out_path = out_path
         self.poll_ms = poll_ms
         self._after_id = None
         self._closed = False
+        self._resize_after = None
 
         try:
             import matplotlib
@@ -50,9 +64,14 @@ class LivePlotWindow(tk.Toplevel):
             side=tk.TOP, fill=tk.X, padx=8)
 
         self.fig = Figure(figsize=(7.2, 5.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
         self.ax_energy = self.fig.add_subplot(211)
         self.ax_conv = self.fig.add_subplot(212)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        _pin_device_pixel_ratio(self.canvas)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         btns = ttk.Frame(self)
@@ -64,6 +83,14 @@ class LivePlotWindow(tk.Toplevel):
         ttk.Button(btns, text="Close", command=self._on_close).pack(side=tk.RIGHT)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Populate once realised; matplotlib's own resize keeps the figure
+        # fitted to the window (device ratio pinned above).
+        self.after(0, self._first_draw)
+
+    def _first_draw(self):
+        if self._closed:
+            return
+        self.update_idletasks()
         self._update_once()
         self._schedule()
 
@@ -92,6 +119,7 @@ class LivePlotWindow(tk.Toplevel):
             self.status_var.set("Waiting for the output file to appear...")
             return
         parsed = orca_parser.parse_orca_output(text)
+        self._last_parsed = parsed
         self.status_var.set(orca_parser.short_status(parsed))
         self._redraw(parsed)
         # Stop auto-refreshing once the job is clearly done.
@@ -137,10 +165,6 @@ class LivePlotWindow(tk.Toplevel):
         else:
             self.ax_conv.set_title("(no gradient data — single point, or not yet at first step)")
 
-        try:
-            self.fig.tight_layout()
-        except Exception:
-            pass
         self.canvas.draw_idle()
 
     def _on_close(self):

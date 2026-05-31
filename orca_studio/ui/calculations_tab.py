@@ -310,21 +310,30 @@ class CalculationsTab(ttk.Frame):
     def refresh(self):
         self.mol_combo["values"] = [m.filename for m in self.app.project.molecules]
         self.recipe_combo["values"] = [r.name for r in self.app.recipes]
-        sel = set(self.tree.selection())
-        self.tree.delete(*self.tree.get_children())
-        for c in self.app.project.planned_calcs:
+        # Update rows *in place* rather than delete+reinsert: a full rebuild every
+        # poll tick would wipe the current selection and the shift-click anchor,
+        # so range-selecting while a pipeline runs would keep breaking.
+        want_ids = [c.id for c in self.app.project.planned_calcs]
+        want_set = set(want_ids)
+        for iid in self.tree.get_children(""):
+            if iid not in want_set:
+                self.tree.delete(iid)
+        for idx, c in enumerate(self.app.project.planned_calcs):
+            values = self._row_values(c)
+            tag = self._row_tag(c)
             if self.tree.exists(c.id):
-                continue  # defensive: skip a duplicate id rather than crash
-            self.tree.insert("", tk.END, iid=c.id, values=self._row_values(c),
-                             tags=(self._row_tag(c),))
-        # restore selection
-        keep = [i for i in sel if self.tree.exists(i)]
-        if keep:
-            self.tree.selection_set(keep)
-        elif self._selected_id and self.tree.exists(self._selected_id):
-            self.tree.selection_set(self._selected_id)
-        else:
-            self._clear_editor()
+                self.tree.item(c.id, values=values, tags=(tag,))
+                if self.tree.index(c.id) != idx:
+                    self.tree.move(c.id, "", idx)
+            else:
+                self.tree.insert("", idx, iid=c.id, values=values, tags=(tag,))
+        # In-place updates preserve the selection automatically; only refresh the
+        # editor when nothing is selected.
+        if not self.tree.selection():
+            if self._selected_id and self.tree.exists(self._selected_id):
+                self.tree.selection_set(self._selected_id)
+            else:
+                self._clear_editor()
 
     def _row_values(self, calc):
         mol = self.app.project.molecule_by_filename(calc.molecule_filename)
@@ -618,6 +627,63 @@ class CalculationsTab(ttk.Frame):
             return "(unresolved)"
         return "/".join(["calcs", mol.filename, calc.category] + list(recipe.path_parts()))
 
+    def _target_key(self, calc):
+        """A key for the directory a calc builds into: two calcs with the same
+        key would write to (and clobber) the same folder — i.e. they are the
+        same calculation."""
+        mol = self.app.project.molecule_by_filename(calc.molecule_filename)
+        recipe = self.app.get_recipe(calc.recipe_name)
+        d = self._target_dir(calc, mol, recipe)
+        if d == "(unresolved)":
+            return ("u", calc.molecule_filename, calc.category, calc.recipe_name)
+        return d
+
+    def _pick_keeper(self, members):
+        """Of several calcs that build into the same dir, keep the most
+        progressed one (a finished result beats a planned stub)."""
+        def rank(c):
+            _, _, done, active = self._own_state(c)
+            if done:
+                return 5
+            if active:
+                return 4
+            if c.job_id:
+                return 3
+            if c.exported:
+                return 2
+            if getattr(c, "origin_node", None):
+                return 1
+            return 0
+        return max(members, key=rank)
+
+    def dedupe_by_target(self):
+        """Collapse planned calcs that build into the same directory into one
+        row (keeping the most-progressed), rewiring any parent_id / gate.source
+        references onto the survivor. Returns how many rows were removed."""
+        groups = {}
+        for c in self.app.project.planned_calcs:
+            groups.setdefault(self._target_key(c), []).append(c)
+        remap = {}   # removed id -> survivor id
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            keeper = self._pick_keeper(members)
+            for c in members:
+                if c.id != keeper.id:
+                    remap[c.id] = keeper.id
+        if not remap:
+            return 0
+        for c in self.app.project.planned_calcs:
+            if c.parent_id in remap:
+                c.parent_id = remap[c.parent_id]
+            if c.gate and c.gate.get("source") in remap:
+                c.gate["source"] = remap[c.gate["source"]]
+        self.app.project.planned_calcs = [c for c in self.app.project.planned_calcs
+                                          if c.id not in remap]
+        self._pipeline_ids = {remap.get(i, i) for i in self._pipeline_ids}
+        self.app.mark_dirty()
+        return len(remap)
+
     def _update_info(self, calc):
         mol = self.app.project.molecule_by_filename(calc.molecule_filename)
         recipe = self.app.get_recipe(calc.recipe_name)
@@ -890,6 +956,16 @@ class CalculationsTab(ttk.Frame):
 
         atoms = self._resolve_geometry(calc, mol)
         inp_text = inputs_mod.render_inp(recipe, atoms, mol.charge, mol.multiplicity)
+        # When running on this machine (not a cluster), don't let a recipe ask for
+        # more cores than the CPU has — otherwise a first local job over-subscribes
+        # and crawls. Clamp %pal nprocs to the detected core count.
+        if self._local_mode:
+            avail = inputs_mod.detect_cores()
+            want = inputs_mod.parse_cores(inp_text)
+            if want > avail:
+                inp_text = inputs_mod.set_cores(inp_text, avail)
+                self._log("Capped {} to {} core(s) (this machine has {}).".format(
+                    self._short(calc), avail, avail))
         inp_filename = mol.filename + ".inp"
         with open(os.path.join(target_dir_abs, inp_filename), "w", encoding="utf-8") as f:
             f.write(inp_text)

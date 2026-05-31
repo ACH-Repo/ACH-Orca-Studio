@@ -184,6 +184,27 @@ def parse_cores(inp_text):
     return 1
 
 
+def detect_cores():
+    # type: () -> int
+    """Number of CPU cores this machine reports, for sizing local jobs. Falls
+    back to 2 if the OS won't say (every modern CPU has at least two)."""
+    try:
+        n = os.cpu_count()
+    except Exception:
+        n = None
+    return n if n and n >= 1 else 2
+
+
+def set_cores(inp_text, n):
+    # type: (str, int) -> str
+    """Rewrite the `%pal nprocs N` value in an input. If the input has no %pal
+    block, it's returned unchanged (ORCA then runs serial, which is fine)."""
+    n = max(1, int(n))
+    if not CORES_RE.search(inp_text):
+        return inp_text
+    return CORES_RE.sub("%pal nprocs {}".format(n), inp_text, count=1)
+
+
 XYZ_BLOCK_RE = re.compile(
     r"\*\s*xyz\s*([+-]?\d+)\s+(\d+)\s+([\s\S]*?)\*",
     re.IGNORECASE,

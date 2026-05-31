@@ -12,6 +12,7 @@ conditional execution comes in a later milestone — for now Generate does a
 static expansion of a condition-free graph.
 """
 
+import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
@@ -21,8 +22,9 @@ from orca_studio.core.project import PlannedCalc, new_calc_id
 from orca_studio.ui.tooltip import tip
 
 
-NODE_W = 158
+NODE_W = 176
 TITLE_H = 22
+SUMMARY_H = 20   # band under the title for the config summary (recipe / mode / …)
 PORT_H = 20
 PORT_R = 5
 
@@ -37,6 +39,7 @@ _STATE_COLOR = {
     "done": "#2e7d32",
     "error": "#c62828",
     "skipped": "#7e57c2",
+    "interrupted": "#ef6c00",
 }
 
 
@@ -53,9 +56,26 @@ class WorkflowTab(ttk.Frame):
         self._mode = None          # "drag" | "wire" | "pan" | "box" | None
         self._drag = None          # transient drag state
         self._add_offset = 0
+        # View transform: world (node.x/y) -> screen = world*zoom + (ox, oy).
+        self._zoom = 1.0
+        self._ox = 0.0
+        self._oy = 0.0
+        self._pan = None           # transient middle/right pan state
         # Live execution: node_id -> [calc id, ...] from the last "Run pipeline".
         self._node_calcs = {}
         self._build()
+
+    # ---- world <-> screen transform (for zoom + pan) ----
+
+    def _w2s(self, wx, wy):
+        return wx * self._zoom + self._ox, wy * self._zoom + self._oy
+
+    def _s2w(self, sx, sy):
+        return (sx - self._ox) / self._zoom, (sy - self._oy) / self._zoom
+
+    def _fs(self, pt):
+        """Scale a font point size by the current zoom (min 5 to stay legible)."""
+        return max(5, int(round(pt * self._zoom)))
 
     # ------------------------------------------------------------------ UI
 
@@ -80,7 +100,9 @@ class WorkflowTab(ttk.Frame):
                    "builds and launches as its input geometry becomes ready, and a Condition node "
                    "decides live whether its downstream branch runs (e.g. only do NMR if the "
                    "Frequencies job found no imaginary modes). Watch progress here and on the "
-                   "Calculations tab.")
+                   "Calculations tab.\n\nSelect a node (or several) first to run ONLY that "
+                   "pipeline — handy when the canvas holds several independent networks. With "
+                   "nothing selected, every network runs.")
         tip(b_gen, "Expand the pipeline into planned calculations (with geometry parent-links and "
                    "conditional gates) and jump to the Calculations tab — but don't launch them. "
                    "Use this if you want to review or edit before running.")
@@ -88,8 +110,9 @@ class WorkflowTab(ttk.Frame):
         ttk.Label(self, text="Drag a node to move · drag an output port onto an input to wire (drop "
                   "on empty space to pick a new node) · drag empty space to box-select · Ctrl+click "
                   "to multi-select · Ctrl+A all · J connects two selected nodes · F3 adds a node · "
-                  "middle/right-drag to pan · Delete removes.",
-                  foreground="#666", wraplength=900, justify=tk.LEFT).pack(
+                  "scroll to zoom · middle/right-drag to pan · Delete removes. "
+                  "Select a node then Run pipeline to run just that network.",
+                  foreground="#666", wraplength=1100, justify=tk.LEFT).pack(
                       side=tk.TOP, anchor=tk.W, padx=8, pady=2)
 
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -104,12 +127,36 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<B1-Motion>", self._on_motion)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         # Pan on middle-drag (left-drag in empty space is box-select).
-        self.canvas.bind("<Button-2>", lambda e: self.canvas.scan_mark(e.x, e.y))
-        self.canvas.bind("<B2-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        self.canvas.bind("<Button-2>", self._pan_start)
+        self.canvas.bind("<B2-Motion>", self._pan_move)
         # Right button: drag pans, click (no drag) opens the context menu.
         self.canvas.bind("<Button-3>", self._on_rpress)
         self.canvas.bind("<B3-Motion>", self._on_rmotion)
         self.canvas.bind("<ButtonRelease-3>", self._on_rrelease)
+        # Trackpad/wheel navigation:
+        #   two-finger swipe (plain wheel)  -> pan vertically
+        #   Shift + wheel                   -> pan horizontally
+        #   Ctrl + wheel / pinch            -> zoom (centred on the cursor)
+        self.canvas.bind("<MouseWheel>", self._wheel_pan_v)            # Windows / macOS
+        self.canvas.bind("<Shift-MouseWheel>", self._wheel_pan_h)
+        self.canvas.bind("<Control-MouseWheel>", self._wheel_zoom)
+        # X11 sends wheel as buttons 4/5 (with modifier prefixes).
+        self.canvas.bind("<Button-4>", lambda e: self._pan_by(0, 60))
+        self.canvas.bind("<Button-5>", lambda e: self._pan_by(0, -60))
+        self.canvas.bind("<Shift-Button-4>", lambda e: self._pan_by(60, 0))
+        self.canvas.bind("<Shift-Button-5>", lambda e: self._pan_by(-60, 0))
+        self.canvas.bind("<Control-Button-4>", lambda e: self._zoom_at(e.x, e.y, 1.1))
+        self.canvas.bind("<Control-Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / 1.1))
+        # Arrow keys pan; +/- zoom; 0 resets the view.
+        self.canvas.bind("<Up>", lambda e: self._pan_by(0, 60))
+        self.canvas.bind("<Down>", lambda e: self._pan_by(0, -60))
+        self.canvas.bind("<Left>", lambda e: self._pan_by(60, 0))
+        self.canvas.bind("<Right>", lambda e: self._pan_by(-60, 0))
+        for k in ("<plus>", "<KP_Add>", "<equal>"):
+            self.canvas.bind(k, lambda e: self._zoom_center(1.1))
+        for k in ("<minus>", "<KP_Subtract>"):
+            self.canvas.bind(k, lambda e: self._zoom_center(1 / 1.1))
+        self.canvas.bind("<Key-0>", lambda e: self._reset_view())
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
         self.canvas.bind("<Delete>", lambda e: self._delete_selected())
         self.canvas.bind("<Control-a>", self._on_select_all)
@@ -192,9 +239,104 @@ class WorkflowTab(ttk.Frame):
             ent.pack(anchor=tk.W, padx=8, pady=2)
             var.trace_add("write", lambda *_a, n=node, v=var: self._set_cfg(n, "name", v.get()))
 
+        if node.type in wf_mod.CALC_NODE_TYPES:
+            self._build_results_section(node)
+
         ttk.Separator(self.cfg_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=6)
         ttk.Button(self.cfg_frame, text="Delete node",
                    command=lambda nid=node.id: self._delete_node(nid)).pack(anchor=tk.W, padx=8)
+
+    def _build_results_section(self, node):
+        """List this calc node's expanded calculations with one-click launchers
+        for the relevant viewers (IR / NMR spectrum, live progress plot, output),
+        so you can inspect results straight from the graph."""
+        ids = self._node_calcs.get(node.id)
+        ct = getattr(self.app, "calculations_tab", None)
+        if not ids or ct is None:
+            return
+        calcs = [self.app.project.calc_by_id(c) for c in ids]
+        calcs = [c for c in calcs if c is not None]
+        if not calcs:
+            return
+        ttk.Separator(self.cfg_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(self.cfg_frame, text="Results", font=("TkDefaultFont", 9, "bold")).pack(
+            anchor=tk.W, padx=8)
+        ttk.Label(self.cfg_frame, text="Open a viewer for a finished calculation:",
+                  foreground="#777", wraplength=210).pack(anchor=tk.W, padx=8)
+        shown = calcs[:12]
+        for calc in shown:
+            recipe = self.app.get_recipe(calc.recipe_name)
+            ctype = (recipe.calctype if recipe else "").upper()
+            label, tag, done, _active = ct._own_state(calc)
+            colour = _STATE_COLOR.get(
+                {"done": "done", "error": "error", "interrupted": "interrupted",
+                 "running": "running"}.get(tag, "waiting"), "#444")
+            ttk.Label(self.cfg_frame, text="• {} — {}".format(calc.molecule_filename, label),
+                      foreground=colour, wraplength=210, justify=tk.LEFT).pack(
+                          anchor=tk.W, padx=10)
+            btns = ttk.Frame(self.cfg_frame)
+            btns.pack(anchor=tk.W, padx=18, pady=(0, 3))
+            if ctype == "FREQ" and done:
+                b = ttk.Button(btns, text="IR", width=4, command=lambda c=calc: ct._plot_ir(c))
+                b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated IR spectrum.")
+            if ctype == "NMR" and done:
+                b = ttk.Button(btns, text="NMR", width=5, command=lambda c=calc: ct._plot_nmr([c]))
+                b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated NMR spectrum.")
+            if calc.job_id:
+                b = ttk.Button(btns, text="Live", width=5, command=lambda c=calc: ct._open_live(c))
+                b.pack(side=tk.LEFT, padx=1)
+                tip(b, "Open the live SCF / geometry-convergence plot.")
+            if done:
+                b = ttk.Button(btns, text="Struct", width=7,
+                               command=lambda c=calc: self._open_structure(c))
+                b.pack(side=tk.LEFT, padx=1)
+                tip(b, "Open the (optimised) geometry in your external 3D viewer.")
+                b2 = ttk.Button(btns, text="Out", width=4,
+                                command=lambda c=calc: self._open_output(c))
+                b2.pack(side=tk.LEFT, padx=1); tip(b2, "Open the ORCA .out file.")
+        if len(calcs) > len(shown):
+            ttk.Label(self.cfg_frame, text="… and {} more (see the Calculations tab)."
+                      .format(len(calcs) - len(shown)), foreground="#888").pack(anchor=tk.W, padx=10)
+
+    def _open_output(self, calc):
+        ct = self.app.calculations_tab
+        path = ct._out_path(calc)
+        if not path or not os.path.isfile(path):
+            self.app.set_status("No output file for this calculation yet.")
+            return
+        self._os_open(path)
+
+    def _open_structure(self, calc):
+        """Open the calc's geometry in the user's external 3D viewer (the .xyz the
+        optimisation wrote, else the molecule's input .xyz)."""
+        root = self.app.project.root()
+        mol = self.app.project.molecule_by_filename(calc.molecule_filename)
+        path = None
+        if calc.rundir:
+            cand = os.path.join(root, calc.rundir, calc.molecule_filename + ".xyz")
+            if os.path.isfile(cand):
+                path = cand
+        if path is None and mol is not None and mol.xyz_path:
+            p = mol.xyz_path if os.path.isabs(mol.xyz_path) else os.path.join(root, mol.xyz_path)
+            if os.path.isfile(p):
+                path = p
+        if path is None:
+            self.app.set_status("No geometry file found for this calculation yet.")
+            return
+        self._os_open(path)
+
+    def _os_open(self, path):
+        import platform
+        import subprocess
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            self.app.set_status("Could not open {}: {}".format(os.path.basename(path), e))
 
     def _set_cfg(self, node, key, value):
         node.config[key] = value
@@ -220,13 +362,13 @@ class WorkflowTab(ttk.Frame):
 
     def _node_height(self, node):
         n = max(len(node.inputs()), len(node.outputs()), 1)
-        return TITLE_H + n * PORT_H + 8
+        return TITLE_H + SUMMARY_H + n * PORT_H + 8
 
     def _port_xy(self, node, port_name, is_input):
         ports = node.inputs() if is_input else node.outputs()
         for i, (name, _t) in enumerate(ports):
             if name == port_name:
-                y = node.y + TITLE_H + i * PORT_H + PORT_H / 2
+                y = node.y + TITLE_H + SUMMARY_H + i * PORT_H + PORT_H / 2
                 x = node.x if is_input else node.x + NODE_W
                 return x, y
         return None
@@ -241,20 +383,24 @@ class WorkflowTab(ttk.Frame):
             self._draw_node(n)
         # transient wire while connecting
         if self._mode == "wire" and self._drag and self._drag.get("temp"):
-            x0, y0 = self._drag["from_xy"]
-            x1, y1 = self._drag["cur"]
+            x0, y0 = self._w2s(*self._drag["from_xy"])
+            x1, y1 = self._w2s(*self._drag["cur"])
             self.canvas.create_line(x0, y0, x1, y1, fill="#888", width=2, dash=(3, 2),
                                     tags=("temp",))
         # transient rubber-band rectangle while box-selecting
         if self._mode == "box" and self._drag:
-            x0, y0 = self._drag["x0"], self._drag["y0"]
-            x1, y1 = self._drag["cur"]
+            x0, y0 = self._w2s(self._drag["x0"], self._drag["y0"])
+            x1, y1 = self._w2s(*self._drag["cur"])
             self.canvas.create_rectangle(x0, y0, x1, y1, outline=_SEL, width=1,
                                          dash=(4, 3), tags=("temp",))
 
     def _draw_node(self, node):
-        x, y = node.x, node.y
-        h = self._node_height(node)
+        z = self._zoom
+        x, y = self._w2s(node.x, node.y)             # screen top-left
+        w = NODE_W * z
+        h = self._node_height(node) * z
+        th = TITLE_H * z
+        sh = SUMMARY_H * z
         selected = node.id in self._sel_nodes
         ntag = "N:" + node.id
         live = self._node_live_state(node)
@@ -264,33 +410,48 @@ class WorkflowTab(ttk.Frame):
             outline, width = _STATE_COLOR.get(live, "#7a8a99"), 3
         else:
             outline, width = "#7a8a99", 1
-        self.canvas.create_rectangle(x, y, x + NODE_W, y + h, fill=_BODY, outline=outline,
+        self.canvas.create_rectangle(x, y, x + w, y + h, fill=_BODY, outline=outline,
                                      width=width, tags=(ntag, "nodebody"))
-        self.canvas.create_rectangle(x, y, x + NODE_W, y + TITLE_H,
+        self.canvas.create_rectangle(x, y, x + w, y + th,
                                      fill=_KIND_COLOR.get(node.kind, "#ddd"),
                                      outline=outline, width=width, tags=(ntag,))
-        self.canvas.create_text(x + 8, y + TITLE_H / 2, anchor=tk.W, text=node.label,
-                                font=("TkDefaultFont", 9, "bold"), tags=(ntag,))
+        self.canvas.create_text(x + 8 * z, y + th / 2, anchor=tk.W, text=node.label,
+                                font=("TkDefaultFont", self._fs(9), "bold"), tags=(ntag,))
         if live:
             # status badge — a filled dot at the title's right edge
-            bx = x + NODE_W - 11
-            by = y + TITLE_H / 2
-            self.canvas.create_oval(bx - 5, by - 5, bx + 5, by + 5,
+            bx = x + w - 11 * z
+            by = y + th / 2
+            r = 5 * z
+            self.canvas.create_oval(bx - r, by - r, bx + r, by + r,
                                     fill=_STATE_COLOR.get(live, "#888"), outline="#333",
                                     tags=(ntag,))
-        # config summary line
+        # config summary — in its own band under the title (above the ports, so
+        # it never overlaps the port labels), centred and single-line-clipped.
         summ = self._node_summary(node)
         if summ:
-            self.canvas.create_text(x + 8, y + TITLE_H + 2, anchor=tk.NW, text=summ,
-                                    font=("TkDefaultFont", 8), fill="#555", width=NODE_W - 16,
-                                    tags=(ntag,))
-        # ports
+            self.canvas.create_text(x + w / 2, y + th + sh / 2,
+                                    anchor=tk.CENTER, text=self._fit_summary(summ),
+                                    font=("TkDefaultFont", self._fs(8)), fill="#555", tags=(ntag,))
+        # ports (below the summary band)
+        py0 = y + th + sh
+        step = PORT_H * z
         for i, (name, ptype) in enumerate(node.inputs()):
-            py = y + TITLE_H + i * PORT_H + PORT_H / 2
-            self._draw_port(node.id, name, True, x, py, ptype)
+            self._draw_port(node.id, name, True, x, py0 + i * step + step / 2, ptype)
         for i, (name, ptype) in enumerate(node.outputs()):
-            py = y + TITLE_H + i * PORT_H + PORT_H / 2
-            self._draw_port(node.id, name, False, x + NODE_W, py, ptype)
+            self._draw_port(node.id, name, False, x + w, py0 + i * step + step / 2, ptype)
+        # live progress caption under the node (KNIME-style), once it has run data
+        prog = self._node_progress(node)
+        if prog:
+            text, col = prog
+            self.canvas.create_text(x + w / 2, y + h + 9 * z, anchor=tk.CENTER, text=text,
+                                    font=("TkDefaultFont", self._fs(7), "bold"), fill=col,
+                                    tags=(ntag,))
+
+    def _fit_summary(self, text):
+        """Trim a summary string so it fits one line inside the node."""
+        if len(text) <= 24:
+            return text
+        return text[:23] + "…"
 
     def _node_summary(self, node):
         if node.type in wf_mod.CALC_NODE_TYPES:
@@ -309,13 +470,16 @@ class WorkflowTab(ttk.Frame):
         return ""
 
     def _draw_port(self, node_id, name, is_input, x, y, ptype):
+        z = self._zoom
+        r = PORT_R * z
         color = "#2a8a2a" if ptype == "geometry" else "#b06000"
         tag = "P:{}:{}:{}".format(node_id, "in" if is_input else "out", name)
-        self.canvas.create_oval(x - PORT_R, y - PORT_R, x + PORT_R, y + PORT_R,
+        self.canvas.create_oval(x - r, y - r, x + r, y + r,
                                 fill=color, outline="#333", tags=(tag, "port"))
-        lx = x + PORT_R + 3 if is_input else x - PORT_R - 3
+        lx = x + (r + 3 * z) if is_input else x - (r + 3 * z)
         self.canvas.create_text(lx, y, anchor=(tk.W if is_input else tk.E), text=name,
-                                font=("TkDefaultFont", 7), fill="#444", tags=("P:" + node_id,))
+                                font=("TkDefaultFont", self._fs(7)), fill="#444",
+                                tags=("P:" + node_id,))
 
     def _draw_edge(self, e):
         src = self.wf.node(e.src_node)
@@ -326,17 +490,20 @@ class WorkflowTab(ttk.Frame):
         b = self._port_xy(dst, e.dst_port, is_input=True)
         if not a or not b:
             return
+        a = self._w2s(*a)
+        b = self._w2s(*b)
         selected = self._sel_edge == e.id
         col = _SEL if selected else "#5a6b7a"
         w = 3 if selected else 2
-        dx = max(30, abs(b[0] - a[0]) * 0.4)
+        dx = max(30 * self._zoom, abs(b[0] - a[0]) * 0.4)
         self.canvas.create_line(a[0], a[1], a[0] + dx, a[1], b[0] - dx, b[1], b[0], b[1],
                                 smooth=True, width=w, fill=col, tags=("E:" + e.id, "edge"))
 
     # --------------------------------------------------------------- events
 
     def _cxy(self, event):
-        return self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        # screen (widget) pixels -> world coordinates
+        return self._s2w(event.x, event.y)
 
     def _hit(self, event):
         """Return ('port', node, port, is_input) | ('node', id) | ('edge', id) | None."""
@@ -498,7 +665,7 @@ class WorkflowTab(ttk.Frame):
         for n in self.wf.nodes:
             for i, (name, _t) in enumerate(n.inputs()):
                 px = n.x
-                py = n.y + TITLE_H + i * PORT_H + PORT_H / 2.0
+                py = n.y + TITLE_H + SUMMARY_H + i * PORT_H + PORT_H / 2.0
                 if abs(px - cx) <= r and abs(py - cy) <= r:
                     return (n.id, name)
         return None
@@ -576,22 +743,73 @@ class WorkflowTab(ttk.Frame):
         self._redraw()
         self._build_config_panel()
 
+    # ---- pan + zoom ----
+
+    def _pan_start(self, event):
+        self.canvas.focus_set()
+        self._pan = {"x": event.x, "y": event.y, "ox": self._ox, "oy": self._oy}
+
+    def _pan_move(self, event):
+        if not self._pan:
+            return
+        self._ox = self._pan["ox"] + (event.x - self._pan["x"])
+        self._oy = self._pan["oy"] + (event.y - self._pan["y"])
+        self._redraw()
+
+    def _pan_by(self, dx, dy):
+        self._ox += dx
+        self._oy += dy
+        self._redraw()
+        return "break"
+
+    def _wheel_pan_v(self, event):
+        return self._pan_by(0, int(event.delta / 120 * 60) or (60 if event.delta > 0 else -60))
+
+    def _wheel_pan_h(self, event):
+        return self._pan_by(int(event.delta / 120 * 60) or (60 if event.delta > 0 else -60), 0)
+
+    def _wheel_zoom(self, event):
+        return self._zoom_at(event.x, event.y, 1.1 if event.delta > 0 else 1 / 1.1)
+
+    def _zoom_center(self, factor):
+        self._zoom_at(self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2, factor)
+        return "break"
+
+    def _reset_view(self):
+        self._zoom, self._ox, self._oy = 1.0, 0.0, 0.0
+        self._redraw()
+        return "break"
+
+    def _zoom_at(self, sx, sy, factor):
+        z0 = self._zoom
+        z1 = max(0.3, min(3.0, z0 * factor))
+        if abs(z1 - z0) < 1e-6:
+            return
+        # keep the world point under the cursor fixed on screen
+        wx, wy = self._s2w(sx, sy)
+        self._zoom = z1
+        self._ox = sx - wx * z1
+        self._oy = sy - wy * z1
+        self._redraw()
+        return "break"
+
     # ---- right button: drag pans, click opens a context menu ----
 
     def _on_rpress(self, event):
         self.canvas.focus_set()
-        self.canvas.scan_mark(event.x, event.y)
+        self._pan = {"x": event.x, "y": event.y, "ox": self._ox, "oy": self._oy}
         self._rclick = {"x": event.x, "y": event.y, "moved": False}
 
     def _on_rmotion(self, event):
         if getattr(self, "_rclick", None) is not None:
             if abs(event.x - self._rclick["x"]) > 3 or abs(event.y - self._rclick["y"]) > 3:
                 self._rclick["moved"] = True
-        self.canvas.scan_dragto(event.x, event.y, gain=1)
+        self._pan_move(event)
 
     def _on_rrelease(self, event):
         rc = getattr(self, "_rclick", None)
         self._rclick = None
+        self._pan = None
         if rc is not None and not rc["moved"]:
             self._show_context_menu(event)
 
@@ -610,8 +828,8 @@ class WorkflowTab(ttk.Frame):
         return None
 
     def _show_context_menu(self, event):
-        cx, cy = self._cxy(event)
-        hit = self._hit_xy(cx, cy)
+        wx, wy = self._cxy(event)            # world coords (for placing a node)
+        hit = self._hit_xy(event.x, event.y)  # screen coords (for canvas hit-test)
         menu = tk.Menu(self, tearoff=0)
         if hit and hit[0] == "node":
             nid = hit[1]
@@ -626,12 +844,12 @@ class WorkflowTab(ttk.Frame):
             menu.add_command(label="Delete node" + ("s ({})".format(n) if n > 1 else ""),
                              command=self._delete_selected)
             menu.add_separator()
-            menu.add_command(label="Add node here…", command=lambda: self._context_add(cx, cy))
+            menu.add_command(label="Add node here…", command=lambda: self._context_add(wx, wy))
         elif hit and hit[0] == "edge":
             self._select_edge(hit[1])
             menu.add_command(label="Delete connection", command=self._delete_selected)
         else:
-            menu.add_command(label="Add node here…", command=lambda: self._context_add(cx, cy))
+            menu.add_command(label="Add node here…", command=lambda: self._context_add(wx, wy))
             menu.add_separator()
             menu.add_command(label="Select all  (Ctrl+A)", command=self._on_select_all)
             menu.add_command(label="Clear selection", command=self._clear_selection)
@@ -712,10 +930,10 @@ class WorkflowTab(ttk.Frame):
         # unconnected (bound to F3).
         px, py = self.canvas.winfo_pointerx(), self.canvas.winfo_pointery()
         rx, ry = px - self.canvas.winfo_rootx(), py - self.canvas.winfo_rooty()
-        cx, cy = self.canvas.canvasx(rx), self.canvas.canvasy(ry)
         if rx < 0 or ry < 0 or rx > self.canvas.winfo_width() or ry > self.canvas.winfo_height():
-            cx, cy = self.canvas.canvasx(40), self.canvas.canvasy(40)
+            rx, ry = 40, 40
             px, py = self.canvas.winfo_rootx() + 60, self.canvas.winfo_rooty() + 60
+        cx, cy = self._s2w(rx, ry)   # place at the pointer, in world coords
         ntype = self._node_search_popup(px, py)
         if ntype:
             node = self.wf.add_node(ntype, cx, cy)
@@ -837,11 +1055,19 @@ class WorkflowTab(ttk.Frame):
         self._redraw()
         self._build_config_panel()
 
-    def _find_existing_calc(self, origin_node, mol):
-        if not origin_node:
-            return None
-        for c in self.app.project.planned_calcs:
-            if getattr(c, "origin_node", None) == origin_node and c.molecule_filename == mol:
+    def _find_existing_calc(self, origin_node, mol, category, recipe_name):
+        pc = self.app.project.planned_calcs
+        # 1) exact graph-node identity (survives recipe edits on the node)
+        if origin_node:
+            for c in pc:
+                if getattr(c, "origin_node", None) == origin_node and c.molecule_filename == mol:
+                    return c
+        # 2) same target directory (molecule + category + recipe). Catches calcs
+        #    made before origin_node existed, or by a rebuilt graph, so we never
+        #    queue a second row pointing at the same folder.
+        for c in pc:
+            if (c.molecule_filename == mol and c.category == category
+                    and c.recipe_name == recipe_name):
                 return c
         return None
 
@@ -854,11 +1080,11 @@ class WorkflowTab(ttk.Frame):
         except Exception:
             return False
 
-    def _expand(self, verb):
+    def _expand(self, verb, source_ids=None):
         """Validate + expand the graph into PlannedCalcs, asking the user to
         confirm. Reuses existing calcs for the same (graph node, molecule) so a
-        re-run continues rather than duplicating. Returns (calcs, node_map) or
-        None if blocked/declined."""
+        re-run continues rather than duplicating. If `source_ids` is given, only
+        those networks are expanded. Returns (calcs, node_map) or None."""
         issues = self.wf.validate()
         # 'more than one Molecules' is a warning, not a blocker
         blockers = [i for i in issues if not i.startswith("More than one")]
@@ -867,11 +1093,22 @@ class WorkflowTab(ttk.Frame):
                                    "\n  • ".join(blockers))
             return None
         mol_files = [m.filename for m in self.app.project.molecules]
+        # Clean up any pre-existing duplicate rows (same target dir) first, so a
+        # re-run reuses one canonical calc per directory instead of stacking up.
+        ct = getattr(self.app, "calculations_tab", None)
+        if ct is not None:
+            try:
+                ct.dedupe_by_target()
+            except Exception:
+                pass
         existing_before = {id(c) for c in self.app.project.planned_calcs}
 
         def factory(mol, recipe_name, category, geometry_source, parent_id, gate, origin_node):
-            existing = self._find_existing_calc(origin_node, mol)
+            existing = self._find_existing_calc(origin_node, mol, category, recipe_name)
             if existing is not None:
+                # Adopt this graph node so future runs match by node identity too.
+                if getattr(existing, "origin_node", None) is None:
+                    existing.origin_node = origin_node
                 # Keep finished steps verbatim; let unfinished ones adopt any
                 # edits made to the graph (recipe / geometry / gate).
                 if not self._calc_done(existing):
@@ -885,7 +1122,8 @@ class WorkflowTab(ttk.Frame):
                                category=category, geometry_source=geometry_source,
                                parent_id=parent_id, gate=gate, origin_node=origin_node)
 
-        calcs, warnings, node_map = wf_mod.expand_to_calcs(self.wf, mol_files, factory)
+        calcs, warnings, node_map = wf_mod.expand_to_calcs(self.wf, mol_files, factory,
+                                                           source_ids=source_ids)
         if not calcs:
             messagebox.showinfo("Nothing generated",
                                 "No calculations were produced.\n\n" + "\n".join(warnings))
@@ -893,8 +1131,9 @@ class WorkflowTab(ttk.Frame):
         new_calcs = [c for c in calcs if id(c) not in existing_before]
         reused = len(calcs) - len(new_calcs)
         n_gated = sum(1 for c in calcs if getattr(c, "gate", None))
-        msg = "{} {} calculation(s) from this pipeline in category '{}'?".format(
-            verb, len(calcs), self.wf.category)
+        scope = "selected pipeline" if source_ids is not None else "pipeline"
+        msg = "{} {} calculation(s) from this {} in category '{}'?".format(
+            verb, len(calcs), scope, self.wf.category)
         if reused:
             msg += "\n\n{} already exist and will be reused/continued; {} new.".format(
                 reused, len(new_calcs))
@@ -911,12 +1150,15 @@ class WorkflowTab(ttk.Frame):
         self.app.mark_dirty()
         return calcs, node_map
 
-    def _report_specs(self):
+    def _report_specs(self, source_ids=None):
         """For each Report node, the calc-node ids wired into it (its results
-        feeders). Used to write a merged JSON when the pipeline finishes."""
+        feeders). Used to write a merged JSON when the pipeline finishes. If
+        `source_ids` is given, only reports in those networks are included."""
         specs = []
         for n in self.wf.nodes:
             if n.type != "report":
+                continue
+            if source_ids is not None and not (self.wf.network_sources([n.id]) & source_ids):
                 continue
             feeders = []
             for e in self.wf.edges_into(n.id):
@@ -926,8 +1168,20 @@ class WorkflowTab(ttk.Frame):
             specs.append({"name": n.config.get("name", "report"), "node_ids": feeders})
         return specs
 
+    def _selected_sources(self):
+        """If nodes are selected, the Molecules source(s) of the network(s) they
+        belong to (so we run just those pipelines); else None = run everything.
+        Returns None if the selection spans every source (i.e. all networks)."""
+        if not self._sel_nodes:
+            return None
+        srcs = self.wf.network_sources(self._sel_nodes)
+        all_srcs = {n.id for n in self.wf.nodes if n.type == "molecules"}
+        if not srcs or srcs == all_srcs:
+            return None
+        return srcs
+
     def on_generate(self):
-        res = self._expand("Create")
+        res = self._expand("Create", source_ids=self._selected_sources())
         if res is None:
             return
         calcs, _ = res
@@ -940,7 +1194,8 @@ class WorkflowTab(ttk.Frame):
             pass
 
     def on_run_pipeline(self):
-        res = self._expand("Run")
+        source_ids = self._selected_sources()
+        res = self._expand("Run", source_ids=source_ids)
         if res is None:
             return
         calcs, _ = res
@@ -949,29 +1204,32 @@ class WorkflowTab(ttk.Frame):
             self.app.notebook.select(self.app.calculations_tab)
         except Exception:
             pass
-        self.app.calculations_tab.start_pipeline([c.id for c in calcs],
-                                                 reports=self._report_specs())
-        self.app.set_status("Pipeline running: {} calculation(s) under automatic control."
-                            .format(len(calcs)))
+        self.app.calculations_tab.start_pipeline(
+            [c.id for c in calcs], reports=self._report_specs(source_ids=source_ids))
+        scope = "selected pipeline" if source_ids is not None else "pipeline"
+        self.app.set_status("{} running: {} calculation(s) under automatic control."
+                            .format(scope.capitalize(), len(calcs)))
         self.refresh_live()
 
     # ----------------------------------------------------- live node coloring
 
-    def _node_live_state(self, node):
-        """Aggregate run-state across this node's expanded calcs, for coloring.
-        Returns one of: '', 'waiting', 'running', 'done', 'error', 'skipped'."""
+    def _node_tags(self, node):
+        """The per-calc display-state tags for a node's expanded calcs."""
         ids = self._node_calcs.get(node.id)
-        if not ids:
-            return ""
         ct = getattr(self.app, "calculations_tab", None)
-        if ct is None:
-            return ""
+        if not ids or ct is None:
+            return []
         tags = []
         for cid in ids:
             calc = self.app.project.calc_by_id(cid)
-            if calc is None:
-                continue
-            tags.append(ct._display_state(calc)[1])
+            if calc is not None:
+                tags.append(ct._display_state(calc)[1])
+        return tags
+
+    def _node_live_state(self, node):
+        """Aggregate run-state across this node's expanded calcs, for coloring.
+        Returns one of: '', 'waiting', 'running', 'done', 'error', 'skipped'."""
+        tags = self._node_tags(node)
         if not tags:
             return ""
         # Worst-but-informative aggregation: error > running/waiting > skipped > done.
@@ -986,6 +1244,28 @@ class WorkflowTab(ttk.Frame):
         if any(t == "done" for t in tags):
             return "done"
         return ""
+
+    def _node_progress(self, node):
+        """A short live progress caption for a node, e.g. 'running 2/3', plus its
+        colour. Returns (text, colour) or None when the node hasn't been run."""
+        tags = self._node_tags(node)
+        if not tags:
+            return None
+        total = len(tags)
+        done = sum(1 for t in tags if t == "done")
+        state = self._node_live_state(node)
+        frac = "{}/{}".format(done, total)
+        if state == "running":
+            return ("running {}".format(frac), _STATE_COLOR["running"])
+        if state == "error":
+            return ("error {}".format(frac), _STATE_COLOR["error"])
+        if state == "skipped":
+            return ("skipped", _STATE_COLOR["skipped"])
+        if any(t == "interrupted" for t in tags):
+            return ("interrupted {}".format(frac), _STATE_COLOR["interrupted"])
+        if state == "done":
+            return ("done {}".format(frac), _STATE_COLOR["done"])
+        return (frac, _STATE_COLOR["waiting"])
 
     def refresh_live(self):
         """Recolour nodes from the live calc states (called by the pipeline

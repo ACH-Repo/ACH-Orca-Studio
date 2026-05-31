@@ -5,4 +5,4 @@ with X11 forwarding (X-forwarding lets the cluster show GUI windows on
 your Windows desktop).
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"

@@ -214,6 +214,26 @@ class Workflow(object):
                 return e
         return None
 
+    def network_sources(self, node_ids):
+        """The Molecules-source node ids in the connected components (treating
+        edges as undirected) that contain any of the given node ids. Used to run
+        just the pipeline(s) the selected nodes belong to."""
+        if not node_ids:
+            return set()
+        adj = {}
+        for e in self.edges:
+            adj.setdefault(e.src_node, set()).add(e.dst_node)
+            adj.setdefault(e.dst_node, set()).add(e.src_node)
+        seen = set()
+        stack = list(node_ids)
+        while stack:
+            nid = stack.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            stack.extend(adj.get(nid, ()))
+        return {n.id for n in self.nodes if n.type == "molecules" and n.id in seen}
+
     def edges_into(self, node_id, port=None):
         return [e for e in self.edges if e.dst_node == node_id
                 and (port is None or e.dst_port == port)]
@@ -332,9 +352,12 @@ class Workflow(object):
         return issues
 
 
-def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory):
-    # type: (Workflow, List[str], callable) -> Tuple[list, List[str], Dict[str, list]]
+def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_ids=None):
+    # type: (Workflow, List[str], callable, Optional[set]) -> Tuple[list, List[str], Dict[str, list]]
     """Expand a workflow into PlannedCalcs, attaching conditional gates.
+
+    If `source_ids` is given, only the networks rooted at those Molecules nodes
+    are expanded (used to run one pipeline of several on the canvas).
 
     For each molecule, walk the calc nodes in topological order. A calc node
     whose geometry comes from the Molecules source uses geometry_source
@@ -445,6 +468,8 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory):
     calcs = []
     node_map = {}  # node_id -> [calc id, ...] across molecules (for live coloring)
     for src in sources:
+        if source_ids is not None and src.id not in source_ids:
+            continue  # run only the requested network(s)
         group = groups.get(src.id)
         if not group:
             continue
