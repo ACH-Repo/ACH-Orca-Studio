@@ -14,13 +14,20 @@ from typing import Dict, List, Optional, Tuple
 _SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
 
 
+_sbatch_available = None  # cache: probing sbatch shells out, and the answer
+                          # can't change within a session, so do it at most once.
+
+
 def sbatch_available():
     # type: () -> bool
-    try:
-        subprocess.run(["sbatch", "--version"], capture_output=True, timeout=10)
-        return True
-    except Exception:
-        return False
+    global _sbatch_available
+    if _sbatch_available is None:
+        try:
+            subprocess.run(["sbatch", "--version"], capture_output=True, timeout=5)
+            _sbatch_available = True
+        except Exception:
+            _sbatch_available = False
+    return _sbatch_available
 
 
 def submit(slurm_rel_path, project_root, dependency=None):

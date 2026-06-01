@@ -95,9 +95,14 @@ class MoleculesTab(ttk.Frame):
             ("charge",   "Q",        35,  30,  False),
             ("mult",     "M",        35,  30,  False),
         ]
+        self._col_labels = {c: lbl for c, lbl, _w, _mw, _s in col_specs}
         for col, label, width, minw, stretch in col_specs:
-            self.tree.heading(col, text=label)
+            self.tree.heading(col, text=label,
+                              command=lambda c=col: self._on_header_click(c))
             self.tree.column(col, width=width, minwidth=minw, anchor=tk.W, stretch=stretch)
+        # Sort state: None = insertion order. Generated molecules group on top.
+        self._sort_col = None
+        self._sort_desc = False
         # Row coloring by gen_status (set via per-row tags below in refresh()).
         # ok = no background; pending = pale yellow; failed = pale red.
         self.tree.tag_configure("pending", background="#fffde7")  # pale yellow
@@ -262,10 +267,42 @@ class MoleculesTab(ttk.Frame):
         entry.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=2)
         return lbl, entry
 
+    # -------------------------------------------------------------- sorting
+
+    _MOL_STATUS_RANK = {"ok": 0, "pending": 1, "failed": 2}
+
+    def _on_header_click(self, col):
+        if self._sort_col == col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col
+            self._sort_desc = False
+        for c, label in self._col_labels.items():
+            arrow = (" ▼" if self._sort_desc else " ▲") if c == self._sort_col else ""
+            self.tree.heading(c, text=label + arrow)
+        self.refresh()
+
+    def _sorted_molecules(self):
+        mols = list(self.app.project.molecules)
+        if not self._sort_col:
+            return mols
+        cols = ("status", "name", "filename", "smiles", "charge", "mult")
+        ci = cols.index(self._sort_col)
+
+        def primary(mol):
+            if self._sort_col == "status":
+                return self._MOL_STATUS_RANK.get(mol.gen_status, 9)
+            return str(self._row_values(mol)[ci]).lower()
+
+        # Generated molecules group to the top within each key (stable two-pass).
+        mols.sort(key=lambda m: self._MOL_STATUS_RANK.get(m.gen_status, 9))
+        mols.sort(key=primary, reverse=self._sort_desc)
+        return mols
+
     def refresh(self):
         sel = self._focus_filename
         self.tree.delete(*self.tree.get_children())
-        for mol in self.app.project.molecules:
+        for mol in self._sorted_molecules():
             if self.tree.exists(mol.filename):
                 continue  # defensive: skip a duplicate filename rather than crash
             self.tree.insert(

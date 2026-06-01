@@ -185,17 +185,22 @@ class CalculationsTab(ttk.Frame):
         paned.add(left, weight=3)
         columns = ("type", "molecule", "recipe", "parent", "state", "job", "path")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="extended")
-        for col, label, width, anchor in [
-            ("type", "Type", 55, tk.W),
-            ("molecule", "Molecule", 90, tk.W),
-            ("recipe", "Recipe", 150, tk.W),
-            ("parent", "Parent", 90, tk.W),
-            ("state", "State", 180, tk.W),
-            ("job", "Job", 70, tk.W),
-            ("path", "Target dir", 240, tk.W),
+        self._col_labels = {
+            "type": "Type", "molecule": "Molecule", "recipe": "Recipe",
+            "parent": "Parent", "state": "State", "job": "Job", "path": "Target dir",
+        }
+        for col, width, anchor in [
+            ("type", 55, tk.W), ("molecule", 90, tk.W), ("recipe", 150, tk.W),
+            ("parent", 90, tk.W), ("state", 180, tk.W), ("job", 70, tk.W),
+            ("path", 240, tk.W),
         ]:
-            self.tree.heading(col, text=label)
+            self.tree.heading(col, text=self._col_labels[col],
+                              command=lambda c=col: self._on_header_click(c))
             self.tree.column(col, width=width, anchor=anchor)
+        # Sort state: None = project order. Within any sort, finished calcs rank
+        # to the top of each group and unbuilt/interrupted ones to the bottom.
+        self._sort_col = None
+        self._sort_desc = False
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -327,6 +332,7 @@ class CalculationsTab(ttk.Frame):
                     self.tree.move(c.id, "", idx)
             else:
                 self.tree.insert("", idx, iid=c.id, values=values, tags=(tag,))
+        self._apply_sort()   # reorder the display if a column sort is active
         # In-place updates preserve the selection automatically; only refresh the
         # editor when nothing is selected.
         if not self.tree.selection():
@@ -334,6 +340,53 @@ class CalculationsTab(ttk.Frame):
                 self.tree.selection_set(self._selected_id)
             else:
                 self._clear_editor()
+
+    # -------------------------------------------------------------- sorting
+
+    # Lower rank = nearer the top of its group: finished first, then in-progress,
+    # then not-yet-run, with interrupted/error/skipped pushed to the bottom.
+    _SORT_RANK = {"done": 0, "running": 1, "waiting": 2, "built": 2,
+                  "notbuilt": 3, "skipped": 4, "interrupted": 5, "error": 6}
+
+    def _completion_rank(self, calc):
+        return self._SORT_RANK.get(self._display_state(calc)[1], 9)
+
+    def _on_header_click(self, col):
+        if self._sort_col == col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col
+            self._sort_desc = False
+        self._refresh_heading_arrows()
+        self._apply_sort()
+
+    def _refresh_heading_arrows(self):
+        for col, label in self._col_labels.items():
+            arrow = ""
+            if col == self._sort_col:
+                arrow = " ▼" if self._sort_desc else " ▲"
+            self.tree.heading(col, text=label + arrow)
+
+    def _apply_sort(self):
+        if not self._sort_col:
+            return  # project order (already applied in place by refresh)
+        cols = ("type", "molecule", "recipe", "parent", "state", "job", "path")
+        ci = cols.index(self._sort_col)
+
+        def primary(calc):
+            if self._sort_col == "state":
+                return self._completion_rank(calc)
+            return str(self._row_values(calc)[ci]).lower()
+
+        calcs = list(self.app.project.planned_calcs)
+        # Stable two-pass: completion rank first (always finished-on-top within a
+        # group), then the chosen column — so reversing the column doesn't flip
+        # the finished-first secondary order.
+        calcs.sort(key=self._completion_rank)
+        calcs.sort(key=primary, reverse=self._sort_desc)
+        for idx, c in enumerate(calcs):
+            if self.tree.exists(c.id):
+                self.tree.move(c.id, "", idx)
 
     def _row_values(self, calc):
         mol = self.app.project.molecule_by_filename(calc.molecule_filename)

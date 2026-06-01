@@ -300,7 +300,7 @@ class IRSpectrumWindow(tk.Toplevel):
         else:
             frac = 0.5
         _place_structure_in_axes(ax, self._mol_arr, anchor=(frac, 0.98),
-                                 box_align=(0.5, 1.0), target_h=55)
+                                 box_align=(0.5, 1.0), target_h=96)
 
         self.canvas.draw()
         self._cache_peaks()
@@ -573,9 +573,15 @@ class NMRSpectrumWindow(tk.Toplevel):
 
         self.fig.clear()
         n_mol = len(self.mols)
-        # Thumbnails get a narrow column (~11 % of the width) so the structures
-        # stay small and the spectrum keeps the room.
-        gs = self.fig.add_gridspec(max(1, n_mol), 2, width_ratios=[8, 1])
+        # Thumbnails live in a grid beside the plot: up to ROWS stacked
+        # vertically, then a new column. Each extra column eats into the plot
+        # width, so the structures stay a usable size no matter how many
+        # molecules are selected (instead of getting ever thinner in one column).
+        ROWS = 8
+        n_thumb_cols = max(1, (n_mol + ROWS - 1) // ROWS)
+        nrows = min(n_mol, ROWS) if n_mol else 1
+        width_ratios = [8.0] + [1.6] * n_thumb_cols   # plot 8 units, each thumb col 1.6
+        gs = self.fig.add_gridspec(nrows, 1 + n_thumb_cols, width_ratios=width_ratios)
         self.ax = self.fig.add_subplot(gs[:, 0])
         self._thumb_axes = []
 
@@ -598,7 +604,8 @@ class NMRSpectrumWindow(tk.Toplevel):
         # and it otherwise overlaps the leftmost peaks.
 
         for mi, m in enumerate(self.mols):
-            tax = self.fig.add_subplot(gs[mi, 1])
+            r, c = mi % ROWS, 1 + mi // ROWS
+            tax = self.fig.add_subplot(gs[r, c])
             if m["img"] is not None:
                 tax.imshow(m["img"])
             else:

@@ -15,12 +15,30 @@ from typing import List, Optional, Tuple
 Atom = Tuple[str, float, float, float]
 
 
+_loggers_silenced = False
+
+
+def _ensure_loggers_silenced():
+    """Silence the chem-backend loggers once, lazily — on first actual use.
+
+    Doing this at import time would drag the heavy RDKit + OpenBabel shared
+    libraries into the process at startup (a slow load off the cluster's
+    network-mounted conda env — the main reason the gateway launch felt slow),
+    even for sessions that never touch a SMILES. So we defer it to the first
+    coordinate/validity call instead."""
+    global _loggers_silenced
+    if _loggers_silenced:
+        return
+    _loggers_silenced = True
+    _silence_chem_loggers()
+
+
 def _silence_chem_loggers():
     """Both RDKit and OpenBabel print loud parse errors to stderr by default.
     Our auto-detect probes routinely feed them non-SMILES strings (column
     names like 'ethanol', 'benzene') to test validity, and Generate XYZ
     failures get reported cleanly through the UI's failed-status preview —
-    no need for the C-level shouting. Silence both at import time."""
+    no need for the C-level shouting."""
     try:
         from rdkit import RDLogger
         RDLogger.DisableLog("rdApp.*")
@@ -44,9 +62,6 @@ def _silence_chem_loggers():
         pass
 
 
-_silence_chem_loggers()
-
-
 class CoordGenError(Exception):
     """Raised when neither RDKit nor Pybel can generate coordinates."""
 
@@ -63,6 +78,7 @@ def smiles_to_xyz(smiles, prefer_rdkit_only=False):
     geometries for ringed systems are unreliable). Set this for the metal-swap
     gen_smiles workflow where we need RDKit's correctness.
     """
+    _ensure_loggers_silenced()
     rdkit_atoms, rdkit_err = _try_rdkit(smiles)
     if rdkit_atoms is not None:
         return rdkit_atoms, "rdkit"
@@ -101,6 +117,7 @@ def smiles_charge_and_mult(smiles):
     """
     if not smiles or not smiles.strip():
         return None, None
+    _ensure_loggers_silenced()
     try:
         from rdkit import Chem
     except ImportError:
@@ -125,6 +142,7 @@ def diagnose_backends():
     the libraries are even importable and whether the simplest possible SMILES
     works."""
     import sys
+    _ensure_loggers_silenced()
     lines = []
     lines.append("Python: {} ({})".format(sys.version.split()[0], sys.executable))
     lines.append("Platform: {}".format(sys.platform))
@@ -255,6 +273,7 @@ def smiles_is_valid(smiles):
     """Return True if RDKit can parse this SMILES (returns False if RDKit absent)."""
     if not smiles or not smiles.strip():
         return False
+    _ensure_loggers_silenced()
     try:
         from rdkit import Chem
     except ImportError:
