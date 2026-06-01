@@ -948,14 +948,19 @@ class CalculationsTab(ttk.Frame):
         self.refresh()
         self.app.set_status("Build: {} ok, {} skipped.".format(n_ok, n_skip))
 
-    def _build_one(self, calc, mol, recipe, slurm_template):
+    def _build_one(self, calc, mol, recipe, slurm_template, xyz_ref=None, preamble=""):
         root = self.app.project.root()
         target_dir_rel = "/".join(["calcs", mol.filename, calc.category] + list(recipe.path_parts()))
         target_dir_abs = os.path.join(root, target_dir_rel)
         os.makedirs(target_dir_abs, exist_ok=True)
 
-        atoms = self._resolve_geometry(calc, mol)
-        inp_text = inputs_mod.render_inp(recipe, atoms, mol.charge, mol.multiplicity)
+        if xyz_ref:
+            # Unattended chain: read the geometry from a file at run time (the
+            # parent writes it before this job starts), rather than embedding it.
+            inp_text = inputs_mod.render_inp_xyzfile(recipe, xyz_ref, mol.charge, mol.multiplicity)
+        else:
+            atoms = self._resolve_geometry(calc, mol)
+            inp_text = inputs_mod.render_inp(recipe, atoms, mol.charge, mol.multiplicity)
         # When running on this machine (not a cluster), don't let a recipe ask for
         # more cores than the CPU has — otherwise a first local job over-subscribes
         # and crawls. Clamp %pal nprocs to the detected core count.
@@ -973,7 +978,8 @@ class CalculationsTab(ttk.Frame):
         cores = inputs_mod.parse_cores(inp_text)
         slurm_text = slurm_mod.render_slurm(slurm_template, inp_filename=inp_filename,
                                             rundir=target_dir_rel, jobname=mol.filename,
-                                            cores=cores, usermail=self.app.usermail)
+                                            cores=cores, usermail=self.app.usermail,
+                                            preamble=preamble)
         with open(os.path.join(target_dir_abs, mol.filename + ".slurm"), "w",
                   encoding="utf-8", newline="\n") as f:
             f.write(slurm_text)
@@ -1084,6 +1090,158 @@ class CalculationsTab(ttk.Frame):
         if states is None and not self._local_mode:
             self._log("squeue not available — using .out files for status.")
         self.refresh()
+
+    # --------------------------------------------------- unattended (dependency chain)
+
+    def submit_unattended(self, calc_ids, reports=None):
+        # type: (list, Optional[list]) -> None
+        """Submit a workflow's calcs as a SLURM dependency chain: each step is
+        held by SLURM until its parent geometry job (afterok) and any gate-source
+        job finish, and a Condition becomes a shell guard inside the job. SLURM
+        then drives the whole pipeline with no GUI running — submit and
+        disconnect. `calc_ids` must be in topological order (parents/sources
+        first), as produced by the workflow expansion."""
+        root = self.app.project.root()
+        if not slurm_runtime.sbatch_available():
+            messagebox.showerror("sbatch not found",
+                                 "Unattended submission needs sbatch — run this on the cluster "
+                                 "login node.")
+            return
+        try:
+            template = slurm_mod.load_template()
+        except Exception as e:
+            messagebox.showerror("Slurm template missing", str(e))
+            return
+        ids = [cid for cid in calc_ids if self.app.project.calc_by_id(cid) is not None]
+        if not ids:
+            return
+        self._squeue_states = slurm_runtime.query_states()
+        if not messagebox.askyesno(
+                "Submit unattended",
+                "Submit {} calculation(s) as a SLURM dependency chain?\n\n"
+                "Each step is held until the job it depends on finishes, and a Condition "
+                "node becomes a check inside the job. SLURM runs the whole pipeline on its "
+                "own — you can close ORCA Studio (and MobaXterm) once it's submitted.\n\n"
+                "Note: merged Report files are written by the app, so reopen the project and "
+                "use the Report tab once the jobs are done.".format(len(ids))):
+            return
+        self._log_clear()
+        jobmap = {}   # calc id -> job id (submitted, or already active, in this batch)
+        n_sub = n_skip = n_done = 0
+        pd = ProgressDialog(self, "Submitting dependency chain", total=len(ids))
+        for cid in ids:
+            calc = self.app.project.calc_by_id(cid)
+            if calc is None:
+                continue
+            pd.step("Submitting {}".format(self._short(calc)))
+            if pd.cancelled:
+                self._log("Cancelled — {} already submitted.".format(n_sub))
+                break
+            mol = self.app.project.molecule_by_filename(calc.molecule_filename)
+            recipe = self.app.get_recipe(calc.recipe_name)
+            if mol is None or recipe is None:
+                self._log("SKIP {}: molecule or recipe missing".format(self._short(calc)))
+                n_skip += 1
+                continue
+            _, _, done, active = self._own_state(calc)
+            if done:
+                n_done += 1
+                continue            # already finished; children read its geometry off disk
+            if active:
+                jobmap[cid] = calc.job_id   # already queued/running; usable as a dependency
+                continue
+            deps = []
+            xyz_ref = None
+            preamble = ""
+            # geometry parent
+            if calc.geometry_source.startswith("parent:"):
+                parent = self.app.project.calc_by_id(calc.geometry_source[len("parent:"):])
+                if parent is None:
+                    self._log("SKIP {}: parent calc missing".format(self._short(calc)))
+                    n_skip += 1
+                    continue
+                pxyz = self._unattended_parent_xyz(parent, mol, root)
+                pj = jobmap.get(parent.id)
+                if pj:
+                    deps.append(pj)
+                    xyz_ref = pxyz
+                elif self._own_state(parent)[2] and os.path.isfile(pxyz):
+                    xyz_ref = pxyz      # parent already done; geometry on disk, no dependency
+                else:
+                    self._log("SKIP {}: parent '{}' isn't finished or in this batch".format(
+                        self._short(calc), self._short(parent)))
+                    n_skip += 1
+                    continue
+            # conditional gate
+            gate = getattr(calc, "gate", None)
+            if gate:
+                src = self.app.project.calc_by_id(gate.get("source"))
+                if src is not None:
+                    sj = jobmap.get(src.id)
+                    if sj:
+                        deps.append(sj)
+                        preamble = slurm_mod.gate_guard(
+                            gate.get("predicate", "terminated_ok"),
+                            self._unattended_source_out(src, mol, sj, root))
+                    elif self._own_state(src)[2]:
+                        if self._gate_status(calc) == "closed":
+                            self._log("SKIP {}: condition already not met".format(self._short(calc)))
+                            n_skip += 1
+                            continue
+                        # condition already satisfied -> no guard needed
+                    else:
+                        self._log("SKIP {}: gate source '{}' isn't finished or in this batch"
+                                  .format(self._short(calc), self._short(src)))
+                        n_skip += 1
+                        continue
+            deps = list(dict.fromkeys(deps))   # dedupe (parent could equal gate source)
+            try:
+                inp_rel, slurm_rel, rundir_rel = self._build_one(
+                    calc, mol, recipe, template, xyz_ref=xyz_ref, preamble=preamble)
+                calc.inp_path = inp_rel
+                calc.slurm_path = slurm_rel
+                calc.rundir = rundir_rel
+                calc.exported = True
+                calc.job_id = None
+            except Exception as e:
+                self._log("BUILD FAILED {}: {}".format(self._short(calc), e))
+                n_skip += 1
+                continue
+            dep = ("afterok:" + ":".join(deps)) if deps else None
+            jobid, err = slurm_runtime.submit(calc.slurm_path, root, dependency=dep)
+            if jobid:
+                calc.job_id = jobid
+                jobmap[cid] = jobid
+                n_sub += 1
+                self._log("SUBMITTED {} -> job {}{}".format(
+                    self._short(calc), jobid, "   [{}]".format(dep) if dep else ""))
+            else:
+                self._log("SUBMIT FAILED {}: {}".format(self._short(calc), err))
+                n_skip += 1
+        pd.close()
+        self.app.mark_dirty()
+        self.on_refresh_status()
+        self.app.set_status(
+            "Unattended: {} submitted, {} skipped, {} already done — safe to disconnect."
+            .format(n_sub, n_skip, n_done))
+
+    def _unattended_parent_xyz(self, parent, mol, root):
+        """Absolute path to a parent calc's optimised geometry (ORCA writes
+        <mol>.xyz in the run dir), read by a child job at run time."""
+        rundir = parent.rundir
+        if not rundir:
+            prec = self.app.get_recipe(parent.recipe_name)
+            rundir = self._target_dir(parent, mol, prec)
+        return os.path.abspath(os.path.join(root, rundir, mol.filename + ".xyz"))
+
+    def _unattended_source_out(self, src, mol, src_jobid, root):
+        """Absolute path to a gate source's .out (named <jobname>-<jobid>.out by
+        the slurm template), read by the gated job's condition guard."""
+        rundir = src.rundir
+        if not rundir:
+            rundir = self._target_dir(src, mol, self.app.get_recipe(src.recipe_name))
+        name = slurm_mod._sanitize_jobname(mol.filename)
+        return os.path.abspath(os.path.join(root, rundir, "{}-{}.out".format(name, src_jobid)))
 
     # ----------------------------------------------------------- run locally
 

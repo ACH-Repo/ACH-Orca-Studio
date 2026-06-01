@@ -23,14 +23,22 @@ def sbatch_available():
         return False
 
 
-def submit(slurm_rel_path, project_root):
-    # type: (str, str) -> Tuple[Optional[str], Optional[str]]
+def submit(slurm_rel_path, project_root, dependency=None):
+    # type: (str, str, Optional[str]) -> Tuple[Optional[str], Optional[str]]
     """sbatch a slurm file. `slurm_rel_path` is relative to project_root, which
     is also the cwd sbatch runs in (so the script's `cd <rundir>` resolves).
+    `dependency`, if given, is a SLURM dependency spec (e.g. 'afterok:123:456')
+    passed as --dependency, so the job is held until its predecessors finish —
+    that's what lets a workflow run unattended after you disconnect.
     Returns (job_id, None) on success or (None, error_message)."""
+    cmd = ["sbatch"]
+    if dependency:
+        cmd.append("--dependency=" + dependency)
+        cmd.append("--kill-on-invalid-dep=yes")  # cancel if a predecessor fails
+    cmd.append(slurm_rel_path)
     try:
         result = subprocess.run(
-            ["sbatch", slurm_rel_path],
+            cmd,
             cwd=project_root,
             capture_output=True, text=True, timeout=60,
         )

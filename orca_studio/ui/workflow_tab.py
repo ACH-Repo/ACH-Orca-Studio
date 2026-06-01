@@ -92,6 +92,9 @@ class WorkflowTab(ttk.Frame):
                           font=("TkDefaultFont", 10, "bold"), bg="#e0a35a",
                           activebackground="#e8b673", fg="#222222")
         b_run.pack(side=tk.RIGHT, padx=(6, 2))
+        b_unatt = tk.Button(bar, text="⛓ Submit unattended", command=self.on_submit_unattended,
+                            bg="#cdebc5", activebackground="#bfe2b6")
+        b_unatt.pack(side=tk.RIGHT, padx=2)
         b_gen = tk.Button(bar, text="Generate only", command=self.on_generate,
                           bg="#cfe0f5", activebackground="#bcd6f0")
         b_gen.pack(side=tk.RIGHT, padx=2)
@@ -100,9 +103,14 @@ class WorkflowTab(ttk.Frame):
                    "builds and launches as its input geometry becomes ready, and a Condition node "
                    "decides live whether its downstream branch runs (e.g. only do NMR if the "
                    "Frequencies job found no imaginary modes). Watch progress here and on the "
-                   "Calculations tab.\n\nSelect a node (or several) first to run ONLY that "
-                   "pipeline — handy when the canvas holds several independent networks. With "
-                   "nothing selected, every network runs.")
+                   "Calculations tab. The app must stay open while it advances.\n\nSelect a node "
+                   "(or several) first to run ONLY that pipeline — handy when the canvas holds "
+                   "several independent networks. With nothing selected, every network runs.")
+        tip(b_unatt, "Cluster only. Submit the whole pipeline as a SLURM dependency chain: each "
+                     "step is held until the job it needs finishes, and a Condition becomes a "
+                     "check inside the job. SLURM then runs everything on its own — you can close "
+                     "ORCA Studio and MobaXterm. Use this for long pipelines you don't want to "
+                     "babysit. (Selection scoping works the same as Run pipeline.)")
         tip(b_gen, "Expand the pipeline into planned calculations (with geometry parent-links and "
                    "conditional gates) and jump to the Calculations tab — but don't launch them. "
                    "Use this if you want to review or edit before running.")
@@ -1209,6 +1217,21 @@ class WorkflowTab(ttk.Frame):
         scope = "selected pipeline" if source_ids is not None else "pipeline"
         self.app.set_status("{} running: {} calculation(s) under automatic control."
                             .format(scope.capitalize(), len(calcs)))
+        self.refresh_live()
+
+    def on_submit_unattended(self):
+        source_ids = self._selected_sources()
+        res = self._expand("Submit", source_ids=source_ids)
+        if res is None:
+            return
+        calcs, _ = res
+        self.app.refresh_all_tabs()
+        try:
+            self.app.notebook.select(self.app.calculations_tab)
+        except Exception:
+            pass
+        self.app.calculations_tab.submit_unattended(
+            [c.id for c in calcs], reports=self._report_specs(source_ids=source_ids))
         self.refresh_live()
 
     # ----------------------------------------------------- live node coloring

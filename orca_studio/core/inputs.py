@@ -175,6 +175,24 @@ def render_inp(recipe, atoms, charge, multiplicity):
     return recipe.template.replace(COORDS_PLACEHOLDER, coords)
 
 
+def render_inp_xyzfile(recipe, xyz_path, charge, multiplicity):
+    # type: (Recipe, str, int, int) -> str
+    """Render an .inp whose geometry is read from an external .xyz at run time
+    (`* xyzfile CHARGE MULT path`) rather than being embedded.
+
+    Used for unattended dependency chains: a derived calc can be built and
+    submitted *before* its parent runs, because ORCA reads the parent's
+    optimised geometry from `xyz_path` (an absolute path on the shared
+    filesystem) when the job actually starts — by which point the parent has
+    finished and written it."""
+    coords = "* xyzfile {} {} {}".format(charge, multiplicity, xyz_path)
+    if COORDS_PLACEHOLDER not in recipe.template:
+        raise ValueError(
+            "Recipe {!r} has no {} placeholder.".format(recipe.name, COORDS_PLACEHOLDER)
+        )
+    return recipe.template.replace(COORDS_PLACEHOLDER, coords)
+
+
 def parse_cores(inp_text):
     # type: (str) -> int
     """Return the nprocs declared in `%pal nprocs N`. Defaults to 1 if absent."""

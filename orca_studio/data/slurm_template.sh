@@ -22,6 +22,11 @@ echo "The inp file is ${INPUT_FILE}"
 WORK_DIRECTORY_TO_STORE_RESULTS=$PWD
 echo "The wdir is ${WORK_DIRECTORY_TO_STORE_RESULTS}"
 
+# Optional workflow gate: a Condition node injects a check here that exits 0
+# (skipping this calculation) before any modules are loaded or work is done, if
+# the condition on the feeding job's output isn't met. Empty for normal jobs.
+!!##PREAMBLE##!!
+
 module purge
 module load orca/6.0.1-shared
 

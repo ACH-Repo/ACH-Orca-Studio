@@ -319,13 +319,16 @@ class IRSpectrumWindow(tk.Toplevel):
         self._hover_artists = []
 
     def _on_motion(self, event):
-        if event.inaxes is not self.ax or event.xdata is None:
+        ax = getattr(self, "ax", None)
+        if ax is None:
+            return  # first draw hasn't run yet (deferred); nothing to hover
+        if event.inaxes is not ax or event.xdata is None:
             if self._hover_artists:
                 self._clear_hover(); self.canvas.draw_idle()
             return
         # Grab the peak(s) right under the pointer, comparing in data units
         # (cm⁻¹) so it's independent of the display's pixel scaling.
-        x0, x1 = self.ax.get_xlim()
+        x0, x1 = ax.get_xlim()
         tol = abs(x1 - x0) * 0.01 or 5.0
         near = [(c, it) for c, it in zip(self._centers, self._intens)
                 if abs(c - event.xdata) <= tol]
@@ -614,12 +617,15 @@ class NMRSpectrumWindow(tk.Toplevel):
             self.xmax_var.set("{:.2f}".format(max(x0, x1)))
 
     def _on_motion(self, event):
-        if event.inaxes is not self.ax or event.xdata is None:
+        ax = getattr(self, "ax", None)
+        if ax is None:
+            return  # first draw hasn't run yet (deferred); nothing to hover
+        if event.inaxes is not ax or event.xdata is None:
             self._set_active(None)
             return
         # Work in data units (ppm) so it's symmetric about each peak and
         # independent of the display's pixel scaling.
-        x0, x1 = self.ax.get_xlim()
+        x0, x1 = ax.get_xlim()
         tol = abs(x1 - x0) * 0.025 or 0.5
         best = None
         best_d = 1e9
