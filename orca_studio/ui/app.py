@@ -171,8 +171,6 @@ class App(object):
 
         from orca_studio.ui.molecules_tab import MoleculesTab
         from orca_studio.ui.recipes_tab import RecipesTab
-        from orca_studio.ui.benchmark_tab import BenchmarkTab
-        from orca_studio.ui.workflow_tab import WorkflowTab
         from orca_studio.ui.calculations_tab import CalculationsTab
         from orca_studio.ui.report_tab import ReportTab
 
@@ -180,8 +178,12 @@ class App(object):
         self.recipes_tab = RecipesTab(self.notebook, self)
         self.calculations_tab = CalculationsTab(self.notebook, self)
         self.report_tab = ReportTab(self.notebook, self)
-        self.benchmark_tab = BenchmarkTab(self.notebook, self)
-        self.workflow_tab = WorkflowTab(self.notebook, self)
+        # Benchmark and Workflow are the heavy "tools" tabs (workflow_tab builds
+        # a node-editor Canvas with many widgets) and they're often unused in a
+        # given session. Build them on first selection, not at startup — over
+        # X-forwarding the per-widget round-trip cost dominates the empty start.
+        self.benchmark_tab = None     # type: Optional[ttk.Frame]
+        self.workflow_tab = None      # type: Optional[ttk.Frame]
 
         # The four pipeline tabs in chronological order...
         self.notebook.add(self.molecules_tab, text="Molecules")
@@ -194,12 +196,14 @@ class App(object):
         # them.
         self._bench_swatch = tk.PhotoImage(width=13, height=13)
         self._bench_swatch.put("#7aa8d6", to=(0, 0, 13, 13))
-        self.notebook.add(self.benchmark_tab, text=" Benchmark",
-                          image=self._bench_swatch, compound="left")
         self._wf_swatch = tk.PhotoImage(width=13, height=13)
         self._wf_swatch.put("#9b7ad6", to=(0, 0, 13, 13))
-        self.notebook.add(self.workflow_tab, text=" Workflow",
-                          image=self._wf_swatch, compound="left")
+        # placeholder -> spec to materialise the real tab on first selection.
+        self._lazy_tabs = {}  # type: dict
+        self._add_lazy_tab("benchmark_tab", " Benchmark", self._bench_swatch,
+                           "orca_studio.ui.benchmark_tab", "BenchmarkTab")
+        self._add_lazy_tab("workflow_tab", " Workflow", self._wf_swatch,
+                           "orca_studio.ui.workflow_tab", "WorkflowTab")
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -207,12 +211,47 @@ class App(object):
         status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, relief=tk.SUNKEN)
         status.pack(side=tk.BOTTOM, fill=tk.X)
 
+    def _add_lazy_tab(self, attr, text, image, module_name, class_name):
+        # type: (str, str, tk.PhotoImage, str, str) -> None
+        """Add a placeholder Frame to the notebook; the real tab is constructed
+        on first selection (see _materialize_lazy_tab). Cuts startup widget
+        churn — especially over X-forwarded Tk where every widget is a round-trip."""
+        placeholder = ttk.Frame(self.notebook)
+        self.notebook.add(placeholder, text=text, image=image, compound="left")
+        self._lazy_tabs[str(placeholder)] = {
+            "attr": attr, "text": text, "image": image,
+            "module": module_name, "class": class_name,
+            "placeholder": placeholder,
+        }
+
+    def _materialize_lazy_tab(self, placeholder_path):
+        # type: (str) -> Optional[ttk.Frame]
+        spec = self._lazy_tabs.pop(placeholder_path, None)
+        if spec is None:
+            return None
+        # Build the real tab, swap it into the placeholder's notebook slot.
+        import importlib
+        cls = getattr(importlib.import_module(spec["module"]), spec["class"])
+        real = cls(self.notebook, self)
+        idx = self.notebook.index(spec["placeholder"])
+        self.notebook.forget(spec["placeholder"])
+        self.notebook.insert(idx, real, text=spec["text"],
+                             image=spec["image"], compound="left")
+        spec["placeholder"].destroy()
+        setattr(self, spec["attr"], real)
+        self.notebook.select(real)   # re-fires <<NotebookTabChanged>>; refresh handled there
+        return real
+
     def _on_tab_changed(self, _event):
-        idx = self.notebook.index(self.notebook.select())
-        tab = self.notebook.nametowidget(self.notebook.select())
+        sel = self.notebook.select()
+        if sel in self._lazy_tabs:
+            # Build the real tab now, then return — the select() inside
+            # _materialize_lazy_tab re-fires this handler against the real tab.
+            self._materialize_lazy_tab(sel)
+            return
+        tab = self.notebook.nametowidget(sel)
         if hasattr(tab, "refresh"):
             tab.refresh()
-        _ = idx
 
     def _on_email_change(self):
         # Email is a per-user setting, persisted to ~/.orca_studio.json — never
