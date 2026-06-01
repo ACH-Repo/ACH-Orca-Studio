@@ -16,8 +16,25 @@ cycles or gradients) and the plot shows SCF convergence for those. ORCA 6 SCF
 iterations live under D-I-I-S / S-O-S-C-F headers, not "SCF ITERATIONS".
 """
 
+import os
 import re
 from typing import Dict, List
+
+
+def read_tail(path, max_bytes=262144):
+    # type: (str, int) -> str
+    """Read at most the last `max_bytes` of a file as text. Status checks on
+    huge ORCA outputs only need the end — the termination/error markers, the
+    last SCF block and the latest opt cycle all live there — so this avoids
+    reading (and, on a shared filesystem, transferring) tens of MB per file."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(-max_bytes, os.SEEK_END)
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 _FINAL_E = re.compile(r"FINAL SINGLE POINT ENERGY\s+(-?\d+\.\d+)")
@@ -60,7 +77,10 @@ def parse_orca_output(text):
         "final_energies": final_energies,
         "rms_grads": rms_grads,
         "max_grads": max_grads,
-        "n_opt_cycles": len(opt_cycles),
+        # Use the highest printed cycle number, not the count, so status stays
+        # correct even when only the tail of a huge .out is parsed (see the
+        # tail-read in the Calculations tab). Equal to the count for a full file.
+        "n_opt_cycles": max(opt_cycles) if opt_cycles else 0,
         "scf_iterations": _parse_last_scf_block(text),
         "terminated_normally": bool(_TERM_OK.search(text)),
         "has_error": bool(_ERROR.search(text)),

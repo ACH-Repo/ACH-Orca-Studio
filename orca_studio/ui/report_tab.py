@@ -177,12 +177,9 @@ class ReportTab(ttk.Frame):
             op = self._out_path(calc)
             if not op or not os.path.isfile(op):
                 continue
-            try:
-                with open(op, "r", encoding="utf-8", errors="replace") as f:
-                    head_tail = f.read()
-            except IOError:
-                continue
-            if orca_parser._TERM_OK.search(head_tail):
+            # Only the tail is needed to see "TERMINATED NORMALLY" — reading the
+            # whole (possibly tens-of-MB) file here made opening a big project slow.
+            if orca_parser._TERM_OK.search(orca_parser.read_tail(op)):
                 out.append((calc, self.app.get_recipe(calc.recipe_name)))
         return out
 

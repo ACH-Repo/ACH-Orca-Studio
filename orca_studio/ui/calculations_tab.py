@@ -524,6 +524,12 @@ class CalculationsTab(ttk.Frame):
         label, tag, _done, _active = self._own_state(calc)
         return (label, tag)
 
+    # Status only needs the end of the file (termination/error markers, the last
+    # SCF block, the latest opt cycle), so we parse just the tail of big outputs.
+    # An ORCA opt of a large molecule can be tens of MB; reading the whole thing
+    # for every row was the main reason opening a 40-calc project took minutes.
+    _STATUS_TAIL_BYTES = 256 * 1024
+
     def _parse_out(self, calc):
         path = self._out_path(calc)
         if not path or not os.path.isfile(path):
@@ -537,9 +543,12 @@ class CalculationsTab(ttk.Frame):
         if cached is not None and cached[0] == sig[0] and cached[1] == sig[1]:
             return cached[2]  # unchanged since last parse — reuse
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                parsed = orca_parser.parse_orca_output(f.read())
-        except IOError:
+            with open(path, "rb") as f:
+                if sig[1] > self._STATUS_TAIL_BYTES:
+                    f.seek(-self._STATUS_TAIL_BYTES, os.SEEK_END)
+                data = f.read()
+            parsed = orca_parser.parse_orca_output(data.decode("utf-8", errors="replace"))
+        except (IOError, OSError):
             return None
         # Bound the cache (one entry per output file is plenty for any project).
         if len(self._parse_cache) > 500:
