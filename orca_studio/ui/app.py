@@ -213,44 +213,51 @@ class App(object):
 
     def _add_lazy_tab(self, attr, text, image, module_name, class_name):
         # type: (str, str, tk.PhotoImage, str, str) -> None
-        """Add a placeholder Frame to the notebook; the real tab is constructed
-        on first selection (see _materialize_lazy_tab). Cuts startup widget
-        churn — especially over X-forwarded Tk where every widget is a round-trip."""
+        """Add a permanent placeholder Frame to the notebook; the real tab is
+        built *inside* this placeholder on first selection (see
+        _materialize_lazy_tab). Cuts startup widget churn — especially over
+        X-forwarded Tk where every widget is a round-trip.
+
+        The placeholder stays the notebook tab for the app's whole life; we only
+        ever pack the real tab into it. We deliberately do NOT forget/insert
+        notebook tabs at selection time: forgetting the currently-selected tab
+        makes ttk auto-select a neighbour, which re-fires <<NotebookTabChanged>>
+        re-entrantly and corrupts the tab list (the cause of the earlier
+        'Slave index out of bounds' crash that made these tabs vanish)."""
         placeholder = ttk.Frame(self.notebook)
         self.notebook.add(placeholder, text=text, image=image, compound="left")
         self._lazy_tabs[str(placeholder)] = {
-            "attr": attr, "text": text, "image": image,
-            "module": module_name, "class": class_name,
-            "placeholder": placeholder,
+            "attr": attr, "module": module_name, "class": class_name,
+            "placeholder": placeholder, "real": None,
         }
 
     def _materialize_lazy_tab(self, placeholder_path):
         # type: (str) -> Optional[ttk.Frame]
-        spec = self._lazy_tabs.pop(placeholder_path, None)
+        """Build (once) the real tab inside its placeholder and return it.
+        Idempotent: subsequent calls return the already-built tab."""
+        spec = self._lazy_tabs.get(placeholder_path)
         if spec is None:
             return None
-        # Build the real tab, swap it into the placeholder's notebook slot.
+        if spec["real"] is not None:
+            return spec["real"]
         import importlib
         cls = getattr(importlib.import_module(spec["module"]), spec["class"])
-        real = cls(self.notebook, self)
-        idx = self.notebook.index(spec["placeholder"])
-        self.notebook.forget(spec["placeholder"])
-        self.notebook.insert(idx, real, text=spec["text"],
-                             image=spec["image"], compound="left")
-        spec["placeholder"].destroy()
-        setattr(self, spec["attr"], real)
-        self.notebook.select(real)   # re-fires <<NotebookTabChanged>>; refresh handled there
+        real = cls(spec["placeholder"], self)   # parented INSIDE the placeholder
+        real.pack(fill=tk.BOTH, expand=True)
+        spec["real"] = real
+        setattr(self, spec["attr"], real)        # e.g. self.workflow_tab -> real
         return real
 
     def _on_tab_changed(self, _event):
         sel = self.notebook.select()
-        if sel in self._lazy_tabs:
-            # Build the real tab now, then return — the select() inside
-            # _materialize_lazy_tab re-fires this handler against the real tab.
-            self._materialize_lazy_tab(sel)
-            return
-        tab = self.notebook.nametowidget(sel)
-        if hasattr(tab, "refresh"):
+        spec = self._lazy_tabs.get(sel)
+        if spec is not None:
+            # Selecting the placeholder: build the real tab into it on first
+            # visit (no tab add/remove, so no re-entrant tab-changed event).
+            tab = self._materialize_lazy_tab(sel)
+        else:
+            tab = self.notebook.nametowidget(sel)
+        if tab is not None and hasattr(tab, "refresh"):
             tab.refresh()
 
     def _on_email_change(self):
