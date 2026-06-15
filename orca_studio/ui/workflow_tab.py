@@ -92,7 +92,7 @@ class WorkflowTab(ttk.Frame):
                           font=("TkDefaultFont", 10, "bold"), bg="#e0a35a",
                           activebackground="#e8b673", fg="#222222")
         b_run.pack(side=tk.RIGHT, padx=(6, 2))
-        b_unatt = tk.Button(bar, text="⛓ Submit unattended", command=self.on_submit_unattended,
+        b_unatt = tk.Button(bar, text="▶▶ Submit unattended", command=self.on_submit_unattended,
                             bg="#cdebc5", activebackground="#bfe2b6")
         b_unatt.pack(side=tk.RIGHT, padx=2)
         b_gen = tk.Button(bar, text="Generate only", command=self.on_generate,

@@ -39,7 +39,7 @@ class BenchmarkTab(ttk.Frame):
         banner = tk.Frame(self, background="#dce9f7")
         banner.pack(side=tk.TOP, fill=tk.X)
         tk.Label(banner, background="#dce9f7", justify=tk.LEFT, anchor=tk.W,
-                 text="⚗  Benchmark — bulk job generator",
+                 text="Benchmark — bulk job generator",
                  font=("TkDefaultFont", 11, "bold")).pack(side=tk.TOP, anchor=tk.W, padx=10, pady=(6, 0))
         tk.Label(banner, background="#dce9f7", justify=tk.LEFT, anchor=tk.W, foreground="#445",
                  text="A special tool outside the normal workflow. Experimental — its design "
@@ -246,7 +246,7 @@ class BenchmarkTab(ttk.Frame):
             self.count_var.set("Select at least one molecule and one recipe.")
             self.count_lbl.configure(foreground="#888")
         elif dup:
-            self.count_var.set(base + "  ⚠ Some targets collide (same calctype+method+variant) "
+            self.count_var.set(base + "  Warning: Some targets collide (same calctype+method+variant) "
                                        "and would overwrite each other — give those recipes "
                                        "distinct method labels or variants.")
             self.count_lbl.configure(foreground="#b00000")

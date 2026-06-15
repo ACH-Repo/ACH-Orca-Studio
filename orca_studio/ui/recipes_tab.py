@@ -357,7 +357,7 @@ class RecipesTab(ttk.Frame):
             return
         newname = self.name_var.get().strip()
         if not newname:
-            self._set_status("⚠ name required", "#b00000")
+            self._set_status("! name required", "#b00000")
             return
         oldname = r.name
         r.calctype = self.calctype_var.get().strip() or "SP"
@@ -401,7 +401,7 @@ class RecipesTab(ttk.Frame):
         tmpl = self.text.get("1.0", tk.END)
         if COORDS_PLACEHOLDER not in tmpl:
             self.warn_lbl.configure(
-                text="⚠ template has no {} — generated .inp files won't contain the molecule "
+                text="Warning: template has no {} — generated .inp files won't contain the molecule "
                      "coordinates.".format(COORDS_PLACEHOLDER))
         else:
             self.warn_lbl.configure(text="")
