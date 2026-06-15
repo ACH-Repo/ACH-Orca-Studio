@@ -1,0 +1,56 @@
+name: Publish to PyPI
+
+# Builds the sdist + wheel and publishes them to PyPI when a GitHub Release is
+# published. Uses PyPI "Trusted Publishing" (OIDC) — there is no API token to
+# create or store.
+#
+# ONE-TIME SETUP before the first release (https://pypi.org/manage/account/publishing/):
+#   Add a "pending publisher" with:
+#     PyPI project name:  orca-workbench
+#     Owner:              ACH-Repo
+#     Repository name:    ACH-Orca-Studio
+#     Workflow name:      publish.yml
+#     Environment name:   pypi
+#   Then bump the version in pyproject.toml and orca_studio/__init__.py, and cut a
+#   GitHub Release (tag e.g. v1.2.0). This workflow does the rest.
+#
+# Tip: point it at TestPyPI first by adding `repository-url: https://test.pypi.org/legacy/`
+# to the publish step (and registering a pending publisher there) for a dry run.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/orca-workbench
+    permissions:
+      id-token: write       # required for trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
