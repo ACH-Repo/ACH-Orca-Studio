@@ -8,6 +8,9 @@ dist/
 .venv/
 venv/
 
+# Docs site build output (MkDocs)
+/site/
+
 # Editors / IDEs
 .vscode/
 .idea/

@@ -1,0 +1,53 @@
+site_name: ORCA Studio
+site_description: >-
+  Desktop GUI for building, launching, monitoring, and analysing ORCA
+  quantum-chemistry calculations on SLURM clusters.
+site_url: https://ach-repo.github.io/ACH-Orca-Studio/
+repo_url: https://github.com/ACH-Repo/ACH-Orca-Studio
+repo_name: ACH-Repo/ACH-Orca-Studio
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Using ORCA Studio: usage.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+# The folder note docs/README.md is not a site page (kept for the GitHub repo view).
+exclude_docs: |
+  README.md
