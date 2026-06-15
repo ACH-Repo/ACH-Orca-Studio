@@ -1,4 +1,4 @@
-"""Main application window for ORCA Studio.
+"""Main application window for ORCA Workbench.
 
 Holds the current Project object and the recipe library, owns the four tabs,
 and provides File menu operations (New / Open / Save / Save As) plus a status
@@ -12,15 +12,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional
 
-from orca_studio import __version__
-from orca_studio.core import config as config_mod
-from orca_studio.core import inputs as inputs_mod
-from orca_studio.core.inputs import Recipe
-from orca_studio.core.project import Project, load_project, save_project
-from orca_studio.ui import extprog
-from orca_studio.ui import tooltip as tooltip_mod
-from orca_studio.ui.shortcuts import install_global_text_shortcuts
-from orca_studio.ui.tooltip import tip
+from orca_workbench import __version__
+from orca_workbench.core import config as config_mod
+from orca_workbench.core import inputs as inputs_mod
+from orca_workbench.core.inputs import Recipe
+from orca_workbench.core.project import Project, load_project, save_project
+from orca_workbench.ui import extprog
+from orca_workbench.ui import tooltip as tooltip_mod
+from orca_workbench.ui.shortcuts import install_global_text_shortcuts
+from orca_workbench.ui.tooltip import tip
 
 
 DEFAULT_RECIPE_DIR = os.path.join(
@@ -55,7 +55,7 @@ class App(object):
     def __init__(self, root, project_path=None):
         # type: (tk.Tk, Optional[str]) -> None
         self.root = root
-        root.title("ORCA Studio")
+        root.title("ORCA Workbench")
         root.geometry("1100x720")          # fallback size if maximising fails
         _maximize(root)
 
@@ -63,7 +63,7 @@ class App(object):
         self.recipes = []  # type: List[Recipe]
         self.recipe_dir = DEFAULT_RECIPE_DIR
         self._dirty = False
-        # Email lives in per-user config (~/.orca_studio.json), NOT in project
+        # Email lives in per-user config (~/.orca_workbench.json), NOT in project
         # files — so a shared/published project never carries someone's address.
         self.usermail = config_mod.get("usermail", "") or ""
         # Autosave preference (per-user). Debounced; only fires once a project
@@ -144,7 +144,7 @@ class App(object):
         email_entry.pack(side=tk.LEFT, padx=4, pady=4)
         self.email_var.trace_add("write", lambda *_: self._on_email_change())
         _email_tip = ("Your email address for #SBATCH --mail-user (SLURM emails you on job "
-                      "start/end/fail). Stored in your per-user config (~/.orca_studio.json), "
+                      "start/end/fail). Stored in your per-user config (~/.orca_workbench.json), "
                       "NOT in the project file — so sharing or publishing a project never leaks "
                       "an email address. Leave blank for no email.")
         tip(email_label, _email_tip)
@@ -169,10 +169,10 @@ class App(object):
         except Exception:
             pass
 
-        from orca_studio.ui.molecules_tab import MoleculesTab
-        from orca_studio.ui.recipes_tab import RecipesTab
-        from orca_studio.ui.calculations_tab import CalculationsTab
-        from orca_studio.ui.report_tab import ReportTab
+        from orca_workbench.ui.molecules_tab import MoleculesTab
+        from orca_workbench.ui.recipes_tab import RecipesTab
+        from orca_workbench.ui.calculations_tab import CalculationsTab
+        from orca_workbench.ui.report_tab import ReportTab
 
         self.molecules_tab = MoleculesTab(self.notebook, self)
         self.recipes_tab = RecipesTab(self.notebook, self)
@@ -201,9 +201,9 @@ class App(object):
         # placeholder -> spec to materialise the real tab on first selection.
         self._lazy_tabs = {}  # type: dict
         self._add_lazy_tab("benchmark_tab", " Benchmark", self._bench_swatch,
-                           "orca_studio.ui.benchmark_tab", "BenchmarkTab")
+                           "orca_workbench.ui.benchmark_tab", "BenchmarkTab")
         self._add_lazy_tab("workflow_tab", " Workflow", self._wf_swatch,
-                           "orca_studio.ui.workflow_tab", "WorkflowTab")
+                           "orca_workbench.ui.workflow_tab", "WorkflowTab")
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -261,7 +261,7 @@ class App(object):
             tab.refresh()
 
     def _on_email_change(self):
-        # Email is a per-user setting, persisted to ~/.orca_studio.json — never
+        # Email is a per-user setting, persisted to ~/.orca_workbench.json — never
         # the project file. No project dirty flag, no autosave trigger.
         val = self.email_var.get()
         if val != self.usermail:
@@ -342,7 +342,7 @@ class App(object):
     def _update_title(self):
         name = os.path.basename(self.project.path) if self.project.path else "(unsaved project)"
         star = "*" if self._dirty else ""
-        self.root.title("ORCA Studio {} - {}{}".format(__version__, name, star))
+        self.root.title("ORCA Workbench {} - {}{}".format(__version__, name, star))
 
     def set_status(self, msg):
         # type: (str) -> None
@@ -458,15 +458,15 @@ class App(object):
 
     def on_about(self):
         messagebox.showinfo(
-            "About ORCA Studio",
-            "ORCA Studio {}\n\n"
+            "About ORCA Workbench",
+            "ORCA Workbench {}\n\n"
             "Composer for ORCA quantum chemistry calculations on SLURM.\n"
             "Run on the Lido login node, accessed via MobaXterm X-forwarding."
             .format(__version__),
         )
 
     def on_diagnose(self):
-        from orca_studio.core.coords import diagnose_backends
+        from orca_workbench.core.coords import diagnose_backends
         text = diagnose_backends()
         top = tk.Toplevel(self.root)
         top.title("Coordinate backends diagnostic")
@@ -479,7 +479,7 @@ class App(object):
         btns = ttk.Frame(top)
         btns.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
         ttk.Button(btns, text="Close", command=top.destroy).pack(side=tk.RIGHT)
-        from orca_studio.ui.modal import fit_to_content
+        from orca_workbench.ui.modal import fit_to_content
         fit_to_content(top)
 
     def on_quit(self):

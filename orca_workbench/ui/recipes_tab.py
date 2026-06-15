@@ -19,11 +19,11 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
 
-from orca_studio.core import inputs as inputs_mod
-from orca_studio.core.inputs import COORDS_PLACEHOLDER, Recipe
-from orca_studio.ui import extprog
-from orca_studio.ui.shortcuts import install_text_shortcuts
-from orca_studio.ui.tooltip import tip
+from orca_workbench.core import inputs as inputs_mod
+from orca_workbench.core.inputs import COORDS_PLACEHOLDER, Recipe
+from orca_workbench.ui import extprog
+from orca_workbench.ui.shortcuts import install_text_shortcuts
+from orca_workbench.ui.tooltip import tip
 
 
 _HEADING_LABELS = {

@@ -120,7 +120,7 @@ class LocalRunner(object):
             try:
                 if job._out_fh is None:
                     job._out_fh = open(job.out_abs, "w", encoding="utf-8", errors="replace")
-                job._out_fh.write("ORCA Studio local runner failed to launch:\n{}\n".format(e))
+                job._out_fh.write("ORCA Workbench local runner failed to launch:\n{}\n".format(e))
             except Exception:
                 pass
             self._close(job)

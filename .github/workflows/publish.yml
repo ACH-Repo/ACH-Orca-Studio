@@ -11,7 +11,7 @@ name: Publish to PyPI
 #     Repository name:    ACH-Orca-Workbench
 #     Workflow name:      publish.yml
 #     Environment name:   pypi
-#   Then bump the version in pyproject.toml and orca_studio/__init__.py, and cut a
+#   Then bump the version in pyproject.toml and orca_workbench/__init__.py, and cut a
 #   GitHub Release (tag e.g. v1.2.0). This workflow does the rest.
 #
 # Tip: point it at TestPyPI first by adding `repository-url: https://test.pypi.org/legacy/`

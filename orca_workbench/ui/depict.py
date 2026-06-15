@@ -13,7 +13,7 @@ from typing import Optional, Tuple
 # Importing coords as a side effect silences RDKit's/OpenBabel's noisy stderr
 # parse-error logging (see coords._silence_chem_loggers), so typing a partial
 # SMILES while the depiction updates live doesn't spam the terminal.
-from orca_studio.core import coords as _coords  # noqa: F401
+from orca_workbench.core import coords as _coords  # noqa: F401
 
 
 def render_smiles_png(smiles, size=(360, 240)):

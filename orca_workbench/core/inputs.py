@@ -19,7 +19,7 @@ import re
 import sys
 from typing import Dict, List, Optional
 
-from orca_studio.core.coords import Atom, format_atom_block
+from orca_workbench.core.coords import Atom, format_atom_block
 
 
 CORES_RE = re.compile(r"%pal\s+nprocs\s+(\d+)", re.IGNORECASE)
@@ -101,7 +101,7 @@ def load_recipes_from_dir(dirpath):
             continue
         if r.name in seen:
             sys.stderr.write(
-                "orca_studio: skipping duplicate recipe name {!r}\n"
+                "orca_workbench: skipping duplicate recipe name {!r}\n"
                 "  ignored: {}\n"
                 "  kept:    {}\n".format(r.name, path, seen[r.name])
             )

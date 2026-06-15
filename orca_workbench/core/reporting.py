@@ -20,7 +20,7 @@ import json
 import os
 from typing import Callable, Dict, List, Optional
 
-from orca_studio.core import orca_parser as P
+from orca_workbench.core import orca_parser as P
 
 
 class CalcContext(object):
@@ -52,7 +52,7 @@ def _x_converged_geometry(text, ctx):
     # The optimised geometry ORCA writes to <base>.xyz in the run dir.
     if not ctx.rundir_abs:
         return None
-    from orca_studio.core import coords as coords_mod
+    from orca_workbench.core import coords as coords_mod
     xyz = os.path.join(ctx.rundir_abs, ctx.molecule + ".xyz")
     if not os.path.isfile(xyz):
         return None

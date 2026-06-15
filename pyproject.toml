@@ -2,10 +2,9 @@
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-# NOTE: the PyPI distribution name is "orca-workbench" (the plain "orca-studio"
-# was already taken on PyPI by an unrelated ORCA output-parsing package). The
-# *import* package is still `orca_studio` and the launch command is still
-# `orca-studio` — only `pip install orca-workbench` differs.
+# NOTE: distribution, import package, and command are all "orca-workbench" /
+# `orca_workbench`. (The plain "orca-studio" name was already taken on PyPI by an
+# unrelated ORCA output-parsing package — unrelated to this project.)
 [project]
 name = "orca-workbench"
 version = "1.2.0"
@@ -49,10 +48,10 @@ Repository = "https://github.com/ACH-Repo/ACH-Orca-Workbench"
 Issues = "https://github.com/ACH-Repo/ACH-Orca-Workbench/issues"
 
 [project.scripts]
-orca-studio = "orca_studio.__main__:_cli"
+orca-workbench = "orca_workbench.__main__:_cli"
 
 [tool.setuptools]
-packages = ["orca_studio", "orca_studio.core", "orca_studio.ui"]
+packages = ["orca_workbench", "orca_workbench.core", "orca_workbench.ui"]
 
 [tool.setuptools.package-data]
-orca_studio = ["data/*.sh", "data/recipes/*.json"]
+orca_workbench = ["data/*.sh", "data/recipes/*.json"]

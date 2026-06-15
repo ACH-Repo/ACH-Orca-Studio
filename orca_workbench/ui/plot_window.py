@@ -14,7 +14,7 @@ import os
 import tkinter as tk
 from tkinter import ttk
 
-from orca_studio.core import orca_parser
+from orca_workbench.core import orca_parser
 
 
 def _pin_device_pixel_ratio(canvas):
@@ -50,7 +50,7 @@ class LivePlotWindow(tk.Toplevel):
             msg = ("Could not initialise matplotlib:\n  {}\n\n"
                    "Install it on the cluster with:\n"
                    "  pip install --user matplotlib\n\n"
-                   "(The rest of ORCA Studio works without it — you just won't get "
+                   "(The rest of ORCA Workbench works without it — you just won't get "
                    "live plots.)".format(e))
             ttk.Label(self, text=msg, justify=tk.LEFT, wraplength=520).pack(
                 padx=20, pady=20)
@@ -83,7 +83,7 @@ class LivePlotWindow(tk.Toplevel):
         ttk.Button(btns, text="Close", command=self._on_close).pack(side=tk.RIGHT)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        from orca_studio.ui.modal import fit_to_content
+        from orca_workbench.ui.modal import fit_to_content
         fit_to_content(self)   # don't let the controls clip at high UI scaling
         # Populate once realised; matplotlib's own resize keeps the figure
         # fitted to the window (device ratio pinned above).

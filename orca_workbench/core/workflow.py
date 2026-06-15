@@ -81,7 +81,7 @@ PREDICATES = {
 def eval_predicate(name, out_text):
     # type: (str, str) -> bool
     """Evaluate a condition predicate against a calculation's .out text."""
-    from orca_studio.core import orca_parser as P
+    from orca_workbench.core import orca_parser as P
     if not out_text:
         return False
     if name == "terminated_ok":

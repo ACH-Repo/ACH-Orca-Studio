@@ -27,5 +27,5 @@ submit_all.sh
 *.out
 *.gbw
 
-# Per-user app config (lives in ~/.orca_studio.json anyway; never commit one)
-.orca_studio.json
+# Per-user app config (lives in ~/.orca_workbench.json anyway; never commit one)
+.orca_workbench.json

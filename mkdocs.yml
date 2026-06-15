@@ -1,4 +1,4 @@
-site_name: ORCA Studio
+site_name: ORCA Workbench
 site_description: >-
   Desktop GUI for building, launching, monitoring, and analysing ORCA
   quantum-chemistry calculations on SLURM clusters.
@@ -33,7 +33,7 @@ theme:
 nav:
   - Home: index.md
   - Installation: installation.md
-  - Using ORCA Studio: usage.md
+  - Using ORCA Workbench: usage.md
 
 markdown_extensions:
   - admonition

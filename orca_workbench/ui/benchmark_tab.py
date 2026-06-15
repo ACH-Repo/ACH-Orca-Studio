@@ -21,8 +21,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import List
 
-from orca_studio.core.project import PlannedCalc, new_calc_id
-from orca_studio.ui.tooltip import tip
+from orca_workbench.core.project import PlannedCalc, new_calc_id
+from orca_workbench.ui.tooltip import tip
 
 
 class BenchmarkTab(ttk.Frame):

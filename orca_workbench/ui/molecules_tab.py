@@ -8,13 +8,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
-from orca_studio.core import config as config_mod
-from orca_studio.core import coords as coords_mod
-from orca_studio.core.project import Molecule
-from orca_studio.ui.depict import smiles_to_photoimage
-from orca_studio.ui.modal import make_modal
-from orca_studio.ui.shortcuts import install_text_shortcuts
-from orca_studio.ui.tooltip import tip
+from orca_workbench.core import config as config_mod
+from orca_workbench.core import coords as coords_mod
+from orca_workbench.core.project import Molecule
+from orca_workbench.ui.depict import smiles_to_photoimage
+from orca_workbench.ui.modal import make_modal
+from orca_workbench.ui.shortcuts import install_text_shortcuts
+from orca_workbench.ui.tooltip import tip
 
 
 class MoleculesTab(ttk.Frame):
@@ -1068,7 +1068,7 @@ class OpenXyzDialog(tk.Toplevel):
         self._parent = parent
         self._xyz_path = xyz_path
 
-        msg = ("Avogadro isn't available on the machine running ORCA Studio, so the app "
+        msg = ("Avogadro isn't available on the machine running ORCA Workbench, so the app "
                "can't open it for you (this is normal when running on the Lido gateway — "
                "your Avogadro is on your Windows PC).\n\n"
                "Options: open the path below from MobaXterm's file browser (it downloads the "
@@ -1132,11 +1132,11 @@ class AvogadroPathDialog(tk.Toplevel):
         self.resizable(False, False)
 
         msg = ("Set this ONLY if Avogadro is installed on the same machine the app is "
-               "running on. If you run ORCA Studio on the Lido gateway via MobaXterm, your "
+               "running on. If you run ORCA Workbench on the Lido gateway via MobaXterm, your "
                "Avogadro is on your Windows PC and the app can't reach it from the cluster — "
                "use MobaXterm's file browser to open .xyz files instead (Cancel this).\n\n"
                "If you DO have Avogadro here (a local Windows run, or an Avogadro module on "
-               "the cluster), enter its path/command. Remembered in ~/.orca_studio.json. "
+               "the cluster), enter its path/command. Remembered in ~/.orca_workbench.json. "
                "On Windows: full path to Avogadro2.exe. On Linux: 'avogadro'/'avogadro2' if "
                "it's on PATH.")
         ttk.Label(self, text=msg, wraplength=460, justify=tk.LEFT).pack(

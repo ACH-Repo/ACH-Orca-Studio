@@ -1,4 +1,4 @@
-# Minimal runtime dependencies for ORCA Studio.
+# Minimal runtime dependencies for ORCA Workbench.
 #
 # Install on Lido after `module load python`:
 #     pip install --user -r requirements.txt

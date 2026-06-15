@@ -1,17 +1,17 @@
-# ORCA Studio
+# ORCA Workbench
 
 A graphical **workbench** (front-end) for building, launching, and monitoring [ORCA](https://www.faccts.de/orca/) quantum-chemistry calculations on a SLURM cluster — from a SMILES string to a submitted job to a plotted IR/NMR spectrum, without leaving the window. It doesn't do the chemistry itself; it drives ORCA and SLURM and visualises their output.
 
 <!-- TODO: add a screenshot of the running app as the first visual.
      Suggested: the Calculations tab mid-run, or the Molecules tab showing a
      structure. Save it as docs/screenshot.png and it will render below. -->
-![ORCA Studio](docs/screenshot.png)
+![ORCA Workbench](docs/screenshot.png)
 
 ---
 
 ## TL;DR
 
-ORCA Studio turns the usual "write an input file, scp it, sbatch it, squeue it, scp the output back, parse it" loop into a tabbed GUI:
+ORCA Workbench turns the usual "write an input file, scp it, sbatch it, squeue it, scp the output back, parse it" loop into a tabbed GUI:
 
 - **Draw molecules** from SMILES (RDKit → OpenBabel fallback) or import `.xyz`.
 - **Define theory levels** once as reusable recipes (method + basis + variant).
@@ -33,7 +33,7 @@ Pick whichever fits:
   pip install git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git
   ```
   (On Windows: `py -m pip install git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git`.)
-  Then launch with `orca-studio` (or `python -m orca_studio`). This is the fastest
+  Then launch with `orca-workbench` (or `python -m orca_workbench`). This is the fastest
   path and needs no checked-out folder — but you can't edit the source in place, and
   on the cluster you still need `module load python` first (see the note below).
 - **Editable (recommended on the cluster, or if you'll tweak the code)** — clone once
@@ -45,12 +45,12 @@ See **[Updating](#updating)** for how to upgrade each kind of install.
 
 ### On a SLURM cluster (e.g. Lido) — via X-forwarding
 
-Copy/clone this repository somewhere stable (e.g. `/work/<your_id>/orca-studio`), then from the repository root:
+Copy/clone this repository somewhere stable (e.g. `/work/<your_id>/orca-workbench`), then from the repository root:
 
 ```bash
 module load python          # REQUIRED — provides numpy's OpenBLAS (see note)
 pip install --user -e .
-orca-studio                 # launches; the window appears on your PC over X-forwarding
+orca-workbench                 # launches; the window appears on your PC over X-forwarding
 ```
 
 > **`module load python` is mandatory on the cluster.** The scientific stack
@@ -59,7 +59,7 @@ orca-studio                 # launches; the window appears on your PC over X-for
 > `ImportError: libopenblas.so.0: cannot open shared object file`.
 > Put `module load python` in your `~/.bashrc` so you never forget it.
 
-If `~/.local/bin` isn't on your `PATH`, either add it or just launch with `python -m orca_studio`.
+If `~/.local/bin` isn't on your `PATH`, either add it or just launch with `python -m orca_workbench`.
 
 ### On a Windows PC
 
@@ -67,11 +67,11 @@ No `module load` needed — the Windows wheels bundle their own libraries. From 
 
 ```cmd
 py -m pip install --user -e .
-py -m orca_studio
+py -m orca_workbench
 ```
 
 - Use `py -m pip` (not bare `pip`) so it installs into the Python you actually launch with.
-- The `orca-studio` command lands in a per-user `Scripts` folder that often isn't on `PATH`, so **`py -m orca_studio` is the reliable way to launch** (works from anywhere). pip prints that Scripts path during install if you'd rather add it to `PATH`.
+- The `orca-workbench` command lands in a per-user `Scripts` folder that often isn't on `PATH`, so **`py -m orca_workbench` is the reliable way to launch** (works from anywhere). pip prints that Scripts path during install if you'd rather add it to `PATH`.
 - Keep the folder where it is (e.g. in your cloned repo); the editable install points at it.
 
 <details>
@@ -81,7 +81,7 @@ py -m orca_studio
 py -m venv .venv
 .venv\Scripts\activate
 pip install -e .
-python -m orca_studio
+python -m orca_workbench
 ```
 On Linux/macOS use `source .venv/bin/activate` instead of the second line.
 </details>
@@ -89,7 +89,7 @@ On Linux/macOS use `source .venv/bin/activate` instead of the second line.
 ### Verify the environment
 
 ```bash
-orca-studio --diagnose      # or: python -m orca_studio --diagnose
+orca-workbench --diagnose      # or: python -m orca_workbench --diagnose
 ```
 
 Reports whether RDKit / OpenBabel can generate coordinates on this machine — run it first if structure generation misbehaves.
@@ -97,7 +97,7 @@ Reports whether RDKit / OpenBabel can generate coordinates on this machine — r
 Open a saved project straight away:
 
 ```bash
-orca-studio myproject.json
+orca-workbench myproject.json
 ```
 
 ### Updating
@@ -165,7 +165,7 @@ Each node is a step; **green ports carry a geometry, orange ports carry results*
 ### Running it
 
 - **Run pipeline** expands the graph across your molecules and runs it live: each step builds and launches as soon as its input geometry is ready, conditions are evaluated the moment their feeding job finishes, and nodes recolour by state and show a live **progress caption** (e.g. *running 2/3 → done 3/3*). Colours: grey = waiting, blue = running, green = done, red = error, purple = skipped, orange = interrupted. It works the same on the cluster (`sbatch`) and on a PC (local ORCA). *The app drives this, so it must stay open while the pipeline advances* — for long runs use **Submit unattended** instead.
-- **▶▶ Submit unattended** (cluster only) hands the whole pipeline to **SLURM as a dependency chain**, so it runs with no GUI: each step is submitted with `--dependency=afterok:<job>` on the job whose geometry it needs, derived geometries are read at run time via ORCA's `* xyzfile` (so a step can be submitted before its parent has finished), and a **Condition** node becomes a small grep/awk **guard inside the job** that `exit 0`s (skipping the branch) if the test fails. Submit, then **close ORCA Studio and MobaXterm** — SLURM runs the chain on its own. (Merged reports are written by the app, so reopen the project and use the Report tab once the jobs finish.)
+- **▶▶ Submit unattended** (cluster only) hands the whole pipeline to **SLURM as a dependency chain**, so it runs with no GUI: each step is submitted with `--dependency=afterok:<job>` on the job whose geometry it needs, derived geometries are read at run time via ORCA's `* xyzfile` (so a step can be submitted before its parent has finished), and a **Condition** node becomes a small grep/awk **guard inside the job** that `exit 0`s (skipping the branch) if the test fails. Submit, then **close ORCA Workbench and MobaXterm** — SLURM runs the chain on its own. (Merged reports are written by the app, so reopen the project and use the Report tab once the jobs finish.)
 - **Run just one pipeline.** With several independent networks on the canvas, **select any node** in one (or box-select it) before clicking Run pipeline / Submit unattended, and only that network runs. With nothing selected, all networks run.
 - **Generate only** creates the planned calculations and jumps to the Calculations tab without launching, in case you want to review or edit them first.
 - **Inspect from the graph.** Select a finished calc node and the **Node settings** panel lists its results with one-click launchers — IR / NMR spectrum, the live progress plot, the optimised structure in your 3D viewer, and the raw `.out`.
@@ -183,9 +183,9 @@ Each node is a step; **green ports carry a geometry, orange ports carry results*
 
 Once installed (see [Installation → On a Windows PC](#on-a-windows-pc)), the same app runs on a normal desktop; the cluster-only actions adapt automatically:
 
-- **Run locally** replaces Submit when `sbatch` isn't found: point the app at your local `orca` executable once (remembered in `~/.orca_studio.json`) and it runs the built jobs through a serial queue — one at a time by default — streaming each `.out` so the live plots, reports, and the Workflow pipeline all work just as they do on the cluster. The button label and behaviour switch on their own based on whether `sbatch`/`squeue` are present.
+- **Run locally** replaces Submit when `sbatch` isn't found: point the app at your local `orca` executable once (remembered in `~/.orca_workbench.json`) and it runs the built jobs through a serial queue — one at a time by default — streaming each `.out` so the live plots, reports, and the Workflow pipeline all work just as they do on the cluster. The button label and behaviour switch on their own based on whether `sbatch`/`squeue` are present.
 - **Cores are capped to your CPU.** When building for a local run, a recipe's `%pal nprocs` is clamped to the number of cores the machine reports (falling back to 2), so a recipe that asks for 8 won't oversubscribe a 4-core laptop. On the cluster the recipe's value is used as-is.
-- **Avogadro** opens locally: double-click a molecule, point it at your `Avogadro2.exe` once, and it's remembered in `~/.orca_studio.json`.
+- **Avogadro** opens locally: double-click a molecule, point it at your `Avogadro2.exe` once, and it's remembered in `~/.orca_workbench.json`.
 - **Coordinate generation, recipes, spectra, and reports** all work the same.
 
 ---
@@ -206,9 +206,9 @@ All are pulled in automatically by the `pip install -e .` step above (Windows wh
 
 ```
 ACH-Orca-Workbench/
-├── pyproject.toml            # package metadata + the `orca-studio` console script
+├── pyproject.toml            # package metadata + the `orca-workbench` console script
 ├── requirements.txt
-├── orca_studio/
+├── orca_workbench/
 │   ├── __main__.py           # entry point + --diagnose / --help / project-path arg
 │   ├── core/                 # pure logic, no GUI (unit-testable)
 │   │   ├── coords.py         # SMILES → 3D XYZ (RDKit/OpenBabel), xyz I/O
@@ -221,7 +221,7 @@ ACH-Orca-Workbench/
 │   │   ├── local_runner.py   # serial local-ORCA job queue (PC mode)
 │   │   ├── workflow.py       # node-graph pipeline model + conditional expansion
 │   │   ├── project.py        # project.json model (molecules, planned calcs)
-│   │   └── config.py         # per-user config (~/.orca_studio.json)
+│   │   └── config.py         # per-user config (~/.orca_workbench.json)
 │   ├── ui/                   # Tkinter widgets, one module per tab + helpers
 │   └── data/
 │       ├── slurm_template.sh # the SLURM submit template
@@ -245,9 +245,9 @@ ACH-Orca-Workbench/
 
 ## Authorship and AI involvement
 
-This project was conceived and directed by **[@p3rAsperaAdAstra](https://github.com/p3rAsperaAdAstra)** (Christian Nelle). It grew out of his own collection of ORCA/SLURM automation scripts (coordinate generation, input distribution, job launching, and the SLURM template), which embody the workflow and the directory conventions ORCA Studio is built around. Those scripts, the domain expertise, the design decisions, and the testing are his.
+This project was conceived and directed by **[@p3rAsperaAdAstra](https://github.com/p3rAsperaAdAstra)** (Christian Nelle). It grew out of his own collection of ORCA/SLURM automation scripts (coordinate generation, input distribution, job launching, and the SLURM template), which embody the workflow and the directory conventions ORCA Workbench is built around. Those scripts, the domain expertise, the design decisions, and the testing are his.
 
-The **ORCA Studio application code was written by Claude (Anthropic's AI assistant) at the author's direction**, in May 2026, turning those scripts and the author's design choices into the tabbed GUI documented here. Output-parsing regexes and the workflow logic were validated against real ORCA 6.0.1 calculations during development.
+The **ORCA Workbench application code was written by Claude (Anthropic's AI assistant) at the author's direction**, in May 2026, turning those scripts and the author's design choices into the tabbed GUI documented here. Output-parsing regexes and the workflow logic were validated against real ORCA 6.0.1 calculations during development.
 
 This note is included for transparency about what is human-authored versus AI-authored. Nothing here claims the AI did more or less than it did.
 

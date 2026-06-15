@@ -1,6 +1,6 @@
-# Using ORCA Studio
+# Using ORCA Workbench
 
-ORCA Studio is organised as a row of tabs that follow the natural order of a
+ORCA Workbench is organised as a row of tabs that follow the natural order of a
 calculation — draw a molecule, pick a level of theory, run it, read the results.
 
 ## The tabs
@@ -31,7 +31,7 @@ recipe once as a graph and let the app run it:
 
 - **Run pipeline** runs it live — the app drives each step and must stay open.
 - **▶▶ Submit unattended** (cluster only) hands the whole pipeline to SLURM as a
-  dependency chain, so it runs with no GUI; you can close ORCA Studio and your
+  dependency chain, so it runs with no GUI; you can close ORCA Workbench and your
   SSH session.
 - **Generate only** creates the planned calculations without launching them.
 

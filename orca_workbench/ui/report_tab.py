@@ -12,11 +12,11 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import List, Optional
 
-from orca_studio.core import orca_parser
-from orca_studio.core import reporting
-from orca_studio.core import slurm_runtime
-from orca_studio.ui.progress import ProgressDialog
-from orca_studio.ui.tooltip import tip
+from orca_workbench.core import orca_parser
+from orca_workbench.core import reporting
+from orca_workbench.core import slurm_runtime
+from orca_workbench.ui.progress import ProgressDialog
+from orca_workbench.ui.tooltip import tip
 
 
 class ReportTab(ttk.Frame):

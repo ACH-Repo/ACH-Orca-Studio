@@ -21,7 +21,7 @@ Usage:
 import tkinter as tk
 from tkinter import ttk
 
-from orca_studio.ui.modal import make_modal
+from orca_workbench.ui.modal import make_modal
 
 
 class ProgressDialog(tk.Toplevel):

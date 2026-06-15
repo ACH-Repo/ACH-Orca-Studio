@@ -1,6 +1,6 @@
 # Installation
 
-ORCA Studio is a Python package that installs a console command, `orca-studio`.
+ORCA Workbench is a Python package that installs a console command, `orca-workbench`.
 Python **≥ 3.9** with **Tkinter** (bundled with most Python builds) is required;
 the heavy dependencies (`rdkit`, `openbabel-wheel`, `matplotlib`) are pulled in
 automatically.
@@ -23,7 +23,7 @@ Install straight from GitHub:
     py -m pip install git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git
     ```
 
-Then launch with `orca-studio` (or `python -m orca_studio`). This is the fastest
+Then launch with `orca-workbench` (or `python -m orca_workbench`). This is the fastest
 path and needs no checked-out folder — but you can't edit the source in place.
 
 ## Editable — recommended on the cluster, or if you'll tweak the code
@@ -39,7 +39,7 @@ link):
     cd ACH-Orca-Workbench
     module load python          # REQUIRED — see note below
     pip install --user -e .
-    orca-studio                 # window appears on your PC over X-forwarding
+    orca-workbench                 # window appears on your PC over X-forwarding
     ```
 
 === "Windows"
@@ -48,7 +48,7 @@ link):
     git clone https://github.com/ACH-Repo/ACH-Orca-Workbench.git
     cd ACH-Orca-Workbench
     py -m pip install --user -e .
-    py -m orca_studio
+    py -m orca_workbench
     ```
 
 !!! warning "`module load python` is mandatory on the cluster"
@@ -58,20 +58,20 @@ link):
     `module load python` in your `~/.bashrc` so you never forget it.
 
 !!! tip "Launching on Windows"
-    The `orca-studio` command lands in a per-user `Scripts` folder that often
-    isn't on `PATH`, so `py -m orca_studio` is the reliable way to launch from
+    The `orca-workbench` command lands in a per-user `Scripts` folder that often
+    isn't on `PATH`, so `py -m orca_workbench` is the reliable way to launch from
     anywhere. (pip prints that Scripts path during install if you'd rather add it
     to `PATH`.)
 
 ## Verify the environment
 
 ```bash
-orca-studio --diagnose      # or: python -m orca_studio --diagnose
+orca-workbench --diagnose      # or: python -m orca_workbench --diagnose
 ```
 
 Reports whether RDKit / OpenBabel can generate coordinates on this machine — run
 it first if structure generation misbehaves. Open a saved project directly with
-`orca-studio myproject.json`.
+`orca-workbench myproject.json`.
 
 ## Updating
 

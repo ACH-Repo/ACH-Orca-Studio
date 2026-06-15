@@ -1,4 +1,4 @@
-# ORCA Studio
+# ORCA Workbench
 
 A graphical **workbench** for building, launching, and monitoring
 [ORCA](https://www.faccts.de/orca/) quantum-chemistry calculations on a SLURM
@@ -6,7 +6,7 @@ cluster — from a SMILES string, to a submitted job, to a plotted IR/NMR
 spectrum, without leaving the window. It drives ORCA and SLURM and visualises
 their output; it doesn't do the chemistry itself.
 
-![ORCA Studio](screenshot.png)
+![ORCA Workbench](screenshot.png)
 
 ## What it does
 

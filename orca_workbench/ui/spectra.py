@@ -20,9 +20,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional
 
-from orca_studio.core import spectra as S
-from orca_studio.ui.depict import render_smiles_png
-from orca_studio.ui.modal import make_modal
+from orca_workbench.core import spectra as S
+from orca_workbench.ui.depict import render_smiles_png
+from orca_workbench.ui.modal import make_modal
 
 
 def _load_mpl():

@@ -1,7 +1,7 @@
 """Robust launching of, and configuration for, external programs.
 
 Paths to external tools (Avogadro, a text editor, ORCA, …) are stored per-user
-in ~/.orca_studio.json. They can go stale — the user uninstalls or moves the
+in ~/.orca_workbench.json. They can go stale — the user uninstalls or moves the
 program — so every launch here:
 
   1. validates the stored path first (file exists, or resolves on PATH),
@@ -19,8 +19,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional
 
-from orca_studio.core import config as config_mod
-from orca_studio.ui.modal import make_modal
+from orca_workbench.core import config as config_mod
+from orca_workbench.ui.modal import make_modal
 
 
 def _is_usable(path):

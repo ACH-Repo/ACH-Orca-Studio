@@ -17,9 +17,9 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
 
-from orca_studio.core import workflow as wf_mod
-from orca_studio.core.project import PlannedCalc, new_calc_id
-from orca_studio.ui.tooltip import tip
+from orca_workbench.core import workflow as wf_mod
+from orca_workbench.core.project import PlannedCalc, new_calc_id
+from orca_workbench.ui.tooltip import tip
 
 
 NODE_W = 176
@@ -109,7 +109,7 @@ class WorkflowTab(ttk.Frame):
         tip(b_unatt, "Cluster only. Submit the whole pipeline as a SLURM dependency chain: each "
                      "step is held until the job it needs finishes, and a Condition becomes a "
                      "check inside the job. SLURM then runs everything on its own — you can close "
-                     "ORCA Studio and MobaXterm. Use this for long pipelines you don't want to "
+                     "ORCA Workbench and MobaXterm. Use this for long pipelines you don't want to "
                      "babysit. (Selection scoping works the same as Run pipeline.)")
         tip(b_gen, "Expand the pipeline into planned calculations (with geometry parent-links and "
                    "conditional gates) and jump to the Calculations tab — but don't launch them. "

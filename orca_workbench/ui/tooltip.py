@@ -6,7 +6,7 @@ just below the widget. The Toplevel uses wm_overrideredirect(True) so it has
 no window decorations and doesn't steal focus.
 
 Usage:
-    from orca_studio.ui.tooltip import Tooltip
+    from orca_workbench.ui.tooltip import Tooltip
     Tooltip(my_button, "What this button does.")
 
 The returned Tooltip object is kept alive by the widget's binding table — you
