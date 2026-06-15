@@ -30,9 +30,9 @@ Pick whichever fits:
 
 - **Quick (nothing to clone)** — install straight from GitHub and run:
   ```bash
-  pip install git+https://github.com/ACH-Repo/ACH-Orca-Studio.git
+  pip install git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git
   ```
-  (On Windows: `py -m pip install git+https://github.com/ACH-Repo/ACH-Orca-Studio.git`.)
+  (On Windows: `py -m pip install git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git`.)
   Then launch with `orca-studio` (or `python -m orca_studio`). This is the fastest
   path and needs no checked-out folder — but you can't edit the source in place, and
   on the cluster you still need `module load python` first (see the note below).
@@ -106,7 +106,7 @@ orca-studio myproject.json
   picks up the changes; no reinstall needed.
 - **Quick (git+pip) install:** re-run the install with `-U`:
   ```bash
-  pip install -U git+https://github.com/ACH-Repo/ACH-Orca-Studio.git
+  pip install -U git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git
   ```
   (Windows: `py -m pip install -U git+...`.)
 - **On the cluster**, `module load python` is still required every session whichever
@@ -205,7 +205,7 @@ All are pulled in automatically by the `pip install -e .` step above (Windows wh
 ## Project layout
 
 ```
-ACH-Orca-Studio/
+ACH-Orca-Workbench/
 ├── pyproject.toml            # package metadata + the `orca-studio` console script
 ├── requirements.txt
 ├── orca_studio/

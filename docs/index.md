@@ -35,6 +35,6 @@ visualise / report parts.
 
 !!! note "About this documentation"
     This site is a quick entry point. The
-    [project README](https://github.com/ACH-Repo/ACH-Orca-Studio#readme) on
+    [project README](https://github.com/ACH-Repo/ACH-Orca-Workbench#readme) on
     GitHub remains the full, in-depth reference (Workflow internals, the SLURM
     template, the parser, and the design notes).

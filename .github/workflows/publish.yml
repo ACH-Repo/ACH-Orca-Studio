@@ -8,7 +8,7 @@ name: Publish to PyPI
 #   Add a "pending publisher" with:
 #     PyPI project name:  orca-workbench
 #     Owner:              ACH-Repo
-#     Repository name:    ACH-Orca-Studio
+#     Repository name:    ACH-Orca-Workbench
 #     Workflow name:      publish.yml
 #     Environment name:   pypi
 #   Then bump the version in pyproject.toml and orca_studio/__init__.py, and cut a

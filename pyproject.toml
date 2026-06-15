@@ -43,10 +43,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ACH-Repo/ACH-Orca-Studio"
-Documentation = "https://ach-repo.github.io/ACH-Orca-Studio/"
-Repository = "https://github.com/ACH-Repo/ACH-Orca-Studio"
-Issues = "https://github.com/ACH-Repo/ACH-Orca-Studio/issues"
+Homepage = "https://github.com/ACH-Repo/ACH-Orca-Workbench"
+Documentation = "https://ach-repo.github.io/ACH-Orca-Workbench/"
+Repository = "https://github.com/ACH-Repo/ACH-Orca-Workbench"
+Issues = "https://github.com/ACH-Repo/ACH-Orca-Workbench/issues"
 
 [project.scripts]
 orca-studio = "orca_studio.__main__:_cli"

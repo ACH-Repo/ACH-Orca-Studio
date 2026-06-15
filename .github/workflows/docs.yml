@@ -4,7 +4,7 @@ name: Deploy docs
 #
 # One-time setup in the repo: Settings -> Pages -> "Build and deployment" ->
 # Source: "GitHub Actions". After that, every push to main that touches the docs
-# rebuilds and redeploys the site at https://ach-repo.github.io/ACH-Orca-Studio/
+# rebuilds and redeploys the site at https://ach-repo.github.io/ACH-Orca-Workbench/
 
 on:
   push:

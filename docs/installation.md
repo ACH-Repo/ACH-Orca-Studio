@@ -14,13 +14,13 @@ Install straight from GitHub:
 === "Linux / macOS / cluster"
 
     ```bash
-    pip install git+https://github.com/ACH-Repo/ACH-Orca-Studio.git
+    pip install git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git
     ```
 
 === "Windows"
 
     ```bat
-    py -m pip install git+https://github.com/ACH-Repo/ACH-Orca-Studio.git
+    py -m pip install git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git
     ```
 
 Then launch with `orca-studio` (or `python -m orca_studio`). This is the fastest
@@ -35,8 +35,8 @@ link):
 === "Cluster (e.g. Lido)"
 
     ```bash
-    git clone https://github.com/ACH-Repo/ACH-Orca-Studio.git
-    cd ACH-Orca-Studio
+    git clone https://github.com/ACH-Repo/ACH-Orca-Workbench.git
+    cd ACH-Orca-Workbench
     module load python          # REQUIRED — see note below
     pip install --user -e .
     orca-studio                 # window appears on your PC over X-forwarding
@@ -45,8 +45,8 @@ link):
 === "Windows"
 
     ```bat
-    git clone https://github.com/ACH-Repo/ACH-Orca-Studio.git
-    cd ACH-Orca-Studio
+    git clone https://github.com/ACH-Repo/ACH-Orca-Workbench.git
+    cd ACH-Orca-Workbench
     py -m pip install --user -e .
     py -m orca_studio
     ```
@@ -80,7 +80,7 @@ it first if structure generation misbehaves. Open a saved project directly with
 - **Quick (git+pip) install:** re-run with `-U`:
 
     ```bash
-    pip install -U git+https://github.com/ACH-Repo/ACH-Orca-Studio.git
+    pip install -U git+https://github.com/ACH-Repo/ACH-Orca-Workbench.git
     ```
 
 - **On the cluster**, `module load python` is still required every session,

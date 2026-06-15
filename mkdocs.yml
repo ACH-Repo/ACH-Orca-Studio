@@ -2,9 +2,9 @@ site_name: ORCA Studio
 site_description: >-
   Desktop GUI for building, launching, monitoring, and analysing ORCA
   quantum-chemistry calculations on SLURM clusters.
-site_url: https://ach-repo.github.io/ACH-Orca-Studio/
-repo_url: https://github.com/ACH-Repo/ACH-Orca-Studio
-repo_name: ACH-Repo/ACH-Orca-Studio
+site_url: https://ach-repo.github.io/ACH-Orca-Workbench/
+repo_url: https://github.com/ACH-Repo/ACH-Orca-Workbench
+repo_name: ACH-Repo/ACH-Orca-Workbench
 edit_uri: edit/main/docs/
 
 theme:

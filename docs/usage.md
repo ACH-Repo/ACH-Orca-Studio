@@ -37,7 +37,7 @@ recipe once as a graph and let the app run it:
 
 The full node reference, editing shortcuts, conditional branching, resume
 behaviour, and merged reports are documented in the
-[Workflow section of the README](https://github.com/ACH-Repo/ACH-Orca-Studio#the-workflow-tab).
+[Workflow section of the README](https://github.com/ACH-Repo/ACH-Orca-Workbench#the-workflow-tab).
 
 ## Running on a PC
 
@@ -45,5 +45,5 @@ The same app runs on a normal desktop; the cluster-only actions adapt
 automatically. **Run locally** replaces Submit when `sbatch` isn't found (point
 it at your local `orca` executable once), cores are capped to your CPU, and
 coordinate generation, recipes, spectra, and reports all work the same. See
-[Running on a PC](https://github.com/ACH-Repo/ACH-Orca-Studio#running-on-a-pc)
+[Running on a PC](https://github.com/ACH-Repo/ACH-Orca-Workbench#running-on-a-pc)
 in the README for details.
