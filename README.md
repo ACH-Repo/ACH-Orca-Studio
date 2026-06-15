@@ -26,7 +26,22 @@ It is designed to run **on the cluster login node** and be displayed on your own
 
 ## Installation
 
-Both ways are *editable* installs (`pip install -e .`): the command points back at this folder, so the app updates in place whenever you `git pull` — **no reinstall, and don't move the folder afterwards** (that breaks the link).
+Pick whichever fits:
+
+- **Quick (nothing to clone)** — install straight from GitHub and run:
+  ```bash
+  pip install git+https://github.com/ACH-Repo/ACH-Orca-Studio.git
+  ```
+  (On Windows: `py -m pip install git+https://github.com/ACH-Repo/ACH-Orca-Studio.git`.)
+  Then launch with `orca-studio` (or `python -m orca_studio`). This is the fastest
+  path and needs no checked-out folder — but you can't edit the source in place, and
+  on the cluster you still need `module load python` first (see the note below).
+- **Editable (recommended on the cluster, or if you'll tweak the code)** — clone once
+  and `pip install -e .`; the install points back at the folder, so a `git pull`
+  updates the app in place with **no reinstall**. Don't move the folder afterwards
+  (that breaks the link). Step-by-step below.
+
+See **[Updating](#updating)** for how to upgrade each kind of install.
 
 ### On a SLURM cluster (e.g. Lido) — via X-forwarding
 
@@ -85,6 +100,18 @@ Open a saved project straight away:
 orca-studio myproject.json
 ```
 
+### Updating
+
+- **Editable / cloned install:** `git pull` in the repo folder — done. The next launch
+  picks up the changes; no reinstall needed.
+- **Quick (git+pip) install:** re-run the install with `-U`:
+  ```bash
+  pip install -U git+https://github.com/ACH-Repo/ACH-Orca-Studio.git
+  ```
+  (Windows: `py -m pip install -U git+...`.)
+- **On the cluster**, `module load python` is still required every session whichever
+  way you installed — keep it in your `~/.bashrc`.
+
 ---
 
 ## The six tabs
@@ -138,7 +165,7 @@ Each node is a step; **green ports carry a geometry, orange ports carry results*
 ### Running it
 
 - **Run pipeline** expands the graph across your molecules and runs it live: each step builds and launches as soon as its input geometry is ready, conditions are evaluated the moment their feeding job finishes, and nodes recolour by state and show a live **progress caption** (e.g. *running 2/3 → done 3/3*). Colours: grey = waiting, blue = running, green = done, red = error, purple = skipped, orange = interrupted. It works the same on the cluster (`sbatch`) and on a PC (local ORCA). *The app drives this, so it must stay open while the pipeline advances* — for long runs use **Submit unattended** instead.
-- **⛓ Submit unattended** (cluster only) hands the whole pipeline to **SLURM as a dependency chain**, so it runs with no GUI: each step is submitted with `--dependency=afterok:<job>` on the job whose geometry it needs, derived geometries are read at run time via ORCA's `* xyzfile` (so a step can be submitted before its parent has finished), and a **Condition** node becomes a small grep/awk **guard inside the job** that `exit 0`s (skipping the branch) if the test fails. Submit, then **close ORCA Studio and MobaXterm** — SLURM runs the chain on its own. (Merged reports are written by the app, so reopen the project and use the Report tab once the jobs finish.)
+- **▶▶ Submit unattended** (cluster only) hands the whole pipeline to **SLURM as a dependency chain**, so it runs with no GUI: each step is submitted with `--dependency=afterok:<job>` on the job whose geometry it needs, derived geometries are read at run time via ORCA's `* xyzfile` (so a step can be submitted before its parent has finished), and a **Condition** node becomes a small grep/awk **guard inside the job** that `exit 0`s (skipping the branch) if the test fails. Submit, then **close ORCA Studio and MobaXterm** — SLURM runs the chain on its own. (Merged reports are written by the app, so reopen the project and use the Report tab once the jobs finish.)
 - **Run just one pipeline.** With several independent networks on the canvas, **select any node** in one (or box-select it) before clicking Run pipeline / Submit unattended, and only that network runs. With nothing selected, all networks run.
 - **Generate only** creates the planned calculations and jumps to the Calculations tab without launching, in case you want to review or edit them first.
 - **Inspect from the graph.** Select a finished calc node and the **Node settings** panel lists its results with one-click launchers — IR / NMR spectrum, the live progress plot, the optimised structure in your 3D viewer, and the raw `.out`.
