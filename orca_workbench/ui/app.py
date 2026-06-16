@@ -15,6 +15,7 @@ from typing import List, Optional
 from orca_workbench import __version__
 from orca_workbench.core import config as config_mod
 from orca_workbench.core import diagnostics as diag
+from orca_workbench.core import features
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.core.inputs import Recipe
 from orca_workbench.core.project import Project, load_project, save_project
@@ -73,7 +74,10 @@ class App(object):
         self.autosave_enabled = bool(config_mod.get("autosave", True))
         self._autosave_after_id = None
         # Tooltips on/off (per-user). Apply before any tab builds its tips.
-        tooltip_mod.set_enabled(bool(config_mod.get("tooltips", True)))
+        # Simple/gateway mode forces them off — hover tooltips spawn a Toplevel
+        # (extra X round-trips), which we avoid on a high-latency link.
+        tooltip_mod.set_enabled(bool(config_mod.get("tooltips", True))
+                                and not features.is_simple())
 
         with diag.timed("startup:total"):
             self._build_menu()
@@ -183,44 +187,59 @@ class App(object):
             pass
 
         from orca_workbench.ui.molecules_tab import MoleculesTab
-        from orca_workbench.ui.recipes_tab import RecipesTab
-        from orca_workbench.ui.calculations_tab import CalculationsTab
-        from orca_workbench.ui.report_tab import ReportTab
 
-        with diag.timed("build:molecules"):
-            self.molecules_tab = MoleculesTab(self.notebook, self)
-        with diag.timed("build:recipes"):
-            self.recipes_tab = RecipesTab(self.notebook, self)
-        with diag.timed("build:calculations"):
-            self.calculations_tab = CalculationsTab(self.notebook, self)
-        with diag.timed("build:report"):
-            self.report_tab = ReportTab(self.notebook, self)
-        # Benchmark and Workflow are the heavy "tools" tabs (workflow_tab builds
-        # a node-editor Canvas with many widgets) and they're often unused in a
-        # given session. Build them on first selection, not at startup — over
-        # X-forwarding the per-widget round-trip cost dominates the empty start.
+        # Tab attributes default to None; each becomes a real widget when built —
+        # eagerly below, or lazily on first selection (see _materialize_lazy_tab).
+        self.molecules_tab = None     # type: Optional[ttk.Frame]
+        self.recipes_tab = None       # type: Optional[ttk.Frame]
+        self.calculations_tab = None  # type: Optional[ttk.Frame]
+        self.report_tab = None        # type: Optional[ttk.Frame]
         self.benchmark_tab = None     # type: Optional[ttk.Frame]
         self.workflow_tab = None      # type: Optional[ttk.Frame]
-
-        # The four pipeline tabs in chronological order...
-        self.notebook.add(self.molecules_tab, text="Molecules")
-        self.notebook.add(self.recipes_tab, text="Recipes")
-        self.notebook.add(self.calculations_tab, text="Calculations")
-        self.notebook.add(self.report_tab, text="Report")
-        # ...then the special, colour-swatched tools at the end (outside the
-        # normal chronology). ttk tabs can't take a background colour directly,
-        # so a small colour-block image is the reliable cross-theme way to mark
-        # them.
-        self._bench_swatch = tk.PhotoImage(width=13, height=13)
-        self._bench_swatch.put("#7aa8d6", to=(0, 0, 13, 13))
-        self._wf_swatch = tk.PhotoImage(width=13, height=13)
-        self._wf_swatch.put("#9b7ad6", to=(0, 0, 13, 13))
         # placeholder -> spec to materialise the real tab on first selection.
         self._lazy_tabs = {}  # type: dict
-        self._add_lazy_tab("benchmark_tab", " Benchmark", self._bench_swatch,
-                           "orca_workbench.ui.benchmark_tab", "BenchmarkTab")
-        self._add_lazy_tab("workflow_tab", " Workflow", self._wf_swatch,
-                           "orca_workbench.ui.workflow_tab", "WorkflowTab")
+
+        # Molecules is the default/active tab, so it's always built eagerly.
+        with diag.timed("build:molecules"):
+            self.molecules_tab = MoleculesTab(self.notebook, self)
+        self.notebook.add(self.molecules_tab, text="Molecules")
+
+        if features.is_simple():
+            # Gateway/--simple mode: defer the rest of the pipeline tabs (built on
+            # first click) and skip the heavy Benchmark/Workflow tools entirely.
+            # Over a high-latency X link this cuts the cold start to one tab's
+            # worth of widgets. The default (full) path below is unchanged.
+            self._add_lazy_tab("recipes_tab", "Recipes", None,
+                               "orca_workbench.ui.recipes_tab", "RecipesTab")
+            self._add_lazy_tab("calculations_tab", "Calculations", None,
+                               "orca_workbench.ui.calculations_tab", "CalculationsTab")
+            self._add_lazy_tab("report_tab", "Report", None,
+                               "orca_workbench.ui.report_tab", "ReportTab")
+        else:
+            from orca_workbench.ui.recipes_tab import RecipesTab
+            from orca_workbench.ui.calculations_tab import CalculationsTab
+            from orca_workbench.ui.report_tab import ReportTab
+            with diag.timed("build:recipes"):
+                self.recipes_tab = RecipesTab(self.notebook, self)
+            with diag.timed("build:calculations"):
+                self.calculations_tab = CalculationsTab(self.notebook, self)
+            with diag.timed("build:report"):
+                self.report_tab = ReportTab(self.notebook, self)
+            self.notebook.add(self.recipes_tab, text="Recipes")
+            self.notebook.add(self.calculations_tab, text="Calculations")
+            self.notebook.add(self.report_tab, text="Report")
+            # ...then the special, colour-swatched tools at the end (outside the
+            # normal chronology), built lazily on first selection. ttk tabs can't
+            # take a background colour directly, so a small colour-block image is
+            # the reliable cross-theme way to mark them.
+            self._bench_swatch = tk.PhotoImage(width=13, height=13)
+            self._bench_swatch.put("#7aa8d6", to=(0, 0, 13, 13))
+            self._wf_swatch = tk.PhotoImage(width=13, height=13)
+            self._wf_swatch.put("#9b7ad6", to=(0, 0, 13, 13))
+            self._add_lazy_tab("benchmark_tab", " Benchmark", self._bench_swatch,
+                               "orca_workbench.ui.benchmark_tab", "BenchmarkTab")
+            self._add_lazy_tab("workflow_tab", " Workflow", self._wf_swatch,
+                               "orca_workbench.ui.workflow_tab", "WorkflowTab")
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -242,11 +261,42 @@ class App(object):
         re-entrantly and corrupts the tab list (the cause of the earlier
         'Slave index out of bounds' crash that made these tabs vanish)."""
         placeholder = ttk.Frame(self.notebook)
-        self.notebook.add(placeholder, text=text, image=image, compound="left")
+        if image is not None:
+            self.notebook.add(placeholder, text=text, image=image, compound="left")
+        else:
+            self.notebook.add(placeholder, text=text)
         self._lazy_tabs[str(placeholder)] = {
             "attr": attr, "module": module_name, "class": class_name,
             "placeholder": placeholder, "real": None,
         }
+
+    def _ensure_tab(self, attr):
+        # type: (str) -> Optional[ttk.Frame]
+        """Return the real tab for `attr`, building it now if it's still a lazy
+        placeholder (simple mode). Does NOT change the selected tab — used by code
+        paths that need a tab object without the user having opened it (F5,
+        reconcile-after-load)."""
+        existing = getattr(self, attr, None)
+        if existing is not None:
+            return existing
+        for path, spec in self._lazy_tabs.items():
+            if spec["attr"] == attr:
+                return self._materialize_lazy_tab(path)
+        return None
+
+    def _select_tab(self, attr):
+        # type: (str) -> Optional[ttk.Frame]
+        """Switch the notebook to the tab for `attr`, materialising it if lazy.
+        For a lazy tab the notebook pane is the placeholder, so we select that
+        (which fires <<NotebookTabChanged>> and builds the real tab)."""
+        for spec in self._lazy_tabs.values():
+            if spec["attr"] == attr:
+                self.notebook.select(spec["placeholder"])
+                return getattr(self, attr, None)
+        w = getattr(self, attr, None)
+        if w is not None:
+            self.notebook.select(w)
+        return w
 
     def _materialize_lazy_tab(self, placeholder_path):
         # type: (str) -> Optional[ttk.Frame]
@@ -292,10 +342,11 @@ class App(object):
             config_mod.set_value("usermail", val)
 
     def _on_f5(self):
-        # F5 = refresh job status (the monitoring action).
+        # F5 = refresh job status (the monitoring action). _select_tab builds the
+        # Calculations tab first if it's still a lazy placeholder (simple mode).
+        self._select_tab("calculations_tab")
         ct = getattr(self, "calculations_tab", None)
         if ct is not None and hasattr(ct, "on_refresh_status"):
-            self.notebook.select(self.calculations_tab)
             ct.on_refresh_status()
 
     def _set_program(self, config_key, friendly, description):
@@ -365,7 +416,8 @@ class App(object):
     def _update_title(self):
         name = os.path.basename(self.project.path) if self.project.path else "(unsaved project)"
         star = "*" if self._dirty else ""
-        self.root.title("ORCA Workbench {} - {}{}".format(__version__, name, star))
+        mode = "  [simple mode]" if features.is_simple() else ""
+        self.root.title("ORCA Workbench {} - {}{}{}".format(__version__, name, star, mode))
 
     def set_status(self, msg):
         # type: (str) -> None
@@ -437,8 +489,9 @@ class App(object):
             self.refresh_all_tabs()
             # Re-evaluate job status so calcs left 'running' at last close are shown
             # as interrupted (local jobs and cluster jobs gone from the queue).
+            # _ensure_tab builds the Calculations tab if it's still lazy (simple mode).
             try:
-                self.calculations_tab.reconcile_after_load()
+                self._ensure_tab("calculations_tab").reconcile_after_load()
             except Exception:
                 pass
         self.mark_clean()

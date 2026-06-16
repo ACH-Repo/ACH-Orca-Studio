@@ -119,7 +119,13 @@ def capture_environment():
         disp = os.environ.get("DISPLAY", "")
         # A local display is ":0"; a forwarded one has a host part ("localhost:10.0").
         looks_remote = bool(disp) and not disp.startswith(":")
+        try:
+            from orca_workbench.core import features
+            mode = "simple" if features.is_simple() else "full"
+        except Exception:
+            mode = "?"
         _env.update({
+            "mode": mode,
             "platform": platform.platform(),
             "python": sys.version.split()[0],
             "tk": tkver,
@@ -213,7 +219,7 @@ def write_log(path=None):
     lines.append("app version: " + str(_ver))
     lines.append("")
     lines.append("[environment]")
-    for k in ("platform", "python", "tk", "display", "display_looks_remote",
+    for k in ("mode", "platform", "python", "tk", "display", "display_looks_remote",
               "home", "x_roundtrip_ms", "home_stat_ms"):
         lines.append("  {:<20} {}".format(k + ":", _env.get(k)))
     if isinstance(rtt, (int, float)) and rtt > 1.0:

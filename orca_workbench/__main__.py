@@ -39,6 +39,12 @@ def _print_usage():
     print("                      (Equivalent: set ORCA_WORKBENCH_DIAG=1.)")
     print("  --check-backends    Probe RDKit/OpenBabel and exit, no GUI. Use this if")
     print("                      Generate XYZ fails, to see whether the backends work.")
+    print("  --simple, --gateway_mode")
+    print("                      Lightweight mode: load only the core pipeline tabs")
+    print("                      (Molecules/Recipes/Calculations/Report), build them")
+    print("                      on first click, skip Benchmark/Workflow, and disable")
+    print("                      tooltips. For slow/high-latency X-forwarded sessions")
+    print("                      (e.g. over a VPN). (Equivalent: ORCA_WORKBENCH_SIMPLE=1.)")
     print("  --help, -h          Show this message.")
 
 
@@ -66,6 +72,12 @@ def _cli():
         print("\n[diagnostics] live mode ON — a perf .log is written to your home "
               "dir on quit.\n")
         sys.stdout.flush()
+
+    # Lightweight / gateway mode: load only the core feature tier.
+    if ("--simple" in sys.argv or "--gateway_mode" in sys.argv
+            or os.environ.get("ORCA_WORKBENCH_SIMPLE", "") not in ("", "0")):
+        from orca_workbench.core import features
+        features.set_max_tier(features.CORE)
 
     # First non-flag argument is treated as a project file to open.
     project_path = None
