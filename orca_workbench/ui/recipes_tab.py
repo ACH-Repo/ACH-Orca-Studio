@@ -46,6 +46,7 @@ class RecipesTab(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._selected_path = None  # type: Optional[str]  (recipe.source_path = identity)
+        self._editor_path = None    # type: Optional[str]  (recipe currently shown in editor)
         self._suppress = False
         self._suppress_tree_select = False
         self._flush_id = None
@@ -286,6 +287,13 @@ class RecipesTab(ttk.Frame):
             self._clear_editor()
             return
         self._selected_path = sel[0]
+        if sel[0] == self._editor_path:
+            # Same recipe already in the editor. Don't reload — a reload does
+            # text.delete+insert, which would yank the cursor to the end and
+            # pollute the undo stack. This fires when _flush re-renders the tree
+            # and re-selects the row mid-edit (the <<TreeviewSelect>> event lands
+            # after _suppress_tree_select has already been reset).
+            return
         r = self._recipe_by_path(self._selected_path)
         if r is None:
             return
@@ -301,9 +309,11 @@ class RecipesTab(ttk.Frame):
             self.favorite_var.set(r.favorite)
             self.text.delete("1.0", tk.END)
             self.text.insert("1.0", r.template)
+            self.text.edit_reset()        # baseline: don't let Ctrl+Z undo the load
             self.text.edit_modified(False)
         finally:
             self._suppress = False
+        self._editor_path = r.source_path or r.name
         self._update_placeholder_warning()
         self._set_status("")
 
@@ -315,6 +325,7 @@ class RecipesTab(ttk.Frame):
 
     def _clear_editor(self):
         self._selected_path = None
+        self._editor_path = None
         self._suppress = True
         try:
             self.name_var.set("")
@@ -323,6 +334,7 @@ class RecipesTab(ttk.Frame):
             self.variant_var.set("")
             self.favorite_var.set(False)
             self.text.delete("1.0", tk.END)
+            self.text.edit_reset()
             self.text.edit_modified(False)
         finally:
             self._suppress = False
@@ -371,6 +383,12 @@ class RecipesTab(ttk.Frame):
         except Exception as e:
             self._set_status("save failed: {}".format(e), "#b00000")
             return
+        # Keep our identity keys in sync: a brand-new recipe gains a source_path on
+        # first save, changing its tree iid — without this the re-render below would
+        # reload the editor (and reset the cursor) on the next keystroke.
+        new_iid = r.source_path or r.name
+        self._selected_path = new_iid
+        self._editor_path = new_iid
         # Renaming cascades to planned calcs that referenced the old name.
         if newname != oldname:
             n = 0
