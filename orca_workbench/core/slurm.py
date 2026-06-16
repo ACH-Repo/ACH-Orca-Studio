@@ -44,7 +44,16 @@ def render_slurm(template, inp_filename, rundir, jobname, cores, usermail, pream
     out = out.replace("!!##RUNDIR##!!", rundir.replace("\\", "/"))
     out = out.replace("!!##JOBID##!!", _sanitize_jobname(jobname))
     out = out.replace("!!##CORES##!!", str(cores))
-    out = out.replace("!!##USERMAIL##!!", usermail)
+    if usermail and usermail.strip():
+        out = out.replace("!!##USERMAIL##!!", usermail.strip())
+    else:
+        # No email set: drop the mail directives entirely. Leaving a blank
+        # `--mail-user=` with `--mail-type=ALL` makes SLURM fall back to mailing
+        # the submitting user's cluster account — i.e. an unwanted default.
+        out = "\n".join(
+            ln for ln in out.split("\n")
+            if not ln.lstrip().startswith(("#SBATCH --mail-user", "#SBATCH --mail-type"))
+        )
     # Older templates may not have the PREAMBLE marker; only replace if present.
     out = out.replace("!!##PREAMBLE##!!", preamble or "")
     return out
