@@ -105,6 +105,14 @@ class CalculationsTab(ttk.Frame):
         b_remove = ttk.Button(bar, text="Remove", command=self.on_remove)
         for b in (b_add, b_derive, b_remove):
             b.pack(side=tk.LEFT, padx=2)
+        b_deconstruct = tk.Button(bar, text="Deconstruct", command=self.on_deconstruct,
+                                  bg="#c0392b", activebackground="#a93226",
+                                  fg="white", activeforeground="white")
+        b_deconstruct.pack(side=tk.LEFT, padx=2)
+        tip(b_deconstruct, "DANGER: remove the selected calc(s) AND erase their run directories "
+                           "from disk (.inp/.slurm/.out and all results). Unlike Remove — which "
+                           "only drops them from the project and leaves the files — this is "
+                           "permanent and cannot be undone. Refuses calcs with a running job.")
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
         b_build = tk.Button(bar, text="Build", command=self.on_build,
                             font=("TkDefaultFont", 10, "bold"))
@@ -912,6 +920,67 @@ class CalculationsTab(ttk.Frame):
         self.app.mark_dirty()
         self.refresh()
         self.app.set_status("Removed {} calculation(s).".format(len(remove_ids)))
+
+    def on_deconstruct(self):
+        """Remove the selected calc(s) from the project AND delete their run
+        directories from disk. The destructive counterpart to Remove — for
+        clearing out failed/abandoned calcs (and their .inp/.slurm/.out) entirely."""
+        import shutil
+        sel = list(self.tree.selection())
+        if not sel:
+            messagebox.showinfo("No selection", "Select one or more calculations to deconstruct.")
+            return
+        calcs = [c for c in (self.app.project.calc_by_id(i) for i in sel) if c is not None]
+        active = [c for c in calcs if self._own_state(c)[3]]
+        if active:
+            messagebox.showwarning(
+                "Job running",
+                "{} of the selected calculations have active jobs. Cancel them in SLURM "
+                "(scancel) before deconstructing.".format(len(active)))
+            return
+        sel_ids = set(sel)
+        orphans = [c for c in self.app.project.planned_calcs
+                   if c.parent_id in sel_ids and c.id not in sel_ids]
+        remove = calcs + orphans
+        root_abs = os.path.abspath(self.app.project.root())
+        # Resolve on-disk rundirs to delete — but ONLY directories strictly inside
+        # the project root (never the root itself, an absolute path, or a `..`
+        # escape). This is irreversible, so the path guard matters.
+        to_delete = []
+        for c in remove:
+            if not c.rundir:
+                continue
+            d = os.path.abspath(os.path.join(root_abs, c.rundir))
+            if d == root_abs or not d.startswith(root_abs + os.sep):
+                continue
+            if os.path.isdir(d):
+                to_delete.append((c, d))
+        msg = ("Permanently DELETE {} run director{} from disk (their .inp/.slurm/.out "
+               "and all results) and remove {} calculation(s) from the project?\n\n"
+               "This cannot be undone.".format(
+                   len(to_delete), "y" if len(to_delete) == 1 else "ies", len(remove)))
+        if orphans:
+            msg += "\n\n({} derived calc(s) depend on the selection and are included.)".format(
+                len(orphans))
+        if not messagebox.askyesno("Deconstruct", msg, icon="warning"):
+            return
+        n_dirs = 0
+        for c, d in to_delete:
+            try:
+                shutil.rmtree(d)
+                n_dirs += 1
+                self._log("DELETED dir {}".format(c.rundir))
+            except OSError as e:
+                self._log("DELETE FAILED {}: {}".format(c.rundir, e))
+        remove_ids = sel_ids | {c.id for c in orphans}
+        self.app.project.planned_calcs = [c for c in self.app.project.planned_calcs
+                                          if c.id not in remove_ids]
+        self._selected_id = None
+        self.app.mark_dirty()
+        self.refresh()
+        self.app.set_status(
+            "Deconstructed {} calc(s); deleted {} run dir(s) from disk.".format(
+                len(remove_ids), n_dirs))
 
     def on_browse_geom(self):
         path = filedialog.askopenfilename(
