@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
 
+from orca_workbench.core import diagnostics as diag
 from orca_workbench.core import workflow as wf_mod
 from orca_workbench.core.project import PlannedCalc, new_calc_id
 from orca_workbench.ui.tooltip import tip
@@ -1044,12 +1045,13 @@ class WorkflowTab(ttk.Frame):
     # --------------------------------------------------------------- actions
 
     def _add_node(self, ntype):
-        self._add_offset = (self._add_offset + 1) % 8
-        x = 60 + self._add_offset * 26
-        y = 60 + self._add_offset * 26
-        node = self.wf.add_node(ntype, x, y)
-        self._commit()
-        self._select_only(node.id)
+        with diag.timed("workflow:add_node"):
+            self._add_offset = (self._add_offset + 1) % 8
+            x = 60 + self._add_offset * 26
+            y = 60 + self._add_offset * 26
+            node = self.wf.add_node(ntype, x, y)
+            self._commit()
+            self._select_only(node.id)
 
     def on_clear(self):
         if not self.wf.nodes:

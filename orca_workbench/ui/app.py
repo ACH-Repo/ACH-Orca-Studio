@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from orca_workbench import __version__
 from orca_workbench.core import config as config_mod
+from orca_workbench.core import diagnostics as diag
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.core.inputs import Recipe
 from orca_workbench.core.project import Project, load_project, save_project
@@ -55,6 +56,7 @@ class App(object):
     def __init__(self, root, project_path=None):
         # type: (tk.Tk, Optional[str]) -> None
         self.root = root
+        diag.attach_root(root)
         root.title("ORCA Workbench")
         root.geometry("1100x720")          # fallback size if maximising fails
         _maximize(root)
@@ -73,14 +75,22 @@ class App(object):
         # Tooltips on/off (per-user). Apply before any tab builds its tips.
         tooltip_mod.set_enabled(bool(config_mod.get("tooltips", True)))
 
-        self._build_menu()
-        self._build_layout()
-        # App-wide Ctrl+A (select all) in every entry/text widget.
-        install_global_text_shortcuts(self.root)
-        self.root.bind_all("<F5>", lambda e: self._on_f5())
-        self.reload_recipes()
-        self.refresh_all_tabs()
-        self._update_title()
+        with diag.timed("startup:total"):
+            self._build_menu()
+            with diag.timed("startup:build_layout"):
+                self._build_layout()
+            # App-wide Ctrl+A (select all) in every entry/text widget.
+            install_global_text_shortcuts(self.root)
+            self.root.bind_all("<F5>", lambda e: self._on_f5())
+            with diag.timed("startup:reload_recipes"):
+                self.reload_recipes()
+            with diag.timed("startup:refresh_all_tabs"):
+                self.refresh_all_tabs()
+            self._update_title()
+        # Now that the UI exists, snapshot display/latency info for the log.
+        diag.capture_environment()
+        if diag.is_enabled():
+            diag.set_status_callback(self.set_status)
 
         if project_path:
             self._open_project_path(project_path)
@@ -123,6 +133,9 @@ class App(object):
 
         helpmenu = tk.Menu(menubar, tearoff=0)
         helpmenu.add_command(label="Check coordinate backends...", command=self.on_diagnose)
+        if diag.is_enabled():
+            # Only shown in --diagnose mode: dump a perf log without quitting.
+            helpmenu.add_command(label="Save diagnostics log now...", command=self._on_save_diag_log)
         helpmenu.add_separator()
         helpmenu.add_command(label="About", command=self.on_about)
         menubar.add_cascade(label="Help", menu=helpmenu)
@@ -174,10 +187,14 @@ class App(object):
         from orca_workbench.ui.calculations_tab import CalculationsTab
         from orca_workbench.ui.report_tab import ReportTab
 
-        self.molecules_tab = MoleculesTab(self.notebook, self)
-        self.recipes_tab = RecipesTab(self.notebook, self)
-        self.calculations_tab = CalculationsTab(self.notebook, self)
-        self.report_tab = ReportTab(self.notebook, self)
+        with diag.timed("build:molecules"):
+            self.molecules_tab = MoleculesTab(self.notebook, self)
+        with diag.timed("build:recipes"):
+            self.recipes_tab = RecipesTab(self.notebook, self)
+        with diag.timed("build:calculations"):
+            self.calculations_tab = CalculationsTab(self.notebook, self)
+        with diag.timed("build:report"):
+            self.report_tab = ReportTab(self.notebook, self)
         # Benchmark and Workflow are the heavy "tools" tabs (workflow_tab builds
         # a node-editor Canvas with many widgets) and they're often unused in a
         # given session. Build them on first selection, not at startup — over
@@ -242,23 +259,29 @@ class App(object):
             return spec["real"]
         import importlib
         cls = getattr(importlib.import_module(spec["module"]), spec["class"])
-        real = cls(spec["placeholder"], self)   # parented INSIDE the placeholder
-        real.pack(fill=tk.BOTH, expand=True)
+        with diag.timed("build:" + spec["attr"]):
+            real = cls(spec["placeholder"], self)   # parented INSIDE the placeholder
+            real.pack(fill=tk.BOTH, expand=True)
         spec["real"] = real
         setattr(self, spec["attr"], real)        # e.g. self.workflow_tab -> real
         return real
 
     def _on_tab_changed(self, _event):
         sel = self.notebook.select()
-        spec = self._lazy_tabs.get(sel)
-        if spec is not None:
-            # Selecting the placeholder: build the real tab into it on first
-            # visit (no tab add/remove, so no re-entrant tab-changed event).
-            tab = self._materialize_lazy_tab(sel)
-        else:
-            tab = self.notebook.nametowidget(sel)
-        if tab is not None and hasattr(tab, "refresh"):
-            tab.refresh()
+        try:
+            name = self.notebook.tab(sel, "text").strip() or "?"
+        except Exception:
+            name = "?"
+        with diag.timed("tabswitch:" + name):
+            spec = self._lazy_tabs.get(sel)
+            if spec is not None:
+                # Selecting the placeholder: build the real tab into it on first
+                # visit (no tab add/remove, so no re-entrant tab-changed event).
+                tab = self._materialize_lazy_tab(sel)
+            else:
+                tab = self.notebook.nametowidget(sel)
+            if tab is not None and hasattr(tab, "refresh"):
+                tab.refresh()
 
     def _on_email_change(self):
         # Email is a per-user setting, persisted to ~/.orca_workbench.json — never
@@ -375,10 +398,11 @@ class App(object):
     def on_new(self):
         if not self._confirm_discard():
             return
-        self.project = Project()
-        # Email is per-user config, not per-project — leave the field as-is.
-        self.reload_recipes()
-        self.refresh_all_tabs()
+        with diag.timed("project:new"):
+            self.project = Project()
+            # Email is per-user config, not per-project — leave the field as-is.
+            self.reload_recipes()
+            self.refresh_all_tabs()
         self.mark_clean()
         self.set_status("New empty project.")
 
@@ -408,14 +432,15 @@ class App(object):
             self.usermail = self.project.usermail
             config_mod.set_value("usermail", self.usermail)
             self.email_var.set(self.usermail)
-        self.reload_recipes()
-        self.refresh_all_tabs()
-        # Re-evaluate job status so calcs left 'running' at last close are shown
-        # as interrupted (local jobs and cluster jobs gone from the queue).
-        try:
-            self.calculations_tab.reconcile_after_load()
-        except Exception:
-            pass
+        with diag.timed("project:open"):
+            self.reload_recipes()
+            self.refresh_all_tabs()
+            # Re-evaluate job status so calcs left 'running' at last close are shown
+            # as interrupted (local jobs and cluster jobs gone from the queue).
+            try:
+                self.calculations_tab.reconcile_after_load()
+            except Exception:
+                pass
         self.mark_clean()
         self.set_status("Opened {}".format(path))
 
@@ -483,8 +508,24 @@ class App(object):
         fit_to_content(top)
 
     def on_quit(self):
-        if self._confirm_discard():
+        if not self._confirm_discard():
+            return
+        if diag.is_enabled():
+            # Measure teardown too (the "5 s to quit" symptom is pure widget
+            # destruction = X round-trips), then write the log before we exit.
+            with diag.timed("quit:destroy"):
+                self.root.destroy()
+            path = diag.write_log()
+            if path:
+                sys.stdout.write("\nDiagnostics log written to: {}\n".format(path))
+                sys.stdout.flush()
+        else:
             self.root.destroy()
+
+    def _on_save_diag_log(self):
+        path = diag.write_log()
+        self.set_status("Diagnostics log saved: {}".format(path) if path
+                        else "Could not write diagnostics log.")
 
     def _confirm_discard(self):
         # type: () -> bool

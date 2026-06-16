@@ -66,12 +66,17 @@ link):
 ## Verify the environment
 
 ```bash
-orca-workbench --diagnose      # or: python -m orca_workbench --diagnose
+orca-workbench --check-backends    # or: python -m orca_workbench --check-backends
 ```
 
-Reports whether RDKit / OpenBabel can generate coordinates on this machine — run
-it first if structure generation misbehaves. Open a saved project directly with
+Probes whether RDKit / OpenBabel can generate coordinates on this machine (no GUI)
+— run it if structure generation misbehaves. Open a saved project directly with
 `orca-workbench myproject.json`.
+
+!!! tip "Slow over X-forwarding? Run the self-diagnostics"
+    `orca-workbench --diagnose` launches with live timing instrumentation and
+    writes a performance `.log` to your home dir when you quit — handy for pinning
+    down why a gateway session feels sluggish.
 
 ## Updating
 

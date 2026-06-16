@@ -7,7 +7,13 @@ falling back to the pre-rename ~/.orca_studio.json so old settings survive.
 
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+# In-memory cache. load_config() is called many times (per tooltip pref, per
+# external-program lookup, in the workflow redraw path, …); on the cluster the
+# home dir is a network filesystem, so re-reading the file each time added real
+# latency. Cache once, invalidate on save (single-process app, so this is safe).
+_cache = None  # type: Optional[Dict[str, Any]]
 
 
 def config_path():
@@ -26,26 +32,35 @@ def _legacy_config_path():
 
 def load_config():
     # type: () -> Dict[str, Any]
+    global _cache
+    if _cache is not None:
+        return dict(_cache)  # hand out a copy so callers can't mutate the cache
     path = config_path()
     if not os.path.isfile(path):
         legacy = _legacy_config_path()
         if not os.path.isfile(legacy):
+            _cache = {}
             return {}
         path = legacy
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
     except (IOError, ValueError):
-        return {}
+        data = {}
+    _cache = data
+    return dict(data)
 
 
 def save_config(cfg):
     # type: (Dict[str, Any]) -> None
+    global _cache
     path = config_path()
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
+        _cache = dict(cfg)
     except IOError:
         pass
 

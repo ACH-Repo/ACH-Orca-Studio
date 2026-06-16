@@ -89,10 +89,10 @@ On Linux/macOS use `source .venv/bin/activate` instead of the second line.
 ### Verify the environment
 
 ```bash
-orca-workbench --diagnose      # or: python -m orca_workbench --diagnose
+orca-workbench --check-backends      # or: python -m orca_workbench --check-backends
 ```
 
-Reports whether RDKit / OpenBabel can generate coordinates on this machine — run it first if structure generation misbehaves.
+Reports whether RDKit / OpenBabel can generate coordinates on this machine — run it first if structure generation misbehaves. (Sluggish over X-forwarding? `orca-workbench --diagnose` launches with live timing instrumentation and writes a perf `.log` to your home dir on quit.)
 
 Open a saved project straight away:
 
