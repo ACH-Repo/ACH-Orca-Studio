@@ -140,6 +140,14 @@ class CalculationsTab(ttk.Frame):
             tip(b_submit, "sbatch the selected built calcs (or all built-and-unsubmitted). "
                           "Cluster login node only. Warns before submitting a derived calc whose "
                           "parent hasn't finished. Shows a progress bar.")
+            b_unatt = tk.Button(bar, text="▶▶ Unattended", command=self.on_submit_unattended,
+                                bg="#cdebc5", activebackground="#bfe2b6")
+            b_unatt.pack(side=tk.RIGHT, padx=(6, 0))
+            tip(b_unatt, "Submit the selected calcs (or all unfinished) as a SLURM dependency "
+                         "chain — each derived calc is held until its parent geometry job "
+                         "finishes, so you can queue a whole OPT->NMR set at once and then close "
+                         "the app and MobaXterm. Same engine as the Workflow tab's Submit "
+                         "unattended; needs no Workflow graph.")
         # Monitoring: distinct, bigger/bolder, light shade, just left of the launch action.
         b_status = tk.Button(bar, text="Refresh status (F5)", command=self.on_refresh_status,
                              font=("TkDefaultFont", 11, "bold"),
@@ -1154,6 +1162,59 @@ class CalculationsTab(ttk.Frame):
         self.refresh()
 
     # --------------------------------------------------- unattended (dependency chain)
+
+    def on_submit_unattended(self):
+        """Calculations-tab entry to the SLURM dependency-chain submit (the same
+        engine the Workflow tab uses, but driven by the calcs' own parent/gate
+        links instead of a node graph). Topologically orders the selected calcs so
+        parents precede children, then hands them to submit_unattended — which
+        builds each derived calc with an `* xyzfile` geometry reference and an
+        `afterok:` dependency, so a whole OPT -> NMR set can be queued at once and
+        the app / SSH session closed."""
+        targets = self._selected_or_all()
+        cand = [c for c in targets
+                if not self._own_state(c)[2] and self._gate_status(c) != "closed"]
+        if not cand:
+            messagebox.showinfo(
+                "Nothing to submit",
+                "No unfinished calculations selected. Unattended submission builds and "
+                "queues calcs as a SLURM dependency chain (parents before children), so "
+                "the cluster runs the whole set with no app open.")
+            return
+        self.submit_unattended([c.id for c in self._topo_order(cand)])
+
+    def _topo_order(self, calcs):
+        # type: (list) -> list
+        """Order calcs dependency-first: each calc's geometry parent and gate
+        source come before it. Dependencies outside `calcs` impose no ordering —
+        submit_unattended reads an already-finished parent's geometry off disk."""
+        byid = {c.id: c for c in calcs}
+        order, perm, temp = [], set(), set()
+
+        def deps(c):
+            out = []
+            if c.geometry_source.startswith("parent:"):
+                pid = c.geometry_source.split(":", 1)[1]
+                if pid in byid:
+                    out.append(pid)
+            gate = getattr(c, "gate", None)
+            if gate and gate.get("source") in byid:
+                out.append(gate["source"])
+            return out
+
+        def visit(c):
+            if c.id in perm or c.id in temp:
+                return            # already placed, or a cycle we refuse to loop on
+            temp.add(c.id)
+            for pid in deps(c):
+                visit(byid[pid])
+            temp.discard(c.id)
+            perm.add(c.id)
+            order.append(c)
+
+        for c in calcs:
+            visit(c)
+        return order
 
     def submit_unattended(self, calc_ids, reports=None):
         # type: (list, Optional[list]) -> None
