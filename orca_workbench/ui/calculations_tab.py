@@ -141,7 +141,7 @@ class CalculationsTab(ttk.Frame):
                           "Cluster login node only. Warns before submitting a derived calc whose "
                           "parent hasn't finished. Shows a progress bar.")
         # Monitoring: distinct, bigger/bolder, light shade, just left of the launch action.
-        b_status = tk.Button(bar, text="↻ Refresh status (F5)", command=self.on_refresh_status,
+        b_status = tk.Button(bar, text="Refresh status (F5)", command=self.on_refresh_status,
                              font=("TkDefaultFont", 11, "bold"),
                              bg="#d3e6f5", activebackground="#c3dcf0")
         b_status.pack(side=tk.RIGHT, padx=2)

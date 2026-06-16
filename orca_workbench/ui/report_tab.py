@@ -31,7 +31,7 @@ class ReportTab(ttk.Frame):
         top.pack(side=tk.TOP, fill=tk.X, padx=4, pady=4)
         ttk.Label(top, text="Generate a results report (JSON + CSV) from finished calculations.",
                   foreground="#444").pack(side=tk.LEFT, padx=4)
-        b_refresh = ttk.Button(top, text="↻ Refresh list", command=self.refresh)
+        b_refresh = ttk.Button(top, text="Refresh list", command=self.refresh)
         b_refresh.pack(side=tk.RIGHT, padx=4)
         tip(b_refresh, "Re-scan calculations and their .out files for which have finished.")
 

@@ -27,7 +27,7 @@ from orca_workbench.ui.tooltip import tip
 
 
 _HEADING_LABELS = {
-    "favorite": "★",
+    "favorite": "*",
     "name": "Name",
     "calctype": "Type",
     "method_label": "Method",
@@ -133,7 +133,7 @@ class RecipesTab(ttk.Frame):
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
         tip(self.tree, "Recipe library. Click a row to load it into the editor (edits auto-save). "
                        "Double-click to open its JSON in your text editor.\n\n"
-                       "Click a column header to sort (again to reverse). Favorites (★) stay "
+                       "Click a column header to sort (again to reverse). Favorites (*) stay "
                        "pinned on top. Ctrl+click toggles, Shift+click extends, Ctrl+A all, "
                        "Delete removes.")
 
@@ -159,7 +159,7 @@ class RecipesTab(ttk.Frame):
         lbl, ent = self._meta_row(meta, 3, "Variant (optional):", self.variant_var)
         tip(lbl, "Optional disambiguator (RIJCOSX_D4, NoFrozenCore, …) — an extra directory level.")
         tip(ent, "Optional disambiguator (RIJCOSX_D4, NoFrozenCore, …) — an extra directory level.")
-        fav_check = ttk.Checkbutton(meta, text="★ Favorite (pin to top of list)",
+        fav_check = ttk.Checkbutton(meta, text="* Favorite (pin to top of list)",
                                     variable=self.favorite_var, command=self._on_favorite_toggle)
         fav_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(4, 2))
         tip(fav_check, "Pin this recipe to the top of the list. Applies immediately.")
@@ -261,7 +261,7 @@ class RecipesTab(ttk.Frame):
             iid = r.source_path or r.name
             if self.tree.exists(iid):
                 continue
-            star = "★" if r.favorite else ""
+            star = "*" if r.favorite else ""
             self.tree.insert("", tk.END, iid=iid,
                              values=(star, r.name, r.calctype, r.method_label, r.variant,
                                      _fmt_created(r.created_at)))
@@ -383,7 +383,7 @@ class RecipesTab(ttk.Frame):
                 self.app.refresh_all_tabs()
         self._update_placeholder_warning()
         self._rerender_tree(preserve_editor=True)
-        self._set_status("✓ saved", "#1a7a1a")
+        self._set_status("saved", "#1a7a1a")
 
     def _on_favorite_toggle(self):
         # Apply favourite immediately (no debounce) so the pin is snappy.
@@ -445,7 +445,7 @@ class RecipesTab(ttk.Frame):
         r = self._recipe_by_path(new_path)
         if r is not None:
             self._load_into_editor(r)
-        self._set_status("✓ created", "#1a7a1a")
+        self._set_status("created", "#1a7a1a")
 
     def _unique_name(self, base):
         existing = {r.name for r in self.app.recipes}
