@@ -29,11 +29,14 @@ class ReportTab(ttk.Frame):
     def _build(self):
         top = ttk.Frame(self)
         top.pack(side=tk.TOP, fill=tk.X, padx=4, pady=4)
-        ttk.Label(top, text="Generate a results report (JSON + CSV) from finished calculations.",
+        ttk.Label(top, text="Generate a results report (JSON + CSV) from finished calculations. "
+                            "The list is scanned on demand — click Scan, or just hit Generate.",
                   foreground="#444").pack(side=tk.LEFT, padx=4)
-        b_refresh = ttk.Button(top, text="Refresh list", command=self.refresh)
+        b_refresh = ttk.Button(top, text="Scan for finished calcs", command=self.rescan)
         b_refresh.pack(side=tk.RIGHT, padx=4)
-        tip(b_refresh, "Re-scan calculations and their .out files for which have finished.")
+        tip(b_refresh, "Scan every calc's .out file for normal termination and list them. Done on "
+                       "demand (not on opening the tab) because it reads a file per calc — slow "
+                       "over the cluster's shared filesystem with many calcs.")
 
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         paned.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -156,6 +159,16 @@ class ReportTab(ttk.Frame):
     # ---- finished-calc discovery ----
 
     def refresh(self):
+        # Opening the Report tab must be instant even with hundreds of finished
+        # calcs, so we do NOT scan .out files here (that reads a file per calc,
+        # slow over the shared FS). The list is populated on demand by rescan()
+        # ("Scan" button), and Generate computes it fresh anyway. Just clear any
+        # rows left over from a previous project/scan.
+        self.tree.delete(*self.tree.get_children())
+
+    def rescan(self):
+        """Scan every calc's .out for normal termination and populate the list.
+        Explicit action only — never on tab open."""
         finished = self._finished_calcs()
         sel = set(self.tree.selection())
         self.tree.delete(*self.tree.get_children())
@@ -167,6 +180,7 @@ class ReportTab(ttk.Frame):
         for i in sel:
             if self.tree.exists(i):
                 self.tree.selection_add(i)
+        self.app.set_status("Report: {} finished calculation(s) found.".format(len(finished)))
 
     def _finished_calcs(self):
         """List (calc, recipe) for calcs whose .out shows normal termination."""
