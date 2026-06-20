@@ -144,6 +144,17 @@ def _safe_filename(name):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "recipe"
 
 
+def safe_path_component(name):
+    # type: (str) -> str
+    """Make a string safe to use as a single directory name in a calc's run path.
+    A space (or other shell/SLURM-hostile char) in a rundir breaks the SLURM
+    script: it lands in `#SBATCH --output=<rundir>/%x-%j.out` (SLURM's directive
+    parser splits on whitespace) and in the unquoted `cd`/`cp` lines. So collapse
+    anything outside [A-Za-z0-9._+-] to an underscore. Idempotent on names that
+    are already safe (e.g. "M062X_pcSseg-2" is unchanged)."""
+    return re.sub(r"[^A-Za-z0-9_.+-]+", "_", name).strip("_") or "x"
+
+
 def _unique_recipe_path(dirpath, name):
     # type: (str, str) -> str
     """A new <safe_name>.json path that doesn't collide with an existing file."""

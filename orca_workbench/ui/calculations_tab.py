@@ -703,7 +703,11 @@ class CalculationsTab(ttk.Frame):
     def _target_dir(self, calc, mol, recipe):
         if mol is None or recipe is None:
             return "(unresolved)"
-        return "/".join(["calcs", mol.filename, calc.category] + list(recipe.path_parts()))
+        # Sanitise every component: a space (or other shell/SLURM-hostile char)
+        # in the rundir breaks the SLURM script (the #SBATCH --output directive
+        # and the cd/cp lines). Already-safe labels are unchanged.
+        parts = [mol.filename, calc.category] + list(recipe.path_parts())
+        return "/".join(["calcs"] + [inputs_mod.safe_path_component(p) for p in parts])
 
     def _target_key(self, calc):
         """A key for the directory a calc builds into: two calcs with the same
@@ -1089,7 +1093,7 @@ class CalculationsTab(ttk.Frame):
 
     def _build_one(self, calc, mol, recipe, slurm_template, xyz_ref=None, preamble=""):
         root = self.app.project.root()
-        target_dir_rel = "/".join(["calcs", mol.filename, calc.category] + list(recipe.path_parts()))
+        target_dir_rel = self._target_dir(calc, mol, recipe)  # sanitised components
         target_dir_abs = os.path.join(root, target_dir_rel)
         os.makedirs(target_dir_abs, exist_ok=True)
 
