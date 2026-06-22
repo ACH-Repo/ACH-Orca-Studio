@@ -39,6 +39,9 @@ def _print_usage():
     print("                      (Equivalent: set ORCA_WORKBENCH_DIAG=1.)")
     print("  --check-backends    Probe RDKit/OpenBabel and exit, no GUI. Use this if")
     print("                      Generate XYZ fails, to see whether the backends work.")
+    print("  --run FILE.inp      Headless, no GUI: on a SLURM login node, submit FILE.inp")
+    print("                      as a proper batch job (node-local scratch + copy-back);")
+    print("                      on a plain machine, run it locally (orca FILE > FILE.out).")
     print("  --simple, --gateway_mode")
     print("                      Lightweight mode: load only the core pipeline tabs")
     print("                      (Molecules/Recipes/Calculations/Report), build them")
@@ -57,6 +60,20 @@ def _cli():
         from orca_workbench.core.coords import diagnose_backends
         print(diagnose_backends())
         sys.exit(0)
+
+    # Headless single-job run/submit — no display needed (like --check-backends).
+    if "--run" in sys.argv:
+        idx = sys.argv.index("--run")
+        if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith("-"):
+            print("error: --run needs a path to a .inp file")
+            sys.exit(2)
+        from orca_workbench.core.headless import run_infile
+        msg = run_infile(sys.argv[idx + 1])
+        print(msg)
+        # Non-zero on any failure: bad input, failed submit, or a non-zero ORCA
+        # exit (so `--run` is scriptable like a bare `orca my.inp`).
+        ok = not (msg.startswith("error") or "failed" in msg or "(exit " in msg)
+        sys.exit(0 if ok else 1)
 
     # Live diagnostics mode: instrument the GUI and write a perf log on quit.
     diag_on = ("--diagnose" in sys.argv or "-d" in sys.argv
