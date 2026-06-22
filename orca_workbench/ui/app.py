@@ -133,6 +133,7 @@ class App(object):
                                 "Program to open a recipe's JSON when you double-click it. A GUI "
                                 "editor (Notepad++, Sublime, gedit, …); terminal editors won't work."))
         setmenu.add_command(label="molden module name...", command=self._set_molden_module)
+        setmenu.add_command(label="SLURM submission delay...", command=self._set_submit_delay)
         menubar.add_cascade(label="Settings", menu=setmenu)
 
         helpmenu = tk.Menu(menubar, tearoff=0)
@@ -354,6 +355,24 @@ class App(object):
                                           "Set {}".format(friendly), description)
         self.set_status("Set {} to: {}".format(friendly, path) if path
                         else "{} unset.".format(friendly))
+
+    def _set_submit_delay(self):
+        from tkinter import simpledialog
+        cur = config_mod.get("submit_delay_ms", 100)
+        try:
+            cur = int(cur)
+        except (TypeError, ValueError):
+            cur = 100
+        val = simpledialog.askinteger(
+            "SLURM submission delay",
+            "Delay between sbatch submissions, in milliseconds.\n\n"
+            "Submitting hundreds of jobs back-to-back can trip the scheduler's "
+            "submission rate limit and silently drop some. A small delay (≈100 ms) "
+            "avoids that. Set 0 to disable (only on a quiet controller).",
+            initialvalue=cur, minvalue=0, maxvalue=60000, parent=self.root)
+        if val is not None:
+            config_mod.set_value("submit_delay_ms", int(val))
+            self.set_status("SLURM submission delay set to {} ms.".format(int(val)))
 
     def _set_molden_module(self):
         from tkinter import simpledialog

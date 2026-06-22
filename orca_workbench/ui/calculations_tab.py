@@ -19,12 +19,14 @@ lives in one place.
 import os
 import platform
 import subprocess
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional, Tuple
 
 from orca_workbench.core import config as config_mod
 from orca_workbench.core import coords as coords_mod
+from orca_workbench.core import discovery as discovery_mod
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.core import local_runner as local_runner_mod
 from orca_workbench.core import orca_parser
@@ -87,6 +89,24 @@ class CalculationsTab(ttk.Frame):
         forever 'running')."""
         self._parse_cache.clear()
         self.on_refresh_status()
+        self._maybe_prompt_detect()
+
+    def _maybe_prompt_detect(self):
+        """If the freshly-opened project has calcs that were clearly submitted
+        outside the app (output files on disk but no job_id), offer to link them
+        — so a `submit_all.sh` run doesn't leave them invisible to monitoring."""
+        try:
+            pending = discovery_mod.unlinked_with_output(self.app.project)
+        except Exception:
+            return
+        if not pending:
+            return
+        if messagebox.askyesno(
+                "Detect submitted jobs?",
+                "{} calculation(s) look submitted (output files are on disk) but "
+                "aren't linked to the app, so their status and results won't "
+                "show.\n\nDetect and link them now?".format(len(pending))):
+            self.on_detect_jobs()
 
     # ------------------------------------------------------------------ UI
 
@@ -161,6 +181,12 @@ class CalculationsTab(ttk.Frame):
                              font=("TkDefaultFont", 11, "bold"),
                              bg="#d3e6f5", activebackground="#c3dcf0")
         b_status.pack(side=tk.RIGHT, padx=2)
+        b_detect = ttk.Button(bar, text="Detect jobs", command=self.on_detect_jobs)
+        b_detect.pack(side=tk.RIGHT, padx=2)
+        tip(b_detect, "Reconnect calcs that were submitted outside the app (e.g. via "
+                      "submit_all.sh): recover each job's SLURM id from its output files "
+                      "and from squeue, so status and result-harvest work again. Safe to "
+                      "run repeatedly.")
 
         tip(b_all, "Bulk: pick one recipe and queue a root calculation for every molecule. The "
                    "usual starting point — most projects begin by OPT-ing the whole set.")
@@ -185,6 +211,12 @@ class CalculationsTab(ttk.Frame):
         bar2.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 4))
         b_open = ttk.Button(bar2, text="Open project folder", command=self.on_open_folder)
         b_open.pack(side=tk.LEFT, padx=2)
+        b_import = ttk.Button(bar2, text="Import calcs...", command=self.on_import_calcs)
+        b_import.pack(side=tk.LEFT, padx=2)
+        tip(b_import, "Pick a directory of existing ORCA .inp files (with whatever .out/.engrad "
+                      "sit beside them) and bring them in as molecules + calculations — for "
+                      "monitoring and result extraction. A recipe is reconstructed from each "
+                      ".inp so the report tab's extractors fire. Skips .inp already in the project.")
         self.write_submit_var = tk.BooleanVar(value=True)
         cb = ttk.Checkbutton(bar2, text="write submit_all.sh on Build", variable=self.write_submit_var)
         cb.pack(side=tk.LEFT, padx=12)
@@ -1179,6 +1211,16 @@ class CalculationsTab(ttk.Frame):
 
     # ------------------------------------------------------------- submit
 
+    def _submit_delay_s(self):
+        """Seconds to pause between sbatch calls. Submitting many jobs back-to-back
+        can trip the controller's submission rate limit and silently drop some, so
+        we throttle by default (config 'submit_delay_ms', 100 ms; 0 disables)."""
+        try:
+            ms = int(config_mod.get("submit_delay_ms", 100))
+        except (TypeError, ValueError):
+            ms = 100
+        return max(0, ms) / 1000.0
+
     def on_submit(self):
         root = self.app.project.root()
         targets = self._selected_or_all()
@@ -1209,8 +1251,11 @@ class CalculationsTab(ttk.Frame):
         if not messagebox.askyesno("Submit", "Submit {} job(s) via sbatch?{}".format(len(candidates), warn)):
             return
         n_ok = 0
+        delay = self._submit_delay_s()
         pd = ProgressDialog(self, "Submitting jobs", total=len(candidates))
-        for calc in candidates:
+        for i, calc in enumerate(candidates):
+            if i and delay:
+                time.sleep(delay)        # throttle: stay under the submission rate limit
             pd.step("Submitting {}".format(self._short(calc)))
             if pd.cancelled:
                 self._log("Submit cancelled — {} already sent.".format(n_ok))
@@ -1233,6 +1278,67 @@ class CalculationsTab(ttk.Frame):
         if states is None and not self._local_mode:
             self._log("squeue not available — using .out files for status.")
         self.refresh()
+
+    def on_detect_jobs(self):
+        """Reconnect calcs submitted outside the app by recovering their job ids
+        from the run-dir output files and (for still-pending jobs) squeue."""
+        if not self.app.project.planned_calcs:
+            messagebox.showinfo("Detect jobs", "No calculations in this project yet.")
+            return
+        namemap = slurm_runtime.query_name_map()  # None if squeue unavailable
+        s = discovery_mod.relink_project(self.app.project, name_to_jobid=namemap)
+        self._log("Detect jobs: {} linked from output files, {} from squeue, "
+                  "{} already linked, {} still unlinked.".format(
+                      s["from_files"], s["from_queue"], s["already"], len(s["unlinked"])))
+        if s["unlinked"]:
+            show = ", ".join(s["unlinked"][:8]) + (" ..." if len(s["unlinked"]) > 8 else "")
+            self._log("  not yet linkable (likely still PENDING — re-run later): " + show)
+        if s["changed"]:
+            self.app.mark_dirty()
+        self.on_refresh_status()  # re-query states now that ids are known
+        note = "" if namemap is not None else (
+            "\n\nsqueue wasn't available, so only jobs that have started writing "
+            "output were linked. Re-run on the login node to pick up pending jobs.")
+        messagebox.showinfo(
+            "Detect jobs",
+            "Linked {} calc(s) ({} from files, {} from squeue).\n"
+            "{} already linked, {} still unlinked.{}".format(
+                s["changed"], s["from_files"], s["from_queue"],
+                s["already"], len(s["unlinked"]), note))
+
+    def on_import_calcs(self):
+        """Import a directory of standalone .inp (+ outputs) as molecules/calcs."""
+        src = filedialog.askdirectory(title="Import ORCA .inp files from directory")
+        if not src:
+            return
+
+        def _persist(recipe):
+            # Save to the recipe dir and register on the app, unless the name
+            # already exists (re-import) — then reuse the existing one.
+            if self.app.get_recipe(recipe.name) is not None:
+                return
+            try:
+                inputs_mod.save_recipe(recipe, self.app.recipe_dir)
+            except OSError as e:
+                self._log("Import: could not save recipe {!r}: {}".format(recipe.name, e))
+            self.app.recipes.append(recipe)
+
+        s = discovery_mod.import_dir(self.app.project, src, save_recipe=_persist)
+        self._log("Import: scanned {}, imported {}, skipped {} (already present), "
+                  "{} had outputs, {} new recipe(s).".format(
+                      s["scanned"], s["imported"], s["skipped"],
+                      s["with_output"], len(s["new_recipes"])))
+        for err in s["errors"]:
+            self._log("  ! " + err)
+        if s["imported"]:
+            self.app.mark_dirty()
+            self.app.refresh_all_tabs()
+        self.on_refresh_status()
+        messagebox.showinfo(
+            "Import calcs",
+            "Imported {} calculation(s) from\n{}\n\n"
+            "{} already in the project (skipped); {} have outputs ready to harvest.".format(
+                s["imported"], src, s["skipped"], s["with_output"]))
 
     # --------------------------------------------------- unattended (dependency chain)
 
@@ -1324,6 +1430,7 @@ class CalculationsTab(ttk.Frame):
         self._log_clear()
         jobmap = {}   # calc id -> job id (submitted, or already active, in this batch)
         n_sub = n_skip = n_done = 0
+        delay = self._submit_delay_s()
         pd = ProgressDialog(self, "Submitting dependency chain", total=len(ids))
         for cid in ids:
             calc = self.app.project.calc_by_id(cid)
@@ -1413,6 +1520,8 @@ class CalculationsTab(ttk.Frame):
                     self._short(calc), jobid, "   [{}]".format(dep) if dep else ""))
             else:
                 self._log("SUBMIT FAILED {}: {}".format(self._short(calc), err))
+            if delay:
+                time.sleep(delay)        # throttle between dependency-chain submits
                 n_skip += 1
         pd.close()
         self.app.mark_dirty()

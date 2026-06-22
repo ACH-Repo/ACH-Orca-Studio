@@ -109,4 +109,38 @@ def find_output_file(rundir_abs, jobname, job_id):
     for fn in candidates:
         if fn.startswith(jobname + "-") and fn.endswith(".out"):
             return os.path.join(rundir_abs, fn)
+    # Last resort: a plainly-named <jobname>.out (an imported calc, or ORCA run
+    # by hand as `orca x.inp > x.out` rather than through the SLURM template).
+    plain = os.path.join(rundir_abs, "{}.out".format(jobname))
+    if os.path.isfile(plain):
+        return plain
     return None
+
+
+def query_name_map(user=None):
+    # type: (Optional[str]) -> Optional[Dict[str, Tuple[str, str]]]
+    """Return {job_name: (job_id, state)} for the user's queued/running jobs.
+
+    Used to reconnect jobs submitted outside the app (e.g. by a submit_all.sh):
+    the SLURM job name is the calc's molecule filename, so this maps a planned
+    calc back to its id while it's still PENDING (before any .out exists).
+    Returns None if squeue is unavailable. If two jobs share a name (a resubmit),
+    the most recently seen wins."""
+    user = user or os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    cmd = ["squeue", "--noheader", "-o", "%i %j %T"]
+    if user:
+        cmd += ["-u", user]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        return None
+    except subprocess.TimeoutExpired:
+        return {}
+    except Exception:
+        return None
+    out = {}  # type: Dict[str, Tuple[str, str]]
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            out[parts[1]] = (parts[0], parts[2])
+    return out
