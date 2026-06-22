@@ -1937,11 +1937,11 @@ class CalculationsTab(ttk.Frame):
         finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
         finished_nmr = [c for c in calcs if self._is_finished_type(c, "NMR")]
 
-        if len(finished_freq) == 1:
-            menu.add_command(label="Plot IR spectrum",
-                             command=lambda c=finished_freq[0]: self._plot_ir(c))
+        if finished_freq:
+            menu.add_command(label="Plot IR spectrum ({} selected)".format(len(finished_freq)),
+                             command=lambda cs=list(finished_freq): self._plot_ir(cs))
         else:
-            menu.add_command(label="Plot IR spectrum  (select one finished FREQ)",
+            menu.add_command(label="Plot IR spectrum  (select finished FREQ)",
                              state=tk.DISABLED)
         if finished_nmr:
             menu.add_command(label="Plot NMR spectrum ({} selected)".format(len(finished_nmr)),
@@ -1996,24 +1996,33 @@ class CalculationsTab(ttk.Frame):
         if op:
             LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), op)
 
-    def _plot_ir(self, calc):
-        text = self._read_out(calc)
-        if text is None:
-            messagebox.showinfo("No output", "Could not read this calculation's .out file.")
-            return
-        freqs = orca_parser.parse_frequencies(text)
-        ir = orca_parser.parse_ir(text)
-        if not ir:
+    def _plot_ir(self, calcs):
+        # Accepts one or more finished FREQ calcs; stacks them as colour-matched
+        # traces in a single IR window.
+        entries = []
+        for c in calcs:
+            text = self._read_out(c)
+            if text is None:
+                continue
+            ir = orca_parser.parse_ir(text)
+            if not ir:
+                continue
+            mol = self.app.project.molecule_by_filename(c.molecule_filename)
+            entries.append({
+                "name": "{} / {}".format(c.molecule_filename, c.recipe_name),
+                "smiles": mol.smiles if mol else None,
+                "centers": [row["freq_cm"] for row in ir],
+                "intensities": [row["intensity_km_mol"] for row in ir],
+                "freqs": orca_parser.parse_frequencies(text),
+            })
+        if not entries:
             messagebox.showinfo("No IR data",
-                                "No IR spectrum found in the output — is this a Freq run?")
+                                "No IR spectrum found in the selected calculation(s) — are they Freq runs?")
             return
-        centers = [row["freq_cm"] for row in ir]
-        intens = [row["intensity_km_mol"] for row in ir]
         from orca_workbench.ui.spectra import IRSpectrumWindow
-        mol = self.app.project.molecule_by_filename(calc.molecule_filename)
-        smiles = mol.smiles if mol else None
-        # Pass the full frequency list too, so the window can report imaginary modes.
-        IRSpectrumWindow(self, self._short(calc), centers, intens, freqs=freqs, smiles=smiles)
+        title = (entries[0]["name"].split(" / ")[0] if len(entries) == 1
+                 else "{} molecules".format(len(entries)))
+        IRSpectrumWindow(self, title, entries)
 
     def _plot_nmr(self, calcs):
         from orca_workbench.ui.spectra import NMROptionsDialog, NMRSpectrumWindow

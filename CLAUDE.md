@@ -74,18 +74,18 @@ off the core path and gracefully degradable.
 - **Right-click a finished OPT** → open optimised geometry / trajectory movie
   (via shared `open_xyz_3d`, → molden on gateway). (`ui/calculations_tab.py`,
   `ui/molecules_tab.py`)
-- **UI polish** — Ctrl+Shift+N, ASCII button labels. (branch `feature/ui-polish`
-  may still be unmerged — check `git branch -a`.)
+- **UI polish** — Ctrl+Shift+N, ASCII button labels, Calc/Recipes scrollbars.
+- **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
+  NMR (right-click several finished FREQ); both windows share ONE hover-driven
+  structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR
+  x-range opens with a sensible minimum span (not zoomed to one peak); a
+  **Maximize** button on both; on-hover sticks skipped in stacked IR.
 
 ## Open work / TODO
-- **Plotter overhaul** (`ui/spectra.py`, `ui/plot_window.py`): IR stacking like
-  NMR (skip on-hover sticks in stacked view); NMR default x-margins too tight
-  (open at a full-spectrum view, not zoomed to one peak); add a **maximize
-  button** to plot windows; replace multiple per-trace structure thumbnails with
-  **one shared panel** showing the hovered trace's RDKit structure.
-- **Scrollbars**: Calc tab `log`/`info_text` panels and the Recipes editor's
-  horizontal bar (`wrap="none"`).
-- Optional: PyMOL support for a *local* (Windows) machine.
+- Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
+- The plotter overhaul (below) was a blind refactor (no GUI here) — worth a visual
+  pass on the gateway: stacked IR, the shared hover structure panel, NMR margins,
+  maximize button. Ping if anything renders oddly in ThinLinc.
 
 ## Origin / sibling project
 This app grew out of a **ZPVA** study (¹⁹F isotope shifts of deuterated
