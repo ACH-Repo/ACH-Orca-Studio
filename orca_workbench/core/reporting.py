@@ -114,6 +114,35 @@ def _x_homo_lumo(text, ctx):
     return {"homo_lumo": hl} if hl else None
 
 
+def _x_gradient(text, ctx):
+    """Max / RMS / norm of the Cartesian gradient from the <molecule>.engrad file
+    an EnGrad (or Opt) job writes next to the .out. A small but telling number: a
+    geometry that 'finished' but still has a large max gradient isn't converged.
+    Returns None when there's no .engrad."""
+    if not ctx.rundir_abs:
+        return None
+    path = os.path.join(ctx.rundir_abs, ctx.molecule + ".engrad")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            rows = [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
+        natoms = int(rows[0])
+        g = [float(x) for x in rows[2:2 + 3 * natoms]]
+    except (OSError, ValueError, IndexError):
+        return None
+    if not g or len(g) != 3 * natoms:
+        return None
+    import math
+    norm = math.sqrt(sum(x * x for x in g))
+    return {"gradient": {
+        "max_au": max(abs(x) for x in g),
+        "rms_au": norm / math.sqrt(len(g)),
+        "norm_au": norm,
+        "n_atoms": natoms,
+    }}
+
+
 class Extractor(object):
     def __init__(self, key, label, func, applies_hint=""):
         # type: (str, str, Callable, str) -> None
@@ -125,6 +154,7 @@ class Extractor(object):
 
 EXTRACTORS = [
     Extractor("final_energy", "Final energy", _x_final_energy, "any"),
+    Extractor("gradient", "Cartesian gradient (max/RMS)", _x_gradient, "ENGRAD"),
     Extractor("converged_geometry", "Converged geometry (xyz)", _x_converged_geometry, "OPT"),
     Extractor("trajectory", "Optimization trajectory (for PyMOL)", _x_trajectory, "OPT"),
     Extractor("frequencies", "Frequencies + IR", _x_frequencies, "FREQ"),
