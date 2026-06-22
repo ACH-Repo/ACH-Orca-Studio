@@ -48,7 +48,7 @@ class ProgramPathDialog(tk.Toplevel):
         self.var = tk.StringVar(value=config_mod.get(config_key, "") or "")
         entry = ttk.Entry(row, textvariable=self.var, width=46)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(row, text="Browse…", command=self._browse).pack(side=tk.LEFT)
+        ttk.Button(row, text="Browse...", command=self._browse).pack(side=tk.LEFT)
 
         btns = ttk.Frame(self)
         btns.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)

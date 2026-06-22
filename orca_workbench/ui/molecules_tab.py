@@ -54,7 +54,8 @@ class MoleculesTab(ttk.Frame):
         tip(b_name, "Look up a molecule by chemical name (IUPAC or common), CAS number, "
                     "InChI, or SMILES via public web services (OPSIN + PubChem), preview the "
                     "2D structure, and add it. Needs internet; with none, only SMILES/InChI "
-                    "work. The structure's source is recorded in the molecule's comment.")
+                    "work. The structure's source is recorded in the molecule's comment.\n\n"
+                    "Shortcut: Ctrl+Shift+N (from anywhere in the app).")
         tip(b_paste, "Open a dialog showing what's currently in your clipboard parsed as a "
                      "list of SMILES. You can edit before committing. Same effect as Ctrl+V "
                      "while hovering the molecule list.\n\n"

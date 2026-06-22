@@ -149,6 +149,7 @@ class App(object):
         self.root.bind_all("<Control-n>", lambda e: self.on_new())
         self.root.bind_all("<Control-o>", lambda e: self.on_open())
         self.root.bind_all("<Control-s>", lambda e: self.on_save())
+        self.root.bind_all("<Control-Shift-N>", lambda e: self._add_by_name_shortcut())
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
 
     def _build_layout(self):
@@ -284,6 +285,18 @@ class App(object):
             if spec["attr"] == attr:
                 return self._materialize_lazy_tab(path)
         return None
+
+    def _add_by_name_shortcut(self):
+        """Ctrl+Shift+N: jump to the Molecules tab and open 'Add by name'."""
+        tab = self._ensure_tab("molecules_tab")
+        if tab is None:
+            return
+        try:
+            self.notebook.select(tab)
+        except Exception:
+            pass
+        if hasattr(tab, "on_add_by_name"):
+            tab.on_add_by_name()
 
     def _select_tab(self, attr):
         # type: (str) -> Optional[ttk.Frame]

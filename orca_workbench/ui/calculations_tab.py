@@ -121,7 +121,7 @@ class CalculationsTab(ttk.Frame):
                           font=("TkDefaultFont", 10, "bold"))
         b_all.pack(side=tk.LEFT, padx=(0, 2))
         b_add = ttk.Button(bar, text="Add", command=self.on_add)
-        b_derive = ttk.Button(bar, text="Derive →", command=self.on_derive)
+        b_derive = ttk.Button(bar, text="Derive ->", command=self.on_derive)
         b_remove = ttk.Button(bar, text="Remove", command=self.on_remove)
         for b in (b_add, b_derive, b_remove):
             b.pack(side=tk.LEFT, padx=2)
@@ -142,11 +142,11 @@ class CalculationsTab(ttk.Frame):
         # and behaviour adapt to the environment — sbatch present → cluster
         # Submit; absent (a PC) → run ORCA locally through a serial queue.
         if self._local_mode:
-            b_submit = tk.Button(bar, text="Run locally ▶", command=self.on_run_local,
+            b_submit = tk.Button(bar, text="Run locally >", command=self.on_run_local,
                                  font=("TkDefaultFont", 10, "bold"),
                                  bg="#e0a35a", activebackground="#e8b673", fg="#222222")
             b_submit.pack(side=tk.RIGHT, padx=(6, 0))
-            b_stop = tk.Button(bar, text="■ Stop", command=self.on_stop_local)
+            b_stop = tk.Button(bar, text="Stop", command=self.on_stop_local)
             b_stop.pack(side=tk.RIGHT, padx=(6, 2))
             self.concurrency_var = tk.IntVar(value=1)
             sp = ttk.Spinbox(bar, from_=1, to=16, width=3, textvariable=self.concurrency_var)
@@ -161,14 +161,14 @@ class CalculationsTab(ttk.Frame):
                     "laptop — each job already uses its recipe's %pal nprocs cores, and running "
                     "several multi-core jobs at once just thrashes.")
         else:
-            b_submit = tk.Button(bar, text="Submit ▶", command=self.on_submit,
+            b_submit = tk.Button(bar, text="Submit >", command=self.on_submit,
                                  font=("TkDefaultFont", 10, "bold"),
                                  bg="#e0a35a", activebackground="#e8b673", fg="#222222")
             b_submit.pack(side=tk.RIGHT, padx=(6, 0))
             tip(b_submit, "sbatch the selected built calcs (or all built-and-unsubmitted). "
                           "Cluster login node only. Warns before submitting a derived calc whose "
                           "parent hasn't finished. Shows a progress bar.")
-            b_unatt = tk.Button(bar, text="▶▶ Unattended", command=self.on_submit_unattended,
+            b_unatt = tk.Button(bar, text=">> Unattended", command=self.on_submit_unattended,
                                 bg="#cdebc5", activebackground="#bfe2b6")
             b_unatt.pack(side=tk.RIGHT, padx=(6, 0))
             tip(b_unatt, "Submit the selected calcs (or all unfinished) as a SLURM dependency "
