@@ -1948,10 +1948,36 @@ class CalculationsTab(ttk.Frame):
             menu.add_command(label="Open live progress plot",
                              command=lambda c=calcs[0]: self._open_live(c))
 
+        # Finished OPT: open the optimised geometry / trajectory in 3D (molden on
+        # the gateway, local Avogadro otherwise) — same path as the Molecules tab.
+        finished_opt = [c for c in calcs if self._is_finished_type(c, "OPT")]
+        if len(finished_opt) == 1:
+            geom = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + ".xyz")
+            trj = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + "_trj.xyz")
+            if geom or trj:
+                menu.add_separator()
+            if geom:
+                menu.add_command(label="Open optimized geometry (3D)",
+                                 command=lambda p=geom: self._open_3d(p))
+            if trj:
+                menu.add_command(label="Open trajectory as movie",
+                                 command=lambda p=trj: self._open_3d(p))
+
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _calc_file(self, calc, name):
+        """Absolute path to <rundir>/<name> if it exists, else None."""
+        if not calc.rundir:
+            return None
+        p = os.path.join(self.app.project.root(), calc.rundir, name)
+        return p if os.path.isfile(p) else None
+
+    def _open_3d(self, path):
+        from orca_workbench.ui.molecules_tab import open_xyz_3d
+        open_xyz_3d(self, self.app, path)
 
     def _is_finished_type(self, calc, calctype):
         recipe = self.app.get_recipe(calc.recipe_name)

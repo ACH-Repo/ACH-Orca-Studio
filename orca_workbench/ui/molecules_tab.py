@@ -952,28 +952,7 @@ class MoleculesTab(ttk.Frame):
                 "(select it and press Ctrl+Enter, or click Generate XYZ).".format(mol.name),
             )
             return
-        abs_xyz = mol.xyz_path
-        if not os.path.isabs(abs_xyz):
-            abs_xyz = os.path.join(self.app.project.root(), abs_xyz)
-        if not os.path.isfile(abs_xyz):
-            messagebox.showerror("File missing", "XYZ file not found:\n{}".format(abs_xyz))
-            return
-        # Only launch directly if Avogadro is present on the machine the app is
-        # *running* on. When the app runs on the Lido gateway (Linux) and you're
-        # connected via MobaXterm, your Avogadro is on your Windows PC — there's
-        # no way for a cluster process to reach it. In that case we just hand you
-        # the path so you can open it from MobaXterm's file browser (which
-        # downloads the file and opens it with your local Avogadro).
-        avo = config_mod.get("avogadro_path", "")
-        if avo and (os.path.isfile(avo) or _on_path(avo)):
-            try:
-                subprocess.Popen([avo, abs_xyz])
-                self.app.set_status("Launched Avogadro for {}.".format(os.path.basename(abs_xyz)))
-                return
-            except Exception as e:
-                messagebox.showerror("Launch failed", "Could not launch Avogadro:\n{}\n\n{}".format(avo, e))
-                return
-        OpenXyzDialog(self, abs_xyz)
+        open_xyz_3d(self, self.app, mol.xyz_path)
 
     def on_add_by_name(self):
         """Resolve a chemical name/identifier to a structure over the web and add it."""
@@ -1081,6 +1060,35 @@ def open_in_molden(parent, xyz_path):
             "Could not start molden:\n{}\n\n"
             "Check it's available with `module avail molden`, and that you're in an "
             "X-forwarded session.".format(e))
+
+
+def open_xyz_3d(parent, app, xyz_path):
+    """Open an .xyz in 3D the way the Molecules tab double-click does: launch a
+    local Avogadro if one is configured and present on THIS machine, otherwise
+    the OpenXyzDialog (which offers molden on the gateway + hands you the path).
+    Works for a single geometry or a multi-frame trajectory — molden and Avogadro
+    both animate a multi-frame .xyz as a movie. Shared by the Molecules tab and
+    the Calculations-tab right-click (open optimised geometry / trajectory)."""
+    abs_xyz = xyz_path
+    if not os.path.isabs(abs_xyz):
+        abs_xyz = os.path.join(app.project.root(), abs_xyz)
+    if not os.path.isfile(abs_xyz):
+        messagebox.showerror("File missing", "File not found:\n{}".format(abs_xyz))
+        return
+    # Only launch directly if Avogadro is on the machine the app *runs* on (on the
+    # gateway it isn't — your Avogadro is on your Windows PC, unreachable from a
+    # cluster process), in which case the dialog hands you the path / offers molden.
+    avo = config_mod.get("avogadro_path", "")
+    if avo and (os.path.isfile(avo) or _on_path(avo)):
+        try:
+            subprocess.Popen([avo, abs_xyz])
+            app.set_status("Launched Avogadro for {}.".format(os.path.basename(abs_xyz)))
+            return
+        except Exception as e:
+            messagebox.showerror("Launch failed",
+                                 "Could not launch Avogadro:\n{}\n\n{}".format(avo, e))
+            return
+    OpenXyzDialog(parent, abs_xyz)
 
 
 class OpenXyzDialog(tk.Toplevel):
