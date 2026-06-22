@@ -283,7 +283,10 @@ class CalculationsTab(ttk.Frame):
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 4))
         self.log = tk.Text(log_frame, height=6, wrap="word", state=tk.DISABLED, font=("Courier", 9))
-        self.log.pack(fill=tk.BOTH, expand=True)
+        _logsb = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log.yview)
+        self.log.configure(yscrollcommand=_logsb.set)
+        _logsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def _build_editor(self, right):
         editor = ttk.LabelFrame(right, text="Edit selected calculation")
@@ -352,7 +355,10 @@ class CalculationsTab(ttk.Frame):
         info = ttk.LabelFrame(right, text="Resolved info")
         info.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=2, pady=2)
         self.info_text = tk.Text(info, height=10, wrap="word", state=tk.DISABLED, font=("Courier", 9))
-        self.info_text.pack(fill=tk.BOTH, expand=True)
+        _infosb = ttk.Scrollbar(info, orient=tk.VERTICAL, command=self.info_text.yview)
+        self.info_text.configure(yscrollcommand=_infosb.set)
+        _infosb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.info_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._editor_widgets = [self.mol_combo, self.recipe_combo, self.cat_entry,
                                 self.rb_init, self.rb_parent, self.rb_file,
