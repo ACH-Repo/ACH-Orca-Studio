@@ -1231,6 +1231,7 @@ class ResolveNameDialog(tk.Toplevel):
         self._on_commit = on_commit
         self._cache = {}            # reused across lookups in this dialog
         self._result = None
+        self._svc = None
         self._pending = False
         self._img = None            # keep a ref so the PhotoImage isn't GC'd
         self.title("Add molecule by name")
@@ -1243,6 +1244,7 @@ class ResolveNameDialog(tk.Toplevel):
         ent.pack(side=tk.LEFT, padx=6)
         ent.bind("<Return>", lambda e: self._start_resolve())
         ttk.Button(top, text="Resolve", command=self._start_resolve).pack(side=tk.LEFT)
+        ttk.Button(top, text="Test connection", command=self._test_services).pack(side=tk.LEFT, padx=(6, 0))
 
         self.status_var = tk.StringVar(value="Type an identifier and press Resolve.")
         ttk.Label(self, textvariable=self.status_var, foreground="#555").pack(anchor=tk.W, padx=10)
@@ -1328,6 +1330,40 @@ class ResolveNameDialog(tk.Toplevel):
         row.pack(anchor=tk.W)
         for n in names[:5]:
             ttk.Button(row, text=n, command=lambda nn=n: self._retry(nn)).pack(side=tk.LEFT, padx=2)
+
+    def _test_services(self):
+        """Probe OPSIN / PubChem / RDKit so the user can tell whether Add-by-name
+        will work here (e.g. firewalled gateway). Threaded, like the resolve path."""
+        if self._pending:
+            return
+        self._svc = None
+        self._clear_suggestions()
+        self.add_btn.config(state=tk.DISABLED)
+        self.status_var.set("Testing OPSIN / PubChem reachability …")
+        self._pending = True
+        threading.Thread(target=self._svc_worker, daemon=True).start()
+        self.after(100, self._svc_poll)
+
+    def _svc_worker(self):
+        try:
+            self._svc = resolve_mod.check_services()
+        except Exception as e:
+            self._svc = [("connectivity", False, str(e))]
+        self._pending = False
+
+    def _svc_poll(self):
+        if self._pending:
+            self.after(100, self._svc_poll)
+            return
+        if not self.winfo_exists():
+            return
+        rows = self._svc or []
+        allok = all(ok for _, ok, _ in rows)
+        self.status_var.set("Connectivity OK - Add by name will work here." if allok
+                            else "Some services unreachable - Add by name may not work here.")
+        self.detail_var.set("\n".join(
+            "{} {}  ({})".format("OK  " if ok else "FAIL", label, detail)
+            for label, ok, detail in rows))
 
     def _retry(self, name):
         self.query_var.set(name)

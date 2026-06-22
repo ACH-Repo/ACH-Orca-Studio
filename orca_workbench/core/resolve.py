@@ -244,6 +244,30 @@ def _pubchem_smiles(cid, get):
     return None
 
 
+def check_services(get=None):
+    """Quick reachability probe for the resolver's web services + RDKit. Returns
+    a list of (label, ok, detail) for a 'can Add-by-name work here?' diagnostic.
+    Uses a short timeout so a firewalled host fails fast rather than hanging."""
+    if get is None:
+        def get(url):
+            return _http_get(url, timeout=6)
+    out = []
+    for label, url in (("OPSIN web service", OPSIN_URL.format("benzene")),
+                       ("PubChem PUG-REST", "{}/pug/compound/name/water/cids/JSON".format(PUBCHEM))):
+        try:
+            status, body = get(url)
+            ok = status == 200 and bool((body or "").strip())
+            out.append((label, ok, "HTTP {}".format(status)))
+        except urllib.error.URLError as e:
+            out.append((label, False, "unreachable ({})".format(_reason(e))))
+        except Exception as e:
+            out.append((label, False, "error: {}".format(e)))
+    Chem, _ = _rdkit()
+    out.append(("RDKit (2D depiction)", Chem is not None,
+                "available" if Chem is not None else "not installed"))
+    return out
+
+
 def _autocomplete(q, get):
     try:
         status, body = get("{}/autocomplete/compound/{}/json?limit=8".format(

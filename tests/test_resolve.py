@@ -175,6 +175,26 @@ def test_cache_avoids_second_lookup():
 
 
 # --------------------------------------------------------------- provenance
+def test_check_services_reports_each():
+    get = make_get([("opsin/", (200, "C1=CC=CC=C1")),
+                    ("/cids/", (200, '{"IdentifierList": {"CID": [962]}}'))])
+    rows = R.check_services(get=get)
+    labels = {label: ok for label, ok, _ in rows}
+    assert labels["OPSIN web service"] is True
+    assert labels["PubChem PUG-REST"] is True
+    assert "RDKit (2D depiction)" in labels   # ok depends on whether rdkit is installed
+
+
+def test_check_services_flags_unreachable():
+    import urllib.error
+
+    def down(url):
+        raise urllib.error.URLError("network is unreachable")
+    rows = R.check_services(get=down)
+    by = {label: ok for label, ok, _ in rows}
+    assert by["OPSIN web service"] is False and by["PubChem PUG-REST"] is False
+
+
 def test_provenance_string():
     res = R.Resolution(query="aspirin", smiles="CC(=O)Oc1ccccc1C(=O)O",
                        source="PubChem CID 2244", retrieved="2026-06-22",
