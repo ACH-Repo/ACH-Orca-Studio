@@ -4,12 +4,14 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 from orca_workbench.core import config as config_mod
 from orca_workbench.core import coords as coords_mod
+from orca_workbench.core import resolve as resolve_mod
 from orca_workbench.core.project import Molecule
 from orca_workbench.ui.depict import smiles_to_photoimage
 from orca_workbench.ui.modal import make_modal
@@ -46,8 +48,13 @@ class MoleculesTab(ttk.Frame):
         b_gen_all = ttk.Button(toolbar, text="Generate Pending", command=self.on_generate_all)
         b_import = ttk.Button(toolbar, text="Import .xyz...", command=self.on_import_xyz)
         b_paste = ttk.Button(toolbar, text="Paste SMILES...", command=self.on_paste_smiles)
-        for b in (b_add, b_remove, b_gen, b_gen_all, b_import, b_paste):
+        b_name = ttk.Button(toolbar, text="Add by name...", command=self.on_add_by_name)
+        for b in (b_add, b_remove, b_gen, b_gen_all, b_import, b_paste, b_name):
             b.pack(side=tk.LEFT, padx=2)
+        tip(b_name, "Look up a molecule by chemical name (IUPAC or common), CAS number, "
+                    "InChI, or SMILES via public web services (OPSIN + PubChem), preview the "
+                    "2D structure, and add it. Needs internet; with none, only SMILES/InChI "
+                    "work. The structure's source is recorded in the molecule's comment.")
         tip(b_paste, "Open a dialog showing what's currently in your clipboard parsed as a "
                      "list of SMILES. You can edit before committing. Same effect as Ctrl+V "
                      "while hovering the molecule list.\n\n"
@@ -967,6 +974,29 @@ class MoleculesTab(ttk.Frame):
                 return
         OpenXyzDialog(self, abs_xyz)
 
+    def on_add_by_name(self):
+        """Resolve a chemical name/identifier to a structure over the web and add it."""
+        ResolveNameDialog(self, self.app, on_commit=self._add_resolved)
+
+    def _add_resolved(self, res):
+        # type: (resolve_mod.Resolution) -> None
+        """Add a molecule from a successful Resolution, recording its provenance
+        (source + date) in the comment so the structure's origin is auditable."""
+        smiles = (res.smiles or "").strip()
+        if not smiles:
+            return
+        fname = self._next_numeric_filename()
+        charge, mult = coords_mod.smiles_charge_and_mult(smiles)
+        mol = Molecule(
+            name=(res.query or smiles).strip(), filename=fname, smiles=smiles,
+            charge=charge if charge is not None else (res.charge or 0),
+            multiplicity=mult if mult is not None else 1,
+            comment=res.provenance())
+        self.app.project.molecules.append(mol)
+        self.app.mark_dirty()
+        self.refresh()
+        self.app.set_status("Added {} (resolved from '{}').".format(fname, res.query))
+
     def on_paste_smiles(self):
         """Open the paste-SMILES dialog pre-filled from the clipboard."""
         try:
@@ -1184,6 +1214,132 @@ class AvogadroPathDialog(tk.Toplevel):
 
     def _cancel(self):
         self.result = None
+        self.destroy()
+
+
+class ResolveNameDialog(tk.Toplevel):
+    """Resolve a chemical name / SMILES / InChI / CAS to a structure over the web
+    (OPSIN + PubChem), preview the 2D depiction, and add it on confirm.
+
+    The network call runs on a worker thread so the UI never freezes; the worker
+    only stashes the result and the main thread picks it up via after() polling
+    (no cross-thread Tk access). Degrades gracefully with no internet."""
+
+    def __init__(self, parent, app, on_commit=None):
+        tk.Toplevel.__init__(self, parent)
+        self.app = app
+        self._on_commit = on_commit
+        self._cache = {}            # reused across lookups in this dialog
+        self._result = None
+        self._pending = False
+        self._img = None            # keep a ref so the PhotoImage isn't GC'd
+        self.title("Add molecule by name")
+
+        top = ttk.Frame(self)
+        top.pack(fill=tk.X, padx=10, pady=(10, 4))
+        ttk.Label(top, text="Name / SMILES / InChI / CAS:").pack(side=tk.LEFT)
+        self.query_var = tk.StringVar()
+        ent = ttk.Entry(top, textvariable=self.query_var, width=40)
+        ent.pack(side=tk.LEFT, padx=6)
+        ent.bind("<Return>", lambda e: self._start_resolve())
+        ttk.Button(top, text="Resolve", command=self._start_resolve).pack(side=tk.LEFT)
+
+        self.status_var = tk.StringVar(value="Type an identifier and press Resolve.")
+        ttk.Label(self, textvariable=self.status_var, foreground="#555").pack(anchor=tk.W, padx=10)
+
+        body = ttk.Frame(self)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+        self.depict_label = ttk.Label(body)
+        self.depict_label.pack(side=tk.LEFT, padx=(0, 10))
+        det = ttk.Frame(body)
+        det.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.detail_var = tk.StringVar(value="")
+        ttk.Label(det, textvariable=self.detail_var, justify=tk.LEFT, wraplength=300).pack(anchor=tk.NW)
+        self.sugg_frame = ttk.Frame(det)
+        self.sugg_frame.pack(anchor=tk.NW, pady=4)
+
+        btns = ttk.Frame(self)
+        btns.pack(fill=tk.X, padx=10, pady=(4, 10))
+        self.add_btn = ttk.Button(btns, text="Add", command=self._commit, state=tk.DISABLED)
+        self.add_btn.pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=6)
+
+        self.geometry("560x340")
+        ent.focus_set()
+        make_modal(self, parent)
+
+    def _start_resolve(self):
+        q = self.query_var.get().strip()
+        if not q or self._pending:
+            return
+        self._result = None
+        self.add_btn.config(state=tk.DISABLED)
+        self._clear_suggestions()
+        self.detail_var.set("")
+        self.depict_label.config(image="")
+        self._img = None
+        self.status_var.set("Resolving '{}' …".format(q))
+        self._pending = True
+        threading.Thread(target=self._worker, args=(q,), daemon=True).start()
+        self.after(100, self._poll)
+
+    def _worker(self, q):
+        # No Tk calls here — only stash the result for the main thread to read.
+        try:
+            self._result = resolve_mod.resolve(q, cache=self._cache)
+        except Exception as e:
+            self._result = resolve_mod.Resolution(query=q, error="resolver error: {}".format(e))
+        self._pending = False
+
+    def _poll(self):
+        if self._pending:
+            self.after(100, self._poll)
+            return
+        if self.winfo_exists():
+            self._show(self._result)
+
+    def _show(self, res):
+        if res is None:
+            return
+        if not res.ok:
+            self.status_var.set("No structure found.")
+            self.detail_var.set(res.error or "could not resolve.")
+            self._show_suggestions(res.candidates)
+            return
+        self.status_var.set("Resolved via {}.".format(res.source or "?"))
+        lines = ["SMILES:  {}".format(res.smiles),
+                 "Formula: {}    charge {}".format(
+                     res.formula or "?", res.charge if res.charge is not None else "?")]
+        if res.note:
+            lines.append("Note: " + res.note)
+        lines.append(res.provenance())
+        self.detail_var.set("\n".join(lines))
+        img, _err = smiles_to_photoimage(res.smiles, size=(220, 200), master=self.depict_label)
+        self._img = img
+        self.depict_label.config(image=img if img else "")
+        self.add_btn.config(state=tk.NORMAL)
+
+    def _show_suggestions(self, names):
+        self._clear_suggestions()
+        if not names:
+            return
+        ttk.Label(self.sugg_frame, text="Did you mean:").pack(anchor=tk.W)
+        row = ttk.Frame(self.sugg_frame)
+        row.pack(anchor=tk.W)
+        for n in names[:5]:
+            ttk.Button(row, text=n, command=lambda nn=n: self._retry(nn)).pack(side=tk.LEFT, padx=2)
+
+    def _retry(self, name):
+        self.query_var.set(name)
+        self._start_resolve()
+
+    def _clear_suggestions(self):
+        for w in self.sugg_frame.winfo_children():
+            w.destroy()
+
+    def _commit(self):
+        if self._result and self._result.ok and self._on_commit:
+            self._on_commit(self._result)
         self.destroy()
 
 
