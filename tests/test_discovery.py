@@ -9,7 +9,8 @@ import os
 
 import pytest
 
-from orca_workbench.core import discovery, slurm_runtime
+from orca_workbench.core import discovery, provenance, slurm_runtime
+from orca_workbench.core.inputs import Recipe
 from orca_workbench.core.project import Project, Molecule, PlannedCalc
 
 
@@ -275,3 +276,107 @@ def test_query_name_map_none_without_squeue(monkeypatch):
         raise FileNotFoundError
     monkeypatch.setattr(slurm_runtime.subprocess, "run", _boom)
     assert slurm_runtime.query_name_map() is None
+
+
+# --------------------------------------------------------------------------
+# import_dir: molecule grouping (hydra fix) + initial-geometry recovery
+# --------------------------------------------------------------------------
+OPT_INP = (
+    "! BP86 def2-TZVP D3BJ TightOpt\n%pal nprocs 4\nend\n"
+    "* xyz 0 1\n  C 0.0 0.0 0.0\n  O 0.0 0.0 1.2\n*\n"
+)
+
+
+def test_import_dir_groups_calc_tree_into_one_molecule(tmp_path):
+    # calcs/m/bench/{OPT/..., NMR/methodA/19F, NMR/methodB/19F}/m.inp -> ONE molecule
+    proj = _project(tmp_path)
+    c = tmp_path / "calcs" / "m"
+    _touch(str(c / "bench" / "OPT" / "BP86_def2" / "m.inp"), OPT_INP)
+    _touch(str(c / "bench" / "NMR" / "methodA" / "19F" / "m.inp"), NMR_INP)
+    _touch(str(c / "bench" / "NMR" / "methodB" / "19F" / "m.inp"), NMR_INP)
+
+    s = discovery.import_dir(proj, str(tmp_path / "calcs"))
+
+    assert s["molecules"] == 1
+    assert [m.filename for m in proj.molecules] == ["m"]
+    assert s["imported"] == 3
+    assert {pc.category for pc in proj.planned_calcs} == {"bench"}
+    assert len(s["new_recipes"]) == 3            # OPT + methodA + methodB, deduped
+
+
+def test_import_dir_unrelated_same_basename_stay_separate(tmp_path):
+    # No ancestor dir named 'dup' -> per-file fallback -> two molecules (unchanged).
+    proj = _project(tmp_path)
+    _touch(str(tmp_path / "ext" / "a" / "dup.inp"), NMR_INP)
+    _touch(str(tmp_path / "ext" / "b" / "dup.inp"), NMR_INP)
+
+    discovery.import_dir(proj, str(tmp_path / "ext"))
+    assert sorted(m.filename for m in proj.molecules) == ["dup", "dup_2"]
+
+
+def test_import_dir_links_existing_xyz_ini(tmp_path):
+    proj = _project(tmp_path)
+    _touch(str(tmp_path / "XYZ_INI" / "m.xyz"),
+           '2\n{"name": "Methanol bits", "smiles": "CO", "charge": 0, "multiplicity": 1}\n'
+           'C 0 0 0\nO 0 0 1.2\n')
+    _touch(str(tmp_path / "calcs" / "m" / "bench" / "OPT" / "x" / "m.inp"), OPT_INP)
+
+    s = discovery.import_dir(proj, str(tmp_path))
+    mol = proj.molecules[0]
+    assert mol.xyz_path == "XYZ_INI/m.xyz"
+    assert mol.generated is True and mol.name == "Methanol bits" and mol.smiles == "CO"
+    assert s["reconstructed_xyz"] == 0
+
+
+def test_import_dir_reconstructs_missing_xyz(tmp_path):
+    proj = _project(tmp_path)
+    _touch(str(tmp_path / "calcs" / "m" / "bench" / "OPT" / "x" / "m.inp"), OPT_INP)
+
+    s = discovery.import_dir(proj, str(tmp_path / "calcs"))
+    mol = proj.molecules[0]
+    assert mol.xyz_path == "XYZ_INI/m.xyz"
+    assert os.path.isfile(str(tmp_path / "XYZ_INI" / "m.xyz"))
+    assert s["reconstructed_xyz"] == 1 and mol.generated is True
+
+
+def test_import_dir_external_location_links_sibling_xyz(tmp_path):
+    proj = _project(tmp_path)              # project root = tmp_path
+    ext = tmp_path / "ext" / "proj"
+    _touch(str(ext / "XYZ_INI" / "m.xyz"), '1\n{"name": "X"}\nH 0 0 0\n')
+    _touch(str(ext / "calcs" / "m" / "bench" / "OPT" / "x" / "m.inp"), OPT_INP)
+
+    s = discovery.import_dir(proj, str(ext))
+    mol = proj.molecules[0]
+    assert mol.xyz_path == "ext/proj/XYZ_INI/m.xyz"   # correct relpath, not reconstructed
+    assert s["reconstructed_xyz"] == 0 and mol.generated is True
+
+
+def test_import_dir_provenance_groups_across_dirs(tmp_path):
+    proj = _project(tmp_path)
+    info = {"molecule": "z", "name": "Zee", "charge": -1, "mult": 2,
+            "calctype": "SP", "method": "B3LYP_def2", "variant": "",
+            "category": "gen", "geometry_source": "file:whatever"}
+    stamped = provenance.format_block(info) + "! B3LYP def2-SVP\n* xyz -1 2\n  O 0 0 0\n*\n"
+    _touch(str(tmp_path / "ext" / "aaa" / "foo.inp"), stamped)
+    _touch(str(tmp_path / "ext" / "bbb" / "bar.inp"), stamped)
+
+    s = discovery.import_dir(proj, str(tmp_path / "ext"))
+    assert s["molecules"] == 1 and s["imported"] == 2
+    mol = proj.molecules[0]
+    assert mol.filename == "z" and mol.name == "Zee"
+    assert mol.charge == -1 and mol.multiplicity == 2
+
+
+def test_import_dir_reuses_existing_recipe(tmp_path):
+    proj = _project(tmp_path)
+    existing = [Recipe(name="Pretty NMR", calctype="NMR", method_label="methodA",
+                       variant="19F", template="! x\n" + discovery.COORDS_PLACEHOLDER + "\n")]
+    _touch(str(tmp_path / "calcs" / "m" / "bench" / "NMR" / "methodA" / "19F" / "m.inp"), NMR_INP)
+    saved = []
+
+    s = discovery.import_dir(proj, str(tmp_path / "calcs"),
+                             save_recipe=lambda r: saved.append(r.name),
+                             existing_recipes=existing)
+    assert s["imported"] == 1
+    assert proj.planned_calcs[0].recipe_name == "Pretty NMR"
+    assert len(s["new_recipes"]) == 0 and saved == []
