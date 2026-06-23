@@ -30,6 +30,7 @@ from orca_workbench.core import discovery as discovery_mod
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.core import local_runner as local_runner_mod
 from orca_workbench.core import orca_parser
+from orca_workbench.core import provenance as provenance_mod
 from orca_workbench.core import slurm as slurm_mod
 from orca_workbench.core import slurm_runtime
 from orca_workbench.core import workflow as wf_mod
@@ -1152,6 +1153,24 @@ class CalculationsTab(ttk.Frame):
                 inp_text = inputs_mod.set_cores(inp_text, avail)
                 self._log("Capped {} to {} core(s) (this machine has {}).".format(
                     self._short(calc), avail, avail))
+        # Stamp a provenance header so this .inp can be re-associated with its
+        # molecule/recipe if the project save file is ever lost (see core/discovery).
+        inp_text = provenance_mod.format_block({
+            "molecule": mol.filename,
+            "name": mol.name,
+            "smiles": mol.smiles,
+            "gen_smiles": mol.gen_smiles,
+            "charge": mol.charge,
+            "mult": mol.multiplicity,
+            "recipe": recipe.name,
+            "calctype": recipe.calctype,
+            "method": recipe.method_label,
+            "variant": recipe.variant,
+            "category": calc.category,
+            "geometry_source": calc.geometry_source,
+            "initial_xyz": mol.xyz_path,
+            "origin_node": calc.origin_node,
+        }) + inp_text
         inp_filename = mol.filename + ".inp"
         with open(os.path.join(target_dir_abs, inp_filename), "w", encoding="utf-8") as f:
             f.write(inp_text)
