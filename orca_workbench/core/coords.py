@@ -407,6 +407,218 @@ def read_xyz(path):
     return atoms, metadata
 
 
+# --------------------------------------------------------------- universal import
+#
+# Read 3D coordinates from any common chemistry file (SDF, MOL, MOL2, PDB, CIF,
+# ...) and convert to our simple Atom list, so a user never hits a wall importing
+# a non-.xyz structure. OpenBabel is the primary reader (148 input formats on the
+# gateway, multi-record native); RDKit is a fallback for the common formats if
+# OpenBabel isn't importable. .xyz stays on a dependency-free native path that
+# also preserves our JSON-comment metadata and handles multi-frame trajectories.
+
+# (extension, openbabel format code, human label) — order drives the file dialog.
+SUPPORTED_IMPORT_FORMATS = [
+    ("xyz", "xyz", "XYZ"),
+    ("sdf", "sdf", "MDL SDF"),
+    ("mol", "mol", "MDL MOL"),
+    ("mol2", "mol2", "Sybyl MOL2"),
+    ("pdb", "pdb", "PDB"),
+    ("pdbqt", "pdbqt", "AutoDock PDBQT"),
+    ("cif", "cif", "CIF"),
+    ("mmcif", "mmcif", "mmCIF"),
+    ("gro", "gro", "GROMACS"),
+    ("hin", "hin", "HyperChem"),
+    ("cml", "cml", "Chemical Markup"),
+    ("gzmat", "gzmat", "Gaussian Z-matrix"),
+    ("mdl", "mdl", "MDL"),
+]
+_EXT_TO_OBABEL = {ext: fmt for ext, fmt, _ in SUPPORTED_IMPORT_FORMATS}
+
+
+def is_supported_import_file(path):
+    # type: (str) -> bool
+    """True if the file's extension is a coordinate format we know how to read."""
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    return ext in _EXT_TO_OBABEL
+
+
+def import_dialog_filetypes():
+    # type: () -> list
+    """Tk `filetypes` for the import dialog: an 'all coordinate files' entry first,
+    then one per format, then 'All files'. Kept here (not the UI) so the format
+    list has a single source of truth and stays testable."""
+    all_pat = " ".join("*.{}".format(ext) for ext, _, _ in SUPPORTED_IMPORT_FORMATS)
+    types = [("Coordinate files", all_pat)]
+    for ext, _fmt, label in SUPPORTED_IMPORT_FORMATS:
+        types.append(("{} (*.{})".format(label, ext), "*.{}".format(ext)))
+    types.append(("All files", "*.*"))
+    return types
+
+
+def _read_xyz_frames(path):
+    # type: (str) -> List[Tuple[List[Atom], Optional[dict]]]
+    """Read every frame of an .xyz file. A plain single-geometry .xyz yields one
+    frame; a trajectory/multi-conformer .xyz yields several. Each frame's comment
+    line is parsed as JSON metadata when it looks like an object (our own
+    convention from write_xyz)."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().split("\n")
+    frames = []
+    n_lines = len(lines)
+    i = 0
+    while i < n_lines:
+        while i < n_lines and not lines[i].strip():
+            i += 1  # skip blank lines between frames
+        if i >= n_lines:
+            break
+        try:
+            n = int(lines[i].strip())
+        except ValueError:
+            break  # header isn't an atom count — stop (trailing junk)
+        comment = lines[i + 1] if i + 1 < n_lines else ""
+        atoms = []
+        for j in range(i + 2, min(i + 2 + n, n_lines)):
+            parts = lines[j].split()
+            if len(parts) < 4:
+                continue
+            try:
+                atoms.append((parts[0], float(parts[1]), float(parts[2]), float(parts[3])))
+            except ValueError:
+                continue
+        metadata = None
+        if comment.strip().startswith("{"):
+            try:
+                metadata = json.loads(comment)
+            except ValueError:
+                metadata = None
+        frames.append((atoms, metadata))
+        i = i + 2 + n
+    return frames
+
+
+def _read_with_openbabel(path, fmt):
+    # type: (str, str) -> Tuple[Optional[list], Optional[str]]
+    """(structures, None) on success, (None, error) on failure. Each structure is
+    (atoms, metadata). OpenBabel's reader is a generator over all records."""
+    try:
+        try:
+            from openbabel import pybel
+        except ImportError:
+            import pybel  # type: ignore
+    except Exception as e:
+        return None, "OpenBabel/pybel not available ({})".format(e)
+    try:
+        structs = []
+        for mol in pybel.readfile(fmt, path):
+            atoms = []
+            for atom in mol.atoms:
+                x, y, z = atom.coords
+                atoms.append((_atomic_number_to_symbol(atom.atomicnum),
+                              float(x), float(y), float(z)))
+            title = (getattr(mol, "title", "") or "").strip()
+            structs.append((atoms, {"name": title} if title else None))
+        return structs, None
+    except Exception as e:
+        return None, "OpenBabel could not read as '{}': {}: {}".format(
+            fmt, type(e).__name__, e)
+
+
+def _read_with_rdkit(path, fmt):
+    # type: (str, str) -> Tuple[Optional[list], Optional[str]]
+    """Fallback reader for the common formats, used only if OpenBabel is absent.
+    Reads existing 3D coordinates (does not generate them)."""
+    try:
+        from rdkit import Chem
+    except Exception as e:
+        return None, "RDKit not available ({})".format(e)
+    f = fmt.lower()
+    try:
+        mols = []
+        if f in ("sdf", "sd", "mdl"):
+            mols = [m for m in Chem.SDMolSupplier(path, removeHs=False, sanitize=False)
+                    if m is not None]
+        elif f == "mol":
+            m = Chem.MolFromMolFile(path, removeHs=False, sanitize=False)
+            mols = [m] if m is not None else []
+        elif f == "mol2":
+            m = Chem.MolFromMol2File(path, removeHs=False, sanitize=False)
+            mols = [m] if m is not None else []
+        elif f in ("pdb", "ent"):
+            m = Chem.MolFromPDBFile(path, removeHs=False, sanitize=False)
+            mols = [m] if m is not None else []
+        else:
+            return None, "RDKit has no reader for '{}'".format(fmt)
+        structs = []
+        for m in mols:
+            if m.GetNumConformers() == 0:
+                continue
+            conf = m.GetConformer()
+            atoms = []
+            for atom in m.GetAtoms():
+                pos = conf.GetAtomPosition(atom.GetIdx())
+                atoms.append((atom.GetSymbol(), float(pos.x), float(pos.y), float(pos.z)))
+            name = m.GetProp("_Name").strip() if m.HasProp("_Name") else ""
+            structs.append((atoms, {"name": name} if name else None))
+        if not structs:
+            return None, "RDKit found no 3D structures in {}".format(path)
+        return structs, None
+    except Exception as e:
+        return None, "RDKit failed: {}: {}".format(type(e).__name__, e)
+
+
+def read_structures(path, fmt=None):
+    # type: (str, Optional[str]) -> List[Tuple[List[Atom], Optional[dict]]]
+    """Read ALL structures (records/frames) from a coordinate file.
+
+    Returns a list of (atoms, metadata); a single-geometry file yields one entry,
+    a multi-conformer SDF or multi-frame xyz yields several. Raises CoordGenError
+    if nothing could be read.
+    """
+    _ensure_loggers_silenced()
+    if not os.path.isfile(path):
+        raise CoordGenError("File not found: {}".format(path))
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    fmt = (fmt or _EXT_TO_OBABEL.get(ext, ext)).lower()
+
+    if fmt == "xyz":
+        frames = _read_xyz_frames(path)
+        if not frames or not any(a for a, _ in frames):
+            raise CoordGenError("No atoms found in {}".format(path))
+        return frames
+
+    structs, ob_err = _read_with_openbabel(path, fmt)
+    if structs:
+        return structs
+    rd_structs, rd_err = _read_with_rdkit(path, fmt)
+    if rd_structs:
+        return rd_structs
+    raise CoordGenError(
+        "Could not read {} (format '{}').\n  OpenBabel: {}\n  RDKit: {}".format(
+            path, fmt, ob_err or "no structures returned", rd_err or "no reader"))
+
+
+def read_coords_file(path, conformer_index=0):
+    # type: (str, int) -> Tuple[List[Atom], Optional[dict], int]
+    """Read one structure from any coordinate file → (atoms, metadata, n_total).
+
+    `conformer_index` is 0-based and accepts negatives (-1 = last) via normal
+    Python indexing. `n_total` lets the caller decide whether to prompt the user
+    to choose among multiple conformers."""
+    structs = read_structures(path)
+    n = len(structs)
+    try:
+        atoms, meta = structs[conformer_index]
+    except IndexError:
+        raise CoordGenError(
+            "Conformer index {} out of range: {} has {} structure(s) "
+            "(valid {}..{}).".format(conformer_index, os.path.basename(path), n,
+                                     -n, n - 1))
+    if not atoms:
+        raise CoordGenError("Selected structure in {} has no atoms.".format(
+            os.path.basename(path)))
+    return atoms, meta, n
+
+
 def format_atom_block(atoms):
     # type: (List[Atom]) -> str
     """Format atoms for an ORCA `* xyz` block body (no header or trailing `*`)."""
