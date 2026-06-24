@@ -19,6 +19,23 @@ from orca_workbench.ui.shortcuts import install_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
 
+def imported_stem(base, idx, multi):
+    # type: (str, int, bool) -> str
+    """Filename stem for an imported structure. A multi-record source encodes the
+    conformer index (genuine identity); a single-structure source keeps the clean
+    basename. (Any residual collision is then handled by the _2/_3 deduper.)"""
+    return "{}_conf{}".format(base, idx) if multi else base
+
+
+def imported_comment(base_name, idx, multi):
+    # type: (str, int, bool) -> str
+    """Provenance note stamped into an imported molecule's Comment (and .xyz
+    metadata) so it's traceable back to its source file even when the filename is
+    a deduped basename."""
+    suffix = " (conformer {})".format(idx) if multi else ""
+    return "imported from {}{}".format(base_name, suffix)
+
+
 class MoleculesTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent)
@@ -819,13 +836,19 @@ class MoleculesTab(ttk.Frame):
                     continue
             base = re.sub(r"[^A-Za-z0-9_.-]+", "_",
                           os.path.splitext(base_name)[0]) or "mol"
+            multi = n > 1
             for idx in indices:
                 atoms, meta = structs[idx]
                 if not atoms:
                     errors.append("{} [#{}]: structure has no atoms".format(base_name, idx))
                     continue
-                meta = meta or {}
-                fname = self._unique_filename(base)
+                meta = dict(meta or {})   # copy so enriching doesn't touch shared structs
+                # Provenance: record the source file (and conformer, for multi-record
+                # files) so an imported molecule is always traceable from its Comment,
+                # even when the filename is just a deduped basename.
+                if not meta.get("comment"):
+                    meta["comment"] = imported_comment(base_name, idx, multi)
+                fname = self._unique_filename(imported_stem(base, idx, multi))
                 target = os.path.join(root, "XYZ_INI", fname + ".xyz")
                 # If the file being imported already IS the destination (launched
                 # from a folder whose XYZ_INI is the source), don't rewrite it —
