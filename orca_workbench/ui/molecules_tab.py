@@ -19,6 +19,23 @@ from orca_workbench.ui.shortcuts import install_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
 
+def imported_stem(base, idx, multi):
+    # type: (str, int, bool) -> str
+    """Filename stem for an imported structure. A multi-record source encodes the
+    conformer index (genuine identity); a single-structure source keeps the clean
+    basename. (Any residual collision is then handled by the _2/_3 deduper.)"""
+    return "{}_conf{}".format(base, idx) if multi else base
+
+
+def imported_comment(base_name, idx, multi):
+    # type: (str, int, bool) -> str
+    """Provenance note stamped into an imported molecule's Comment (and .xyz
+    metadata) so it's traceable back to its source file even when the filename is
+    a deduped basename."""
+    suffix = " (conformer {})".format(idx) if multi else ""
+    return "imported from {}{}".format(base_name, suffix)
+
+
 class MoleculesTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent)
@@ -46,10 +63,11 @@ class MoleculesTab(ttk.Frame):
         b_remove = ttk.Button(toolbar, text="Remove", command=self.on_remove)
         b_gen = ttk.Button(toolbar, text="Generate XYZ", command=self.on_generate)
         b_gen_all = ttk.Button(toolbar, text="Generate Pending", command=self.on_generate_all)
-        b_import = ttk.Button(toolbar, text="Import .xyz...", command=self.on_import_xyz)
+        b_import = ttk.Button(toolbar, text="Import files...", command=self.on_import_files)
+        b_import_dir = ttk.Button(toolbar, text="Import folder...", command=self.on_import_folder)
         b_paste = ttk.Button(toolbar, text="Paste SMILES...", command=self.on_paste_smiles)
         b_name = ttk.Button(toolbar, text="Add by name...", command=self.on_add_by_name)
-        for b in (b_add, b_remove, b_gen, b_gen_all, b_import, b_paste, b_name):
+        for b in (b_add, b_remove, b_gen, b_gen_all, b_import, b_import_dir, b_paste, b_name):
             b.pack(side=tk.LEFT, padx=2)
         tip(b_name, "Look up a molecule by chemical name (IUPAC or common), CAS number, "
                     "InChI, or SMILES via public web services (OPSIN + PubChem), preview the "
@@ -78,9 +96,15 @@ class MoleculesTab(ttk.Frame):
                        "but no XYZ yet, or was just invalidated by a SMILES edit). Independent "
                        "of selection — operates across the whole project. Failed rows are NOT "
                        "retried by this button; use Ctrl+Enter on a failed selection to retry.")
-        tip(b_import, "Add an existing .xyz file as a molecule. Copies the file into XYZ_INI/ "
-                      "and reads name/charge/multiplicity from the JSON metadata in the comment "
-                      "line if present (the format make_coords.py writes).")
+        tip(b_import, "Import one or many existing structure files as molecules. Multi-select in "
+                      "the dialog (Ctrl+A = all, Shift-click = range, Ctrl-click = add one). "
+                      "Reads .xyz natively (incl. JSON metadata) and converts SDF/MOL/MOL2/PDB/"
+                      "CIF/etc. to .xyz via OpenBabel/RDKit. Each is copied into XYZ_INI/. "
+                      "Multi-structure files (e.g. multi-conformer SDF) let you pick one, "
+                      "several (0,2,5 / 0-3), or all.")
+        tip(b_import_dir, "Import every supported structure file in a chosen folder (e.g. a folder "
+                          "full of .xyz or .sdf), in one go. Same conversion + conformer handling "
+                          "as Import files.")
 
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -744,42 +768,147 @@ class MoleculesTab(ttk.Frame):
             self.app.set_status("Generated {} ({}){}.".format(mol.xyz_path, method, note))
         return True
 
-    def on_import_xyz(self):
-        path = filedialog.askopenfilename(
-            title="Import XYZ",
-            filetypes=[("XYZ files", "*.xyz"), ("All files", "*.*")],
+    def on_import_files(self):
+        """Import one or many structure files (multi-select). Any format OpenBabel/
+        RDKit can read is converted to .xyz; .xyz is read natively."""
+        paths = filedialog.askopenfilenames(
+            title="Import structure files",
+            filetypes=coords_mod.import_dialog_filetypes(),
         )
-        if not path:
+        if not paths:
+            return
+        self._import_paths(list(paths))
+
+    def on_import_folder(self):
+        """Import every supported structure file in a chosen folder."""
+        d = filedialog.askdirectory(title="Import all structure files from folder")
+        if not d:
             return
         try:
-            atoms, metadata = coords_mod.read_xyz(path)
-        except Exception as e:
-            messagebox.showerror("Read failed", str(e))
+            names = sorted(os.listdir(d))
+        except OSError as e:
+            messagebox.showerror("Import folder", str(e))
             return
-        fname = os.path.splitext(os.path.basename(path))[0]
-        fname = re.sub(r"[^A-Za-z0-9_.-]+", "_", fname)
+        paths = [os.path.join(d, n) for n in names
+                 if os.path.isfile(os.path.join(d, n))
+                 and coords_mod.is_supported_import_file(n)]
+        if not paths:
+            messagebox.showinfo(
+                "Import folder",
+                "No supported coordinate files found in\n{}\n\nSupported: {}".format(
+                    d, ", ".join(ext for ext, _f, _l in coords_mod.SUPPORTED_IMPORT_FORMATS)))
+            return
+        self._import_paths(paths)
+
+    def _import_paths(self, paths):
+        """Shared batch importer: read each file (converting non-xyz formats), let
+        the user pick one / several / all structures from a multi-record file
+        (once, or remembered for the rest of the batch), write XYZ_INI/<name>.xyz
+        per chosen structure, and add a Molecule. One refresh + status at the end."""
+        root = self.app.project.root()
+        imported = 0
+        errors = []
+        remembered_spec = None    # raw index spec ("all", "0,2", "-1", ...) reused for the batch
+        first_fname = None
+        for path in paths:
+            base_name = os.path.basename(path)
+            try:
+                structs = coords_mod.read_structures(path)
+            except Exception as e:
+                errors.append("{}: {}".format(base_name, e))
+                continue
+            n = len(structs)
+            if n == 1:
+                indices = [0]
+            else:
+                spec = remembered_spec
+                if spec is None:
+                    res = ConformerSelectDialog(self, base_name, n).result
+                    if res is None:
+                        continue          # user skipped this file
+                    spec, remember = res
+                    if remember:
+                        remembered_spec = spec
+                indices = coords_mod.parse_structure_selection(spec, n)
+                if not indices:
+                    errors.append("{}: no valid structure index in '{}' (file has {})".format(
+                        base_name, spec, n))
+                    continue
+            base = re.sub(r"[^A-Za-z0-9_.-]+", "_",
+                          os.path.splitext(base_name)[0]) or "mol"
+            multi = n > 1
+            for idx in indices:
+                atoms, meta = structs[idx]
+                if not atoms:
+                    errors.append("{} [#{}]: structure has no atoms".format(base_name, idx))
+                    continue
+                meta = dict(meta or {})   # copy so enriching doesn't touch shared structs
+                # Provenance: record the source file (and conformer, for multi-record
+                # files) so an imported molecule is always traceable from its Comment,
+                # even when the filename is just a deduped basename.
+                if not meta.get("comment"):
+                    meta["comment"] = imported_comment(base_name, idx, multi)
+                fname = self._unique_filename(imported_stem(base, idx, multi))
+                target = os.path.join(root, "XYZ_INI", fname + ".xyz")
+                # If the file being imported already IS the destination (launched
+                # from a folder whose XYZ_INI is the source), don't rewrite it —
+                # that would clobber the original and re-encode its comment.
+                in_place = (os.path.normcase(os.path.abspath(target))
+                            == os.path.normcase(os.path.abspath(path)))
+                try:
+                    if not in_place:
+                        coords_mod.write_xyz(target, atoms, meta or None)
+                except Exception as e:
+                    errors.append("{} [#{}]: write failed: {}".format(base_name, idx, e))
+                    continue
+                # If the stored name is just the SMILES (common for structures the
+                # app generated from SMILES), don't echo it in the Name column —
+                # use the filename; the SMILES still shows in its own column.
+                mname = meta.get("name")
+                if mname and mname == meta.get("smiles"):
+                    mname = None
+                self.app.project.molecules.append(Molecule(
+                    name=mname or fname,
+                    filename=fname,
+                    smiles=meta.get("smiles"),
+                    gen_smiles=meta.get("gen_smiles"),
+                    charge=int(meta.get("charge", 0) or 0),
+                    multiplicity=int(meta.get("multiplicity", 1) or 1),
+                    comment=meta.get("comment", "") or "",
+                    generated=True,
+                    gen_status="ok",
+                    method="imported",
+                    xyz_path=os.path.relpath(target, root).replace("\\", "/"),
+                ))
+                imported += 1
+                if first_fname is None:
+                    first_fname = fname
+        if imported:
+            self.app.mark_dirty()
+            self.refresh()
+            if first_fname:
+                try:
+                    self.tree.selection_set(first_fname)
+                except tk.TclError:
+                    pass
+        msg = "Imported {} molecule(s).".format(imported)
+        if errors:
+            msg += " {} failed.".format(len(errors))
+        self.app.set_status(msg)
+        if errors:
+            shown = "\n".join(errors[:20]) + ("\n..." if len(errors) > 20 else "")
+            messagebox.showwarning(
+                "Import finished with errors",
+                "Imported {} file(s). These could not be imported:\n\n{}".format(imported, shown))
+
+    def _unique_filename(self, base):
+        """A molecule filename not already used in the project (base, base_2, ...)."""
+        fname = base
+        i = 2
         while self.app.project.molecule_by_filename(fname):
-            fname = fname + "_2"
-        target = os.path.join(self.app.project.root(), "XYZ_INI", fname + ".xyz")
-        coords_mod.write_xyz(target, atoms, metadata)
-        meta = metadata or {}
-        mol = Molecule(
-            name=meta.get("name") or fname,
-            filename=fname,
-            smiles=meta.get("smiles"),
-            gen_smiles=meta.get("gen_smiles"),
-            charge=int(meta.get("charge", 0)),
-            multiplicity=int(meta.get("multiplicity", 1)),
-            comment=meta.get("comment", "") or "",
-            generated=True,
-            gen_status="ok",
-            method="imported",
-            xyz_path=os.path.relpath(target, self.app.project.root()).replace("\\", "/"),
-        )
-        self.app.project.molecules.append(mol)
-        self.app.mark_dirty()
-        self.refresh()
-        self.tree.selection_set(fname)
+            fname = "{}_{}".format(base, i)
+            i += 1
+        return fname
 
     def _update_preview(self, mol):
         # Keep the structure depiction in sync with the previewed molecule.
@@ -1219,6 +1348,72 @@ class AvogadroPathDialog(tk.Toplevel):
                 return
         config_mod.set_value("avogadro_path", path)
         self.result = path
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class ConformerSelectDialog(tk.Toplevel):
+    """Ask which structure(s) to import from a multi-record file (multi-conformer
+    SDF, multi-molecule file, multi-frame xyz, ...).
+
+    self.result is (spec, remember) or None if skipped. `spec` is the raw text
+    the user entered (see _parse_index_spec for the accepted forms); `remember`
+    re-applies it to the rest of the current import batch without prompting."""
+
+    def __init__(self, parent, filename, n_structures):
+        super().__init__(parent)
+        self.result = None  # type: Optional[tuple]
+        self._n = int(n_structures)
+        self.title("Select structures")
+        self.resizable(False, False)
+
+        msg = ("'{}' contains {} structures (indices 0..{}).\n\n"
+               "Which to import? You can pick one, several, or all:").format(
+                   filename, self._n, self._n - 1)
+        ttk.Label(self, text=msg, wraplength=440, justify=tk.LEFT).pack(
+            side=tk.TOP, fill=tk.X, padx=12, pady=(12, 4))
+        ttk.Label(self, text="Examples:   0      0,2,5      0-3      all      -1 (last)",
+                  justify=tk.LEFT, foreground="#555555").pack(
+            side=tk.TOP, fill=tk.X, padx=12, pady=(0, 6))
+
+        row = ttk.Frame(self)
+        row.pack(side=tk.TOP, fill=tk.X, padx=12, pady=4)
+        ttk.Label(row, text="Structures:").pack(side=tk.LEFT)
+        self.var = tk.StringVar(value="0")
+        self.entry = ttk.Entry(row, textvariable=self.var, width=24)
+        self.entry.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.remember_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self, text="Remember this selection for the rest of this import",
+                        variable=self.remember_var).pack(
+            side=tk.TOP, anchor=tk.W, padx=12, pady=(4, 0))
+
+        btns = ttk.Frame(self)
+        btns.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+        ttk.Button(btns, text="Skip file", command=self._cancel).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Import", command=self._ok).pack(side=tk.RIGHT, padx=4)
+
+        self.entry.focus_set()
+        self.entry.select_range(0, tk.END)
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self._cancel())
+        make_modal(self, parent)
+        self.wait_window()
+
+    def _ok(self):
+        spec = self.var.get().strip()
+        chosen = coords_mod.parse_structure_selection(spec, self._n)
+        if not chosen:
+            messagebox.showinfo(
+                "Nothing selected",
+                "'{}' didn't resolve to any structure in 0..{}.\n"
+                "Try e.g. 0, or 0,2,5, or 0-3, or all, or -1.".format(spec, self._n - 1),
+                parent=self)
+            return
+        self.result = (spec, bool(self.remember_var.get()))
         self.destroy()
 
     def _cancel(self):

@@ -9,6 +9,8 @@ name of the method that succeeded.
 import json
 import os
 import re
+import subprocess
+import sys
 from typing import List, Optional, Tuple
 
 
@@ -405,6 +407,332 @@ def read_xyz(path):
             continue
         atoms.append((parts[0], float(parts[1]), float(parts[2]), float(parts[3])))
     return atoms, metadata
+
+
+# --------------------------------------------------------------- universal import
+#
+# Read 3D coordinates from any common chemistry file (SDF, MOL, MOL2, PDB, CIF,
+# ...) and convert to our simple Atom list, so a user never hits a wall importing
+# a non-.xyz structure. OpenBabel is the primary reader (148 input formats on the
+# gateway, multi-record native); RDKit is a fallback for the common formats if
+# OpenBabel isn't importable. .xyz stays on a dependency-free native path that
+# also preserves our JSON-comment metadata and handles multi-frame trajectories.
+
+# (extension, openbabel format code, human label) — order drives the file dialog.
+SUPPORTED_IMPORT_FORMATS = [
+    ("xyz", "xyz", "XYZ"),
+    ("sdf", "sdf", "MDL SDF"),
+    ("mol", "mol", "MDL MOL"),
+    ("mol2", "mol2", "Sybyl MOL2"),
+    ("pdb", "pdb", "PDB"),
+    ("pdbqt", "pdbqt", "AutoDock PDBQT"),
+    ("cif", "cif", "CIF"),
+    ("mmcif", "mmcif", "mmCIF"),
+    ("gro", "gro", "GROMACS"),
+    ("hin", "hin", "HyperChem"),
+    ("cml", "cml", "Chemical Markup"),
+    ("gzmat", "gzmat", "Gaussian Z-matrix"),
+    ("mdl", "mdl", "MDL"),
+]
+_EXT_TO_OBABEL = {ext: fmt for ext, fmt, _ in SUPPORTED_IMPORT_FORMATS}
+
+# Hard cap on how long a single OpenBabel read may take before we give up. Some
+# OpenBabel readers loop forever on certain inputs (.bgf/.box on round-tripped
+# files), and because the read runs in a subprocess we can kill it cleanly rather
+# than freezing the GUI. Generous: a real structure reads in well under a second.
+IMPORT_READ_TIMEOUT_S = 15
+
+_obabel_informats_cache = None  # None = not probed yet; set() once probed
+
+
+def _openbabel_informats():
+    # type: () -> Optional[set]
+    """Cached set of OpenBabel-readable format codes (pybel.informats keys), or
+    None if OpenBabel isn't importable. Safe to call in-process: listing formats
+    can't hang (only readfile() can), so we use it to reject write-only/output
+    formats instantly without paying for a reader subprocess."""
+    global _obabel_informats_cache
+    if _obabel_informats_cache is not None:
+        return _obabel_informats_cache or None
+    try:
+        try:
+            from openbabel import pybel
+        except ImportError:
+            import pybel  # type: ignore
+        _obabel_informats_cache = set(pybel.informats.keys())
+    except Exception:
+        _obabel_informats_cache = set()   # probed, unavailable
+    return _obabel_informats_cache or None
+
+
+def _meta_from_title(title, source_path=None):
+    # type: (Optional[str], Optional[str]) -> Optional[dict]
+    """Turn a structure's title/comment into metadata. If it's a JSON object
+    (our XYZ convention: {"name","smiles","charge","multiplicity",...}) parse it
+    so SMILES/charge/etc. pre-fill the molecule on import; otherwise treat it as
+    a plain display name. Lets embedded info ride along from any format that keeps
+    a title line, for free.
+
+    Guard: OpenBabel defaults a missing title to the input file path/name for many
+    formats (.hin, .gzmat, ...). That's not a molecule name, so a path-like or
+    filename-equal title is dropped — the caller then falls back to the clean
+    filename instead of stamping a full path as the molecule's name."""
+    if not title:
+        return None
+    t = title.strip()
+    if t.startswith("{"):
+        # Looks like our JSON metadata. If it parses to a dict, use it; if it's
+        # broken/truncated (e.g. PDBQT cuts the title into a length-limited
+        # record, leaving '{"name":'), it's not a display name — drop it.
+        try:
+            d = json.loads(t)
+        except ValueError:
+            return None
+        return d if isinstance(d, dict) else None
+    if "/" in t or "\\" in t:
+        return None
+    if source_path:
+        base = os.path.basename(source_path)
+        if t == base or t == os.path.splitext(base)[0]:
+            return None
+    return {"name": t}
+
+
+def is_supported_import_file(path):
+    # type: (str) -> bool
+    """True if the file's extension is a coordinate format we know how to read."""
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    return ext in _EXT_TO_OBABEL
+
+
+def import_dialog_filetypes():
+    # type: () -> list
+    """Tk `filetypes` for the import dialog: an 'all coordinate files' entry first,
+    then one per format, then 'All files'. Kept here (not the UI) so the format
+    list has a single source of truth and stays testable."""
+    all_pat = " ".join("*.{}".format(ext) for ext, _, _ in SUPPORTED_IMPORT_FORMATS)
+    types = [("Coordinate files", all_pat)]
+    for ext, _fmt, label in SUPPORTED_IMPORT_FORMATS:
+        types.append(("{} (*.{})".format(label, ext), "*.{}".format(ext)))
+    types.append(("All files", "*.*"))
+    return types
+
+
+def _read_xyz_frames(path):
+    # type: (str) -> List[Tuple[List[Atom], Optional[dict]]]
+    """Read every frame of an .xyz file. A plain single-geometry .xyz yields one
+    frame; a trajectory/multi-conformer .xyz yields several. Each frame's comment
+    line is parsed as JSON metadata when it looks like an object (our own
+    convention from write_xyz)."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().split("\n")
+    frames = []
+    n_lines = len(lines)
+    i = 0
+    while i < n_lines:
+        while i < n_lines and not lines[i].strip():
+            i += 1  # skip blank lines between frames
+        if i >= n_lines:
+            break
+        try:
+            n = int(lines[i].strip())
+        except ValueError:
+            break  # header isn't an atom count — stop (trailing junk)
+        comment = lines[i + 1] if i + 1 < n_lines else ""
+        atoms = []
+        for j in range(i + 2, min(i + 2 + n, n_lines)):
+            parts = lines[j].split()
+            if len(parts) < 4:
+                continue
+            try:
+                atoms.append((parts[0], float(parts[1]), float(parts[2]), float(parts[3])))
+            except ValueError:
+                continue
+        metadata = None
+        if comment.strip().startswith("{"):
+            try:
+                metadata = json.loads(comment)
+            except ValueError:
+                metadata = None
+        frames.append((atoms, metadata))
+        i = i + 2 + n
+    return frames
+
+
+def _read_with_openbabel(path, fmt, timeout=IMPORT_READ_TIMEOUT_S):
+    # type: (str, str, float) -> Tuple[Optional[list], Optional[str]]
+    """Read all records via OpenBabel in a **killable subprocess**, so a reader
+    that hangs (some formats loop forever on certain inputs) times out cleanly
+    instead of freezing the caller. Returns (structures, None) on success or
+    (None, error) on failure. Each structure is (atoms, metadata)."""
+    cmd = [sys.executable, "-m", "orca_workbench.core._obabel_worker", fmt, path]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, ("reading timed out after {}s - the OpenBabel reader for '{}' "
+                      "hung on this file (the format/file may be unreadable).".format(
+                          timeout, fmt))
+    except Exception as e:
+        return None, "could not launch reader subprocess: {}: {}".format(type(e).__name__, e)
+    out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+    if not out:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        return None, "reader produced no output{}".format(": " + err[:200] if err else "")
+    try:
+        data = json.loads(out.splitlines()[-1])
+    except ValueError:
+        return None, "reader output not understood: {}".format(out[:200])
+    if not data.get("ok"):
+        return None, data.get("error", "unknown error")
+    structs = []
+    for s in data.get("structures", []):
+        atoms = [(a[0], float(a[1]), float(a[2]), float(a[3])) for a in s.get("atoms", [])]
+        structs.append((atoms, _meta_from_title(s.get("name"), path)))
+    return structs, None
+
+
+def _read_with_rdkit(path, fmt):
+    # type: (str, str) -> Tuple[Optional[list], Optional[str]]
+    """Fallback reader for the common formats, used only if OpenBabel is absent.
+    Reads existing 3D coordinates (does not generate them)."""
+    try:
+        from rdkit import Chem
+    except Exception as e:
+        return None, "RDKit not available ({})".format(e)
+    f = fmt.lower()
+    try:
+        mols = []
+        if f in ("sdf", "sd", "mdl"):
+            mols = [m for m in Chem.SDMolSupplier(path, removeHs=False, sanitize=False)
+                    if m is not None]
+        elif f == "mol":
+            m = Chem.MolFromMolFile(path, removeHs=False, sanitize=False)
+            mols = [m] if m is not None else []
+        elif f == "mol2":
+            m = Chem.MolFromMol2File(path, removeHs=False, sanitize=False)
+            mols = [m] if m is not None else []
+        elif f in ("pdb", "ent"):
+            m = Chem.MolFromPDBFile(path, removeHs=False, sanitize=False)
+            mols = [m] if m is not None else []
+        else:
+            return None, "RDKit has no reader for '{}'".format(fmt)
+        structs = []
+        for m in mols:
+            if m.GetNumConformers() == 0:
+                continue
+            conf = m.GetConformer()
+            atoms = []
+            for atom in m.GetAtoms():
+                pos = conf.GetAtomPosition(atom.GetIdx())
+                atoms.append((atom.GetSymbol(), float(pos.x), float(pos.y), float(pos.z)))
+            name = m.GetProp("_Name").strip() if m.HasProp("_Name") else ""
+            structs.append((atoms, _meta_from_title(name, path)))
+        if not structs:
+            return None, "RDKit found no 3D structures in {}".format(path)
+        return structs, None
+    except Exception as e:
+        return None, "RDKit failed: {}: {}".format(type(e).__name__, e)
+
+
+def read_structures(path, fmt=None, timeout=IMPORT_READ_TIMEOUT_S):
+    # type: (str, Optional[str], float) -> List[Tuple[List[Atom], Optional[dict]]]
+    """Read ALL structures (records/frames) from a coordinate file.
+
+    Returns a list of (atoms, metadata); a single-geometry file yields one entry,
+    a multi-conformer SDF or multi-frame xyz yields several. Raises CoordGenError
+    if nothing could be read. Non-xyz formats are read via OpenBabel in a
+    timeout-guarded subprocess so a hanging reader can't freeze the caller.
+    """
+    _ensure_loggers_silenced()
+    if not os.path.isfile(path):
+        raise CoordGenError("File not found: {}".format(path))
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    fmt = (fmt or _EXT_TO_OBABEL.get(ext, ext)).lower()
+
+    if fmt == "xyz":
+        frames = _read_xyz_frames(path)
+        if not frames or not any(a for a, _ in frames):
+            raise CoordGenError("No atoms found in {}".format(path))
+        return frames
+
+    # Reject formats OpenBabel can't read *instantly* (no reader subprocess), so
+    # importing a pile of write-only/output files skips them fast instead of
+    # spawning a worker per file. (Only when we could query the format list.)
+    informats = _openbabel_informats()
+    if informats is not None and fmt not in informats:
+        raise CoordGenError(
+            "'{}' is not a readable structure format - OpenBabel can only write "
+            "it, not read it (it's an input-deck/output/non-coordinate format).".format(fmt))
+
+    structs, ob_err = _read_with_openbabel(path, fmt, timeout=timeout)
+    if structs:
+        return structs
+    rd_structs, rd_err = _read_with_rdkit(path, fmt)
+    if rd_structs:
+        return rd_structs
+    raise CoordGenError(
+        "Could not read {} (format '{}').\n  OpenBabel: {}\n  RDKit: {}".format(
+            path, fmt, ob_err or "no structures returned", rd_err or "no reader"))
+
+
+def read_coords_file(path, conformer_index=0, timeout=IMPORT_READ_TIMEOUT_S):
+    # type: (str, int, float) -> Tuple[List[Atom], Optional[dict], int]
+    """Read one structure from any coordinate file → (atoms, metadata, n_total).
+
+    `conformer_index` is 0-based and accepts negatives (-1 = last) via normal
+    Python indexing. `n_total` lets the caller decide whether to prompt the user
+    to choose among multiple conformers."""
+    structs = read_structures(path, timeout=timeout)
+    n = len(structs)
+    try:
+        atoms, meta = structs[conformer_index]
+    except IndexError:
+        raise CoordGenError(
+            "Conformer index {} out of range: {} has {} structure(s) "
+            "(valid {}..{}).".format(conformer_index, os.path.basename(path), n,
+                                     -n, n - 1))
+    if not atoms:
+        raise CoordGenError("Selected structure in {} has no atoms.".format(
+            os.path.basename(path)))
+    return atoms, meta, n
+
+
+def parse_structure_selection(spec, n):
+    # type: (str, int) -> List[int]
+    """Parse a structure-selection spec for a file with n structures into an
+    ordered, de-duplicated list of valid 0-based indices. Accepts:
+      all / *          -> every structure
+      0                -> a single index (negatives allowed: -1 = last)
+      0,2,5  or  0 2 5 -> several
+      0-3              -> an inclusive range (non-negative endpoints)
+    Out-of-range tokens are dropped. Returns [] if nothing valid resolves."""
+    spec = (spec or "").strip().lower()
+    if spec in ("all", "*"):
+        return list(range(n))
+    out = []
+
+    def _add(i):
+        if i < 0:
+            i += n                      # -1 -> last
+        if 0 <= i < n and i not in out:
+            out.append(i)
+
+    for tok in re.split(r"[,\s]+", spec):
+        if not tok:
+            continue
+        m = re.match(r"^(\d+)-(\d+)$", tok)     # non-negative inclusive range
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            step = 1 if a <= b else -1
+            for i in range(a, b + step, step):
+                _add(i)
+            continue
+        try:
+            _add(int(tok))
+        except ValueError:
+            continue
+    return out
 
 
 def format_atom_block(atoms):
