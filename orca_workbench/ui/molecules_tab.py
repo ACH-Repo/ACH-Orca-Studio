@@ -142,8 +142,10 @@ class MoleculesTab(ttk.Frame):
         self.tree.tag_configure("ok", background="")
         scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Scrollbar before the tree: a wide table packed first would leave the bar
+        # zero-width (wheel-scrollable but not draggable).
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         # Keyboard shortcuts active while the tree has focus (auto-focused on
         # mouse-enter via the <Enter> binding below):

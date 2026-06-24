@@ -250,10 +250,13 @@ class CalculationsTab(ttk.Frame):
         # to the top of each group and unbuilt/interrupted ones to the bottom.
         self._sort_col = None
         self._sort_desc = False
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Pack the scrollbar BEFORE the tree: this table is wider than its pane, so
+        # an expand=True tree packed first would consume the whole cavity and leave
+        # the scrollbar zero width (scrollable by wheel, but no draggable bar).
         sb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         for tag, color in _TAGS.items():
             self.tree.tag_configure(tag, background=color)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)

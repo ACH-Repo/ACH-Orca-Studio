@@ -122,10 +122,12 @@ class RecipesTab(ttk.Frame):
             self.tree.column(col, width=width, minwidth=minw, anchor=anchor, stretch=stretch)
         self._refresh_heading_arrows()
 
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Pack the scrollbar BEFORE the tree so the (wide) table doesn't starve it
+        # of width — otherwise the bar is zero-width: wheel-scrollable but undraggable.
         sb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Control-a>", self._select_all)
         self.tree.bind("<Control-A>", self._select_all)
