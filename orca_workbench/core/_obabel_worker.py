@@ -48,7 +48,16 @@ def main(argv):
             atoms = [[sym(a.atomicnum), float(a.coords[0]), float(a.coords[1]),
                       float(a.coords[2])] for a in mol.atoms]
             title = (getattr(mol, "title", "") or "").strip()
-            structs.append({"atoms": atoms, "name": title or None})
+            # Perceive a SMILES from the 3D geometry (OpenBabel already did bond
+            # perception on read). This recovers the SMILES for formats that don't
+            # round-trip a usable title (PDB/HIN/GZMAT substitute the filename;
+            # PDBQT truncates it). It's geometry-derived, so it fills the field
+            # only when the title didn't already carry one (the parent decides).
+            try:
+                smi = mol.write("smi").split("\t")[0].strip() or None
+            except Exception:
+                smi = None
+            structs.append({"atoms": atoms, "name": title or None, "smiles": smi})
         sys.stdout.write(json.dumps({"ok": True, "structures": structs}))
         return 0
     except Exception as e:

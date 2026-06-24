@@ -168,6 +168,21 @@ def test_meta_from_title_drops_paths_and_filenames():
     assert coords._meta_from_title("Aspirin", "/d/input_file.hin") == {"name": "Aspirin"}
 
 
+def test_meta_from_title_truncated_json_dropped():
+    # A length-limited record (PDBQT REMARK) truncates JSON metadata — not a name.
+    assert coords._meta_from_title('{"name":') is None
+    assert coords._meta_from_title('{"name": "x"') is None        # unterminated
+
+
+def test_perceived_smiles_filled_from_geometry(tmp_path):
+    # For a structure whose title carries no SMILES, OpenBabel perceives one from
+    # the 3D geometry so the molecule's SMILES field still populates.
+    if coords._openbabel_informats() is None:
+        pytest.skip("OpenBabel not available")
+    structs = coords.read_structures(_write(tmp_path / "two.sdf", SDF_TWO_RECORDS))
+    assert structs[0][1] and structs[0][1].get("smiles")
+
+
 def test_unreadable_format_fast_rejected(tmp_path):
     # A write-only OpenBabel format (ADF input deck) must be refused, not hang.
     if not _has_chem_backend():

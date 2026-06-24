@@ -481,12 +481,14 @@ def _meta_from_title(title, source_path=None):
         return None
     t = title.strip()
     if t.startswith("{"):
+        # Looks like our JSON metadata. If it parses to a dict, use it; if it's
+        # broken/truncated (e.g. PDBQT cuts the title into a length-limited
+        # record, leaving '{"name":'), it's not a display name — drop it.
         try:
             d = json.loads(t)
-            if isinstance(d, dict):
-                return d
         except ValueError:
-            pass
+            return None
+        return d if isinstance(d, dict) else None
     if "/" in t or "\\" in t:
         return None
     if source_path:
@@ -586,7 +588,13 @@ def _read_with_openbabel(path, fmt, timeout=IMPORT_READ_TIMEOUT_S):
     structs = []
     for s in data.get("structures", []):
         atoms = [(a[0], float(a[1]), float(a[2]), float(a[3])) for a in s.get("atoms", [])]
-        structs.append((atoms, _meta_from_title(s.get("name"), path)))
+        meta = _meta_from_title(s.get("name"), path)
+        perceived = s.get("smiles")
+        if perceived:
+            if meta is None:
+                meta = {}
+            meta.setdefault("smiles", perceived)   # title's SMILES wins if it had one
+        structs.append((atoms, meta))
     return structs, None
 
 
