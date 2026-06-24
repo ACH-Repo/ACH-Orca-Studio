@@ -367,6 +367,36 @@ def test_import_dir_provenance_groups_across_dirs(tmp_path):
     assert mol.charge == -1 and mol.multiplicity == 2
 
 
+def test_match_parents_by_recipe_per_molecule():
+    cs = [
+        PlannedCalc(id="oa", molecule_filename="A", recipe_name="OPT"),
+        PlannedCalc(id="a1", molecule_filename="A", recipe_name="NMR"),
+        PlannedCalc(id="a2", molecule_filename="A", recipe_name="NMR"),
+        PlannedCalc(id="ob", molecule_filename="B", recipe_name="OPT"),
+        PlannedCalc(id="b1", molecule_filename="B", recipe_name="NMR"),
+    ]
+    sel = [cs[1], cs[2], cs[4]]                      # the three NMR
+    m = discovery.match_parents_by_recipe(sel, cs, "OPT")
+    assert m == {"a1": "oa", "a2": "oa", "b1": "ob"}   # each NMR -> its own OPT
+
+
+def test_match_parents_skips_self_and_missing():
+    cs = [
+        PlannedCalc(id="oa", molecule_filename="A", recipe_name="OPT"),
+        PlannedCalc(id="a1", molecule_filename="A", recipe_name="NMR"),
+        PlannedCalc(id="c1", molecule_filename="C", recipe_name="NMR"),  # molecule C has no OPT
+    ]
+    m = discovery.match_parents_by_recipe(cs, cs, "OPT")   # select all, parent recipe OPT
+    assert m == {"a1": "oa"}                                # oa is itself; c1 has no OPT
+
+
+def test_match_parents_avoids_cycle():
+    c = PlannedCalc(id="c", molecule_filename="A", recipe_name="NMR")
+    d = PlannedCalc(id="d", molecule_filename="A", recipe_name="OPT", parent_id="c")  # d is c's child
+    m = discovery.match_parents_by_recipe([c], [c, d], "OPT")
+    assert m == {}                                          # d can't become c's parent
+
+
 def test_import_dir_reuses_existing_recipe(tmp_path):
     proj = _project(tmp_path)
     existing = [Recipe(name="Pretty NMR", calctype="NMR", method_label="methodA",

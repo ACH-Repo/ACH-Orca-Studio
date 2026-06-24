@@ -2023,14 +2023,19 @@ class CalculationsTab(ttk.Frame):
         # file was lost, point a flat NMR/FREQ calc at its OPT as the parent so it
         # inherits the optimised geometry. (Affects future rebuilds, not the run
         # that already happened.)
-        if len(calcs) == 1:
-            one = calcs[0]
+        if calcs:
             menu.add_separator()
-            menu.add_command(label="Set parent (inherit another calc's geometry)...",
-                             command=lambda c=one: self._set_parent_interactive(c))
-            if one.parent_id:
-                menu.add_command(label="Clear parent",
-                                 command=lambda c=one: self._clear_parent(c))
+            if len(calcs) == 1:
+                menu.add_command(label="Set parent (inherit another calc's geometry)...",
+                                 command=lambda cs=list(calcs): self._set_parent_interactive(cs))
+            else:
+                menu.add_command(label="Set parent for {} selected...".format(len(calcs)),
+                                 command=lambda cs=list(calcs): self._set_parent_interactive(cs))
+            if any(c.parent_id for c in calcs):
+                label = "Clear parent" if len(calcs) == 1 else \
+                    "Clear parent ({} selected)".format(len(calcs))
+                menu.add_command(label=label,
+                                 command=lambda cs=list(calcs): self._clear_parent(cs))
 
         try:
             menu.tk_popup(event.x_root, event.y_root)
@@ -2050,7 +2055,24 @@ class CalculationsTab(ttk.Frame):
                     stack.append(c.id)
         return out
 
-    def _set_parent_interactive(self, calc):
+    def _calctype_of(self, calc):
+        r = self.app.get_recipe(calc.recipe_name)
+        return r.calctype if r else "?"
+
+    def _set_parent_interactive(self, calcs):
+        """Set the geometry parent for one or many selected calcs. A single calc
+        gets the precise exact-calc chooser; a multi-selection picks a parent
+        *recipe* and each calc links to its OWN molecule's calc of that recipe (so
+        N derived calcs — even across molecules — wire up in one action)."""
+        calcs = [c for c in calcs if c is not None]
+        if not calcs:
+            return
+        if len(calcs) == 1:
+            self._set_parent_single(calcs[0])
+        else:
+            self._set_parent_bulk(calcs)
+
+    def _set_parent_single(self, calc):
         desc = self._descendant_ids(calc)
         cands = [c for c in self.app.project.planned_calcs
                  if c.molecule_filename == calc.molecule_filename
@@ -2061,13 +2083,12 @@ class CalculationsTab(ttk.Frame):
                 "No other calculation for molecule '{}' to use as a parent.".format(
                     calc.molecule_filename))
             return
-
-        def _label(c):
-            r = self.app.get_recipe(c.recipe_name)
-            ct = r.calctype if r else "?"
-            return "{} | {} | {}".format(ct, c.recipe_name, c.category)
-
-        chosen = _ChooseCalcDialog(self, calc, cands, _label).result
+        items = [("{} | {} | {}".format(self._calctype_of(c), c.recipe_name, c.category), c)
+                 for c in cands]
+        prompt = ("Use which calculation's geometry as the parent?\n"
+                  "(Molecule '{}'.)".format(calc.molecule_filename))
+        chosen = _ChooseOneDialog(self, "Choose parent calculation", prompt, items,
+                                  ok_label="Set parent").result
         if chosen is None:
             return
         calc.parent_id = chosen.id
@@ -2078,15 +2099,69 @@ class CalculationsTab(ttk.Frame):
         self.refresh()
         self._log("Set parent of {} -> {}".format(self._short(calc), self._short(chosen)))
 
-    def _clear_parent(self, calc):
-        calc.parent_id = None
-        if calc.geometry_source.startswith("parent:"):
-            calc.geometry_source = "initial"
-        if not calc.job_id:
-            calc.exported = False
-        self.app.mark_dirty()
-        self.refresh()
-        self._log("Cleared parent of {}".format(self._short(calc)))
+    def _set_parent_bulk(self, calcs):
+        mols = sorted({c.molecule_filename for c in calcs})
+        # Pool = every calc in the involved molecules (INCLUDING selected ones, so a
+        # selected OPT can still parent a selected NMR). The chosen recipe is matched
+        # per-molecule; self/descendant links are skipped by match_parents_by_recipe.
+        pool = [c for c in self.app.project.planned_calcs if c.molecule_filename in mols]
+        seen = set()
+        items = []
+        for c in sorted(pool, key=lambda c: (self._calctype_of(c), c.recipe_name)):
+            if c.recipe_name in seen:
+                continue
+            seen.add(c.recipe_name)
+            items.append(("{} | {}".format(self._calctype_of(c), c.recipe_name), c.recipe_name))
+        if not items:
+            messagebox.showinfo("Set parent",
+                                "No candidate parent calculation in the selected molecule(s).")
+            return
+        prompt = ("Set the parent for {} selected calc(s) across {} molecule(s).\n"
+                  "Pick the parent recipe — each selected calc links to its OWN "
+                  "molecule's calc of that recipe (a calc that IS that recipe is "
+                  "skipped):".format(len(calcs), len(mols)))
+        recipe_name = _ChooseOneDialog(self, "Set parent for selection", prompt, items,
+                                       ok_label="Set parents").result
+        if recipe_name is None:
+            return
+        mapping = discovery_mod.match_parents_by_recipe(
+            calcs, self.app.project.planned_calcs, recipe_name)
+        linked = 0
+        for c in calcs:
+            pid = mapping.get(c.id)
+            if not pid:
+                continue
+            c.parent_id = pid
+            c.geometry_source = "parent:" + pid
+            if not c.job_id:
+                c.exported = False
+            linked += 1
+        skipped = len(calcs) - linked
+        if linked:
+            self.app.mark_dirty()
+            self.refresh()
+        note = "" if not skipped else "; {} skipped (no match / is that recipe)".format(skipped)
+        self._log("Set parent: linked {} calc(s) to '{}'{}".format(linked, recipe_name, note))
+        if not linked:
+            messagebox.showinfo("Set parent",
+                                "Nothing linked — no selected calc had a matching "
+                                "parent of that recipe in its molecule.")
+
+    def _clear_parent(self, calcs):
+        n = 0
+        for c in calcs:
+            if not (c.parent_id or c.geometry_source.startswith("parent:")):
+                continue
+            c.parent_id = None
+            if c.geometry_source.startswith("parent:"):
+                c.geometry_source = "initial"
+            if not c.job_id:
+                c.exported = False
+            n += 1
+        if n:
+            self.app.mark_dirty()
+            self.refresh()
+            self._log("Cleared parent of {} calc(s)".format(n))
 
     def _calc_file(self, calc, name):
         """Absolute path to <rundir>/<name> if it exists, else None."""
@@ -2259,33 +2334,31 @@ def _ask_choice(parent, title, prompt, choices):
     return result["value"]
 
 
-class _ChooseCalcDialog(tk.Toplevel):
-    """Pick one calculation from a list (used to set a calc's parent manually).
-    self.result is the chosen PlannedCalc, or None if cancelled."""
+class _ChooseOneDialog(tk.Toplevel):
+    """Pick one item from a labelled list. `items` is a list of (label, value);
+    self.result is the chosen value, or None if cancelled."""
 
-    def __init__(self, parent, calc, candidates, label_fn):
+    def __init__(self, parent, title, prompt, items, ok_label="OK"):
         super().__init__(parent)
         self.result = None
-        self._cands = list(candidates)
-        self.title("Choose parent calculation")
-        ttk.Label(self,
-                  text="Use which calculation's geometry as the parent for this "
-                       "calc?\n(They share molecule '{}'.)".format(calc.molecule_filename),
-                  justify=tk.LEFT).pack(side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
+        self._values = [v for _lbl, v in items]
+        self.title(title)
+        ttk.Label(self, text=prompt, justify=tk.LEFT).pack(
+            side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
         frame = ttk.Frame(self)
         frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12)
-        self.lb = tk.Listbox(frame, height=min(12, max(3, len(self._cands))), width=52)
-        for c in self._cands:
-            self.lb.insert(tk.END, label_fn(c))
-        self.lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.lb = tk.Listbox(frame, height=min(14, max(3, len(items))), width=56)
+        for lbl, _v in items:
+            self.lb.insert(tk.END, lbl)
         sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.lb.yview)
         self.lb.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.lb.selection_set(0)
         btns = ttk.Frame(self)
         btns.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btns, text="Set parent", command=self._ok).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text=ok_label, command=self._ok).pack(side=tk.RIGHT, padx=4)
         self.lb.bind("<Double-Button-1>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self._cancel())
         make_modal(self, parent)
@@ -2295,7 +2368,7 @@ class _ChooseCalcDialog(tk.Toplevel):
         sel = self.lb.curselection()
         if not sel:
             return
-        self.result = self._cands[sel[0]]
+        self.result = self._values[sel[0]]
         self.destroy()
 
     def _cancel(self):

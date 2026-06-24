@@ -425,3 +425,42 @@ def import_dir(project, src_dir, save_recipe=None, category="imported",
             summary["imported"] += 1
 
     return summary
+
+
+def match_parents_by_recipe(selected, all_calcs, recipe_name):
+    """Map each selected calc to a parent: the calc in its OWN molecule whose
+    recipe_name == recipe_name (first match). Used to bulk-wire derived calcs to
+    their source (e.g. many NMR -> each molecule's OPT) in one action.
+
+    Returns {calc_id: parent_id}. A selected calc is omitted when its molecule has
+    no such parent, when the match is the calc itself (it IS that recipe), or when
+    the match is one of its descendants (would create a cycle). Pure: reads only
+    the passed lists. `all_calcs` is the whole project so descendants resolve.
+    """
+    by_mol = {}
+    for p in all_calcs:
+        if p.recipe_name == recipe_name:
+            by_mol.setdefault(p.molecule_filename, p)
+
+    children = {}
+    for c in all_calcs:
+        if c.parent_id:
+            children.setdefault(c.parent_id, []).append(c.id)
+
+    def _descendants(cid):
+        out = set()
+        stack = [cid]
+        while stack:
+            for kid in children.get(stack.pop(), []):
+                if kid not in out:
+                    out.add(kid)
+                    stack.append(kid)
+        return out
+
+    mapping = {}
+    for c in selected:
+        p = by_mol.get(c.molecule_filename)
+        if p is None or p.id == c.id or p.id in _descendants(c.id):
+            continue
+        mapping[c.id] = p.id
+    return mapping
