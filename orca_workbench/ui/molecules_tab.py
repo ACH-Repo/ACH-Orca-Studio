@@ -83,7 +83,8 @@ class MoleculesTab(ttk.Frame):
                       "the dialog (Ctrl+A = all, Shift-click = range, Ctrl-click = add one). "
                       "Reads .xyz natively (incl. JSON metadata) and converts SDF/MOL/MOL2/PDB/"
                       "CIF/etc. to .xyz via OpenBabel/RDKit. Each is copied into XYZ_INI/. "
-                      "Multi-conformer files prompt for which conformer to use.")
+                      "Multi-structure files (e.g. multi-conformer SDF) let you pick one, "
+                      "several (0,2,5 / 0-3), or all.")
         tip(b_import_dir, "Import every supported structure file in a chosen folder (e.g. a folder "
                           "full of .xyz or .sdf), in one go. Same conversion + conformer handling "
                           "as Import files.")
@@ -783,67 +784,70 @@ class MoleculesTab(ttk.Frame):
         self._import_paths(paths)
 
     def _import_paths(self, paths):
-        """Shared batch importer: read each file (converting non-xyz formats),
-        resolve multi-conformer files via a one-time-or-remembered dialog, write
-        XYZ_INI/<name>.xyz, and add a Molecule. One refresh + status at the end."""
+        """Shared batch importer: read each file (converting non-xyz formats), let
+        the user pick one / several / all structures from a multi-record file
+        (once, or remembered for the rest of the batch), write XYZ_INI/<name>.xyz
+        per chosen structure, and add a Molecule. One refresh + status at the end."""
         root = self.app.project.root()
         imported = 0
         errors = []
-        remembered_index = None   # set when the user ticks "remember" in the dialog
+        remembered_spec = None    # raw index spec ("all", "0,2", "-1", ...) reused for the batch
         first_fname = None
         for path in paths:
+            base_name = os.path.basename(path)
             try:
                 structs = coords_mod.read_structures(path)
             except Exception as e:
-                errors.append("{}: {}".format(os.path.basename(path), e))
+                errors.append("{}: {}".format(base_name, e))
                 continue
             n = len(structs)
-            idx = 0
-            if n > 1:
-                if remembered_index is not None:
-                    idx = remembered_index
-                else:
-                    res = ConformerSelectDialog(self, os.path.basename(path), n).result
+            if n == 1:
+                indices = [0]
+            else:
+                spec = remembered_spec
+                if spec is None:
+                    res = ConformerSelectDialog(self, base_name, n).result
                     if res is None:
-                        continue          # user cancelled this file
-                    idx, remember = res
+                        continue          # user skipped this file
+                    spec, remember = res
                     if remember:
-                        remembered_index = idx
-            try:
-                atoms, meta = structs[idx]
-            except IndexError:
-                errors.append("{}: conformer index {} out of range (file has {})".format(
-                    os.path.basename(path), idx, n))
-                continue
-            if not atoms:
-                errors.append("{}: chosen structure has no atoms".format(os.path.basename(path)))
-                continue
-            meta = meta or {}
+                        remembered_spec = spec
+                indices = coords_mod.parse_structure_selection(spec, n)
+                if not indices:
+                    errors.append("{}: no valid structure index in '{}' (file has {})".format(
+                        base_name, spec, n))
+                    continue
             base = re.sub(r"[^A-Za-z0-9_.-]+", "_",
-                          os.path.splitext(os.path.basename(path))[0]) or "mol"
-            fname = self._unique_filename(base)
-            target = os.path.join(root, "XYZ_INI", fname + ".xyz")
-            try:
-                coords_mod.write_xyz(target, atoms, meta or None)
-            except Exception as e:
-                errors.append("{}: write failed: {}".format(os.path.basename(path), e))
-                continue
-            self.app.project.molecules.append(Molecule(
-                name=meta.get("name") or fname,
-                filename=fname,
-                smiles=meta.get("smiles"),
-                gen_smiles=meta.get("gen_smiles"),
-                charge=int(meta.get("charge", 0) or 0),
-                multiplicity=int(meta.get("multiplicity", 1) or 1),
-                comment=meta.get("comment", "") or "",
-                generated=True,
-                gen_status="ok",
-                method="imported",
-                xyz_path=os.path.relpath(target, root).replace("\\", "/"),
-            ))
-            imported += 1
-            if first_fname is None:
-                first_fname = fname
+                          os.path.splitext(base_name)[0]) or "mol"
+            for idx in indices:
+                atoms, meta = structs[idx]
+                if not atoms:
+                    errors.append("{} [#{}]: structure has no atoms".format(base_name, idx))
+                    continue
+                meta = meta or {}
+                fname = self._unique_filename(base)
+                target = os.path.join(root, "XYZ_INI", fname + ".xyz")
+                try:
+                    coords_mod.write_xyz(target, atoms, meta or None)
+                except Exception as e:
+                    errors.append("{} [#{}]: write failed: {}".format(base_name, idx, e))
+                    continue
+                self.app.project.molecules.append(Molecule(
+                    name=meta.get("name") or fname,
+                    filename=fname,
+                    smiles=meta.get("smiles"),
+                    gen_smiles=meta.get("gen_smiles"),
+                    charge=int(meta.get("charge", 0) or 0),
+                    multiplicity=int(meta.get("multiplicity", 1) or 1),
+                    comment=meta.get("comment", "") or "",
+                    generated=True,
+                    gen_status="ok",
+                    method="imported",
+                    xyz_path=os.path.relpath(target, root).replace("\\", "/"),
+                ))
+                imported += 1
+                if first_fname is None:
+                    first_fname = fname
         if imported:
             self.app.mark_dirty()
             self.refresh()
@@ -1317,37 +1321,38 @@ class AvogadroPathDialog(tk.Toplevel):
 
 
 class ConformerSelectDialog(tk.Toplevel):
-    """Ask which conformer/record to import from a multi-structure file.
+    """Ask which structure(s) to import from a multi-record file (multi-conformer
+    SDF, multi-molecule file, multi-frame xyz, ...).
 
-    self.result is (index, remember) or None if cancelled. `index` is 0-based and
-    may be negative (-1 = last). `remember` re-applies the same index to the rest
-    of the current import batch without prompting again."""
+    self.result is (spec, remember) or None if skipped. `spec` is the raw text
+    the user entered (see _parse_index_spec for the accepted forms); `remember`
+    re-applies it to the rest of the current import batch without prompting."""
 
     def __init__(self, parent, filename, n_structures):
         super().__init__(parent)
         self.result = None  # type: Optional[tuple]
         self._n = int(n_structures)
-        self.title("Select conformer")
+        self.title("Select structures")
         self.resizable(False, False)
 
-        msg = ("'{}' contains {} structures.\n\n"
-               "Choose which one to import (0-based). Use -1 for the last, "
-               "-2 for second-to-last, and so on.").format(filename, self._n)
-        ttk.Label(self, text=msg, wraplength=420, justify=tk.LEFT).pack(
-            side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
+        msg = ("'{}' contains {} structures (indices 0..{}).\n\n"
+               "Which to import? You can pick one, several, or all:").format(
+                   filename, self._n, self._n - 1)
+        ttk.Label(self, text=msg, wraplength=440, justify=tk.LEFT).pack(
+            side=tk.TOP, fill=tk.X, padx=12, pady=(12, 4))
+        ttk.Label(self, text="Examples:   0      0,2,5      0-3      all      -1 (last)",
+                  justify=tk.LEFT, foreground="#555555").pack(
+            side=tk.TOP, fill=tk.X, padx=12, pady=(0, 6))
 
         row = ttk.Frame(self)
         row.pack(side=tk.TOP, fill=tk.X, padx=12, pady=4)
-        ttk.Label(row, text="Conformer index:").pack(side=tk.LEFT)
+        ttk.Label(row, text="Structures:").pack(side=tk.LEFT)
         self.var = tk.StringVar(value="0")
-        self.spin = tk.Spinbox(row, from_=-self._n, to=self._n - 1, width=8,
-                               textvariable=self.var)
-        self.spin.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(row, text="(valid {}..{})".format(-self._n, self._n - 1)).pack(
-            side=tk.LEFT, padx=(6, 0))
+        self.entry = ttk.Entry(row, textvariable=self.var, width=24)
+        self.entry.pack(side=tk.LEFT, padx=(6, 0))
 
         self.remember_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self, text="Remember this index for the rest of this import",
+        ttk.Checkbutton(self, text="Remember this selection for the rest of this import",
                         variable=self.remember_var).pack(
             side=tk.TOP, anchor=tk.W, padx=12, pady=(4, 0))
 
@@ -1356,25 +1361,24 @@ class ConformerSelectDialog(tk.Toplevel):
         ttk.Button(btns, text="Skip file", command=self._cancel).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Import", command=self._ok).pack(side=tk.RIGHT, padx=4)
 
-        self.spin.focus_set()
+        self.entry.focus_set()
+        self.entry.select_range(0, tk.END)
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self._cancel())
         make_modal(self, parent)
         self.wait_window()
 
     def _ok(self):
-        try:
-            idx = int(self.var.get().strip())
-        except ValueError:
-            messagebox.showinfo("Invalid index", "Enter a whole number.", parent=self)
-            return
-        if idx < -self._n or idx > self._n - 1:
+        spec = self.var.get().strip()
+        chosen = coords_mod.parse_structure_selection(spec, self._n)
+        if not chosen:
             messagebox.showinfo(
-                "Out of range",
-                "Index must be between {} and {}.".format(-self._n, self._n - 1),
+                "Nothing selected",
+                "'{}' didn't resolve to any structure in 0..{}.\n"
+                "Try e.g. 0, or 0,2,5, or 0-3, or all, or -1.".format(spec, self._n - 1),
                 parent=self)
             return
-        self.result = (idx, bool(self.remember_var.get()))
+        self.result = (spec, bool(self.remember_var.get()))
         self.destroy()
 
     def _cancel(self):

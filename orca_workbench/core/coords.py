@@ -9,6 +9,8 @@ name of the method that succeeded.
 import json
 import os
 import re
+import subprocess
+import sys
 from typing import List, Optional, Tuple
 
 
@@ -434,6 +436,12 @@ SUPPORTED_IMPORT_FORMATS = [
 ]
 _EXT_TO_OBABEL = {ext: fmt for ext, fmt, _ in SUPPORTED_IMPORT_FORMATS}
 
+# Hard cap on how long a single OpenBabel read may take before we give up. Some
+# OpenBabel readers loop forever on certain inputs (.bgf/.box on round-tripped
+# files), and because the read runs in a subprocess we can kill it cleanly rather
+# than freezing the GUI. Generous: a real structure reads in well under a second.
+IMPORT_READ_TIMEOUT_S = 20
+
 
 def is_supported_import_file(path):
     # type: (str) -> bool
@@ -496,31 +504,38 @@ def _read_xyz_frames(path):
     return frames
 
 
-def _read_with_openbabel(path, fmt):
-    # type: (str, str) -> Tuple[Optional[list], Optional[str]]
-    """(structures, None) on success, (None, error) on failure. Each structure is
-    (atoms, metadata). OpenBabel's reader is a generator over all records."""
+def _read_with_openbabel(path, fmt, timeout=IMPORT_READ_TIMEOUT_S):
+    # type: (str, str, float) -> Tuple[Optional[list], Optional[str]]
+    """Read all records via OpenBabel in a **killable subprocess**, so a reader
+    that hangs (some formats loop forever on certain inputs) times out cleanly
+    instead of freezing the caller. Returns (structures, None) on success or
+    (None, error) on failure. Each structure is (atoms, metadata)."""
+    cmd = [sys.executable, "-m", "orca_workbench.core._obabel_worker", fmt, path]
     try:
-        try:
-            from openbabel import pybel
-        except ImportError:
-            import pybel  # type: ignore
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, ("reading timed out after {}s - the OpenBabel reader for '{}' "
+                      "hung on this file (the format/file may be unreadable).".format(
+                          timeout, fmt))
     except Exception as e:
-        return None, "OpenBabel/pybel not available ({})".format(e)
+        return None, "could not launch reader subprocess: {}: {}".format(type(e).__name__, e)
+    out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+    if not out:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        return None, "reader produced no output{}".format(": " + err[:200] if err else "")
     try:
-        structs = []
-        for mol in pybel.readfile(fmt, path):
-            atoms = []
-            for atom in mol.atoms:
-                x, y, z = atom.coords
-                atoms.append((_atomic_number_to_symbol(atom.atomicnum),
-                              float(x), float(y), float(z)))
-            title = (getattr(mol, "title", "") or "").strip()
-            structs.append((atoms, {"name": title} if title else None))
-        return structs, None
-    except Exception as e:
-        return None, "OpenBabel could not read as '{}': {}: {}".format(
-            fmt, type(e).__name__, e)
+        data = json.loads(out.splitlines()[-1])
+    except ValueError:
+        return None, "reader output not understood: {}".format(out[:200])
+    if not data.get("ok"):
+        return None, data.get("error", "unknown error")
+    structs = []
+    for s in data.get("structures", []):
+        atoms = [(a[0], float(a[1]), float(a[2]), float(a[3])) for a in s.get("atoms", [])]
+        name = s.get("name")
+        structs.append((atoms, {"name": name} if name else None))
+    return structs, None
 
 
 def _read_with_rdkit(path, fmt):
@@ -566,13 +581,14 @@ def _read_with_rdkit(path, fmt):
         return None, "RDKit failed: {}: {}".format(type(e).__name__, e)
 
 
-def read_structures(path, fmt=None):
-    # type: (str, Optional[str]) -> List[Tuple[List[Atom], Optional[dict]]]
+def read_structures(path, fmt=None, timeout=IMPORT_READ_TIMEOUT_S):
+    # type: (str, Optional[str], float) -> List[Tuple[List[Atom], Optional[dict]]]
     """Read ALL structures (records/frames) from a coordinate file.
 
     Returns a list of (atoms, metadata); a single-geometry file yields one entry,
     a multi-conformer SDF or multi-frame xyz yields several. Raises CoordGenError
-    if nothing could be read.
+    if nothing could be read. Non-xyz formats are read via OpenBabel in a
+    timeout-guarded subprocess so a hanging reader can't freeze the caller.
     """
     _ensure_loggers_silenced()
     if not os.path.isfile(path):
@@ -586,7 +602,7 @@ def read_structures(path, fmt=None):
             raise CoordGenError("No atoms found in {}".format(path))
         return frames
 
-    structs, ob_err = _read_with_openbabel(path, fmt)
+    structs, ob_err = _read_with_openbabel(path, fmt, timeout=timeout)
     if structs:
         return structs
     rd_structs, rd_err = _read_with_rdkit(path, fmt)
@@ -597,14 +613,14 @@ def read_structures(path, fmt=None):
             path, fmt, ob_err or "no structures returned", rd_err or "no reader"))
 
 
-def read_coords_file(path, conformer_index=0):
-    # type: (str, int) -> Tuple[List[Atom], Optional[dict], int]
+def read_coords_file(path, conformer_index=0, timeout=IMPORT_READ_TIMEOUT_S):
+    # type: (str, int, float) -> Tuple[List[Atom], Optional[dict], int]
     """Read one structure from any coordinate file → (atoms, metadata, n_total).
 
     `conformer_index` is 0-based and accepts negatives (-1 = last) via normal
     Python indexing. `n_total` lets the caller decide whether to prompt the user
     to choose among multiple conformers."""
-    structs = read_structures(path)
+    structs = read_structures(path, timeout=timeout)
     n = len(structs)
     try:
         atoms, meta = structs[conformer_index]
@@ -617,6 +633,43 @@ def read_coords_file(path, conformer_index=0):
         raise CoordGenError("Selected structure in {} has no atoms.".format(
             os.path.basename(path)))
     return atoms, meta, n
+
+
+def parse_structure_selection(spec, n):
+    # type: (str, int) -> List[int]
+    """Parse a structure-selection spec for a file with n structures into an
+    ordered, de-duplicated list of valid 0-based indices. Accepts:
+      all / *          -> every structure
+      0                -> a single index (negatives allowed: -1 = last)
+      0,2,5  or  0 2 5 -> several
+      0-3              -> an inclusive range (non-negative endpoints)
+    Out-of-range tokens are dropped. Returns [] if nothing valid resolves."""
+    spec = (spec or "").strip().lower()
+    if spec in ("all", "*"):
+        return list(range(n))
+    out = []
+
+    def _add(i):
+        if i < 0:
+            i += n                      # -1 -> last
+        if 0 <= i < n and i not in out:
+            out.append(i)
+
+    for tok in re.split(r"[,\s]+", spec):
+        if not tok:
+            continue
+        m = re.match(r"^(\d+)-(\d+)$", tok)     # non-negative inclusive range
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            step = 1 if a <= b else -1
+            for i in range(a, b + step, step):
+                _add(i)
+            continue
+        try:
+            _add(int(tok))
+        except ValueError:
+            continue
+    return out
 
 
 def format_atom_block(atoms):

@@ -120,3 +120,27 @@ def test_read_sdf_multirecord_converts(tmp_path):
     structs = coords.read_structures(_write(tmp_path / "two.sdf", SDF_TWO_RECORDS))
     assert len(structs) == 2
     assert structs[0][0][0][0] == "H"   # first atom symbol of first record
+
+
+# --------------------------------------------------------------- structure selection
+def test_parse_structure_selection_single_and_last():
+    assert coords.parse_structure_selection("0", 5) == [0]
+    assert coords.parse_structure_selection("-1", 5) == [4]
+    assert coords.parse_structure_selection("3", 5) == [3]
+
+
+def test_parse_structure_selection_all():
+    assert coords.parse_structure_selection("all", 3) == [0, 1, 2]
+    assert coords.parse_structure_selection("*", 3) == [0, 1, 2]
+
+
+def test_parse_structure_selection_list_and_range():
+    assert coords.parse_structure_selection("0,2,4", 5) == [0, 2, 4]
+    assert coords.parse_structure_selection("0 2 4", 5) == [0, 2, 4]
+    assert coords.parse_structure_selection("1-3", 5) == [1, 2, 3]
+
+
+def test_parse_structure_selection_dedup_and_out_of_range():
+    assert coords.parse_structure_selection("0,0,1", 5) == [0, 1]          # de-duped
+    assert coords.parse_structure_selection("2,9,7", 5) == [2]             # 9,7 dropped
+    assert coords.parse_structure_selection("nonsense", 5) == []           # nothing valid
