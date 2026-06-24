@@ -22,6 +22,7 @@ import os
 import re
 
 from orca_workbench.core import inputs as inputs_mod
+from orca_workbench.core import provenance as provenance_mod
 from orca_workbench.core.inputs import Recipe, COORDS_PLACEHOLDER, safe_path_component
 from orca_workbench.core.project import Molecule, PlannedCalc, new_calc_id
 
@@ -147,6 +148,9 @@ def _infer_method_label(kw_line):
 
 def recipe_from_inp(inp_text):
     """Reconstruct a Recipe from an existing .inp (coords -> placeholder)."""
+    # Drop any ORCA Workbench provenance header first so it never becomes part of
+    # the reconstructed template (which would re-stamp/accumulate on rebuild).
+    inp_text = provenance_mod.strip_block(inp_text)
     try:
         block = inputs_mod.extract_coords_section(inp_text)
         template = inp_text.replace(block, COORDS_PLACEHOLDER)
