@@ -440,7 +440,49 @@ _EXT_TO_OBABEL = {ext: fmt for ext, fmt, _ in SUPPORTED_IMPORT_FORMATS}
 # OpenBabel readers loop forever on certain inputs (.bgf/.box on round-tripped
 # files), and because the read runs in a subprocess we can kill it cleanly rather
 # than freezing the GUI. Generous: a real structure reads in well under a second.
-IMPORT_READ_TIMEOUT_S = 20
+IMPORT_READ_TIMEOUT_S = 15
+
+_obabel_informats_cache = None  # None = not probed yet; set() once probed
+
+
+def _openbabel_informats():
+    # type: () -> Optional[set]
+    """Cached set of OpenBabel-readable format codes (pybel.informats keys), or
+    None if OpenBabel isn't importable. Safe to call in-process: listing formats
+    can't hang (only readfile() can), so we use it to reject write-only/output
+    formats instantly without paying for a reader subprocess."""
+    global _obabel_informats_cache
+    if _obabel_informats_cache is not None:
+        return _obabel_informats_cache or None
+    try:
+        try:
+            from openbabel import pybel
+        except ImportError:
+            import pybel  # type: ignore
+        _obabel_informats_cache = set(pybel.informats.keys())
+    except Exception:
+        _obabel_informats_cache = set()   # probed, unavailable
+    return _obabel_informats_cache or None
+
+
+def _meta_from_title(title):
+    # type: (Optional[str]) -> Optional[dict]
+    """Turn a structure's title/comment into metadata. If it's a JSON object
+    (our XYZ convention: {"name","smiles","charge","multiplicity",...}) parse it
+    so SMILES/charge/etc. pre-fill the molecule on import; otherwise treat it as
+    a plain display name. Lets embedded info ride along from any format that keeps
+    a title line, for free."""
+    if not title:
+        return None
+    t = title.strip()
+    if t.startswith("{"):
+        try:
+            d = json.loads(t)
+            if isinstance(d, dict):
+                return d
+        except ValueError:
+            pass
+    return {"name": title}
 
 
 def is_supported_import_file(path):
@@ -533,8 +575,7 @@ def _read_with_openbabel(path, fmt, timeout=IMPORT_READ_TIMEOUT_S):
     structs = []
     for s in data.get("structures", []):
         atoms = [(a[0], float(a[1]), float(a[2]), float(a[3])) for a in s.get("atoms", [])]
-        name = s.get("name")
-        structs.append((atoms, {"name": name} if name else None))
+        structs.append((atoms, _meta_from_title(s.get("name"))))
     return structs, None
 
 
@@ -573,7 +614,7 @@ def _read_with_rdkit(path, fmt):
                 pos = conf.GetAtomPosition(atom.GetIdx())
                 atoms.append((atom.GetSymbol(), float(pos.x), float(pos.y), float(pos.z)))
             name = m.GetProp("_Name").strip() if m.HasProp("_Name") else ""
-            structs.append((atoms, {"name": name} if name else None))
+            structs.append((atoms, _meta_from_title(name)))
         if not structs:
             return None, "RDKit found no 3D structures in {}".format(path)
         return structs, None
@@ -601,6 +642,15 @@ def read_structures(path, fmt=None, timeout=IMPORT_READ_TIMEOUT_S):
         if not frames or not any(a for a, _ in frames):
             raise CoordGenError("No atoms found in {}".format(path))
         return frames
+
+    # Reject formats OpenBabel can't read *instantly* (no reader subprocess), so
+    # importing a pile of write-only/output files skips them fast instead of
+    # spawning a worker per file. (Only when we could query the format list.)
+    informats = _openbabel_informats()
+    if informats is not None and fmt not in informats:
+        raise CoordGenError(
+            "'{}' is not a readable structure format - OpenBabel can only write "
+            "it, not read it (it's an input-deck/output/non-coordinate format).".format(fmt))
 
     structs, ob_err = _read_with_openbabel(path, fmt, timeout=timeout)
     if structs:

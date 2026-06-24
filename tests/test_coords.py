@@ -144,3 +144,24 @@ def test_parse_structure_selection_dedup_and_out_of_range():
     assert coords.parse_structure_selection("0,0,1", 5) == [0, 1]          # de-duped
     assert coords.parse_structure_selection("2,9,7", 5) == [2]             # 9,7 dropped
     assert coords.parse_structure_selection("nonsense", 5) == []           # nothing valid
+
+
+# --------------------------------------------------------------- title -> metadata
+def test_meta_from_title_json():
+    m = coords._meta_from_title('{"name": "Methanol", "smiles": "CO", "charge": 0}')
+    assert m["smiles"] == "CO" and m["name"] == "Methanol" and m["charge"] == 0
+
+
+def test_meta_from_title_plain_and_empty():
+    assert coords._meta_from_title("benzene") == {"name": "benzene"}
+    assert coords._meta_from_title("") is None
+    assert coords._meta_from_title(None) is None
+
+
+def test_unreadable_format_fast_rejected(tmp_path):
+    # A write-only OpenBabel format (ADF input deck) must be refused, not hang.
+    if not _has_chem_backend():
+        pytest.skip("OpenBabel not available to know the readable-format list")
+    p = _write(tmp_path / "input_file.adf", "dummy content\n")
+    with pytest.raises(coords.CoordGenError):
+        coords.read_structures(p)
