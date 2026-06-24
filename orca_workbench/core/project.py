@@ -32,6 +32,10 @@ class Molecule(object):
                                       # in the .xyz, ORCA's OPT then handles the real metal).
     gen_status: str = "pending"       # "pending" | "ok" | "failed" — drives UI row coloring
     gen_error: Optional[str] = None   # last generation error message, populated when status=failed
+    coords_locked: bool = False       # True for structures imported from a coordinate file:
+                                      # their .xyz is the original, so SMILES generation is
+                                      # refused (it would overwrite + lose provenance). To use
+                                      # SMILES instead, delete the entry and add it fresh.
 
     @classmethod
     def from_dict(cls, d):
@@ -42,6 +46,10 @@ class Molecule(object):
         if "gen_status" not in d:
             # Migrate: derive from the boolean `generated` flag.
             d["gen_status"] = "ok" if d.get("generated") else "pending"
+        # Older projects predate the lock flag: a structure imported from a file
+        # (method "imported") should lock retroactively so re-generation can't
+        # clobber its original coordinates.
+        d.setdefault("coords_locked", d.get("method") == "imported")
         return cls(**d)
 
 
@@ -92,7 +100,14 @@ class Project(object):
                          # files so they're safe to share/publish.
     molecules: List[Molecule] = field(default_factory=list)
     planned_calcs: List[PlannedCalc] = field(default_factory=list)
-    recipe_dir: Optional[str] = None  # override default recipe location; relative or absolute
+    recipe_dir: Optional[str] = None  # DEPRECATED single-dir field; kept in sync with
+                                      # recipe_dirs[0] for back-compat with older app
+                                      # versions that read it. Use recipe_dirs.
+    recipe_dirs: List[str] = field(default_factory=list)  # ordered recipe folders the
+                                      # project uses; [0] is the primary (where new recipes
+                                      # are saved). Empty = use the built-in default only.
+                                      # Entries may be relative (vs project root), absolute,
+                                      # or the "<builtin>" sentinel for the packaged recipes.
     workflow: Optional[dict] = None   # Workflow node-graph (see core/workflow.py),
                                       # stored as a plain dict for forward-compat.
 
@@ -101,18 +116,28 @@ class Project(object):
         return {
             "molecules": [asdict(m) for m in self.molecules],
             "planned_calcs": [asdict(c) for c in self.planned_calcs],
-            "recipe_dir": self.recipe_dir,
+            # Keep the legacy singular key = the primary folder so an older app
+            # version still finds a recipe dir; the plural is the source of truth.
+            "recipe_dir": (self.recipe_dirs[0] if self.recipe_dirs else self.recipe_dir),
+            "recipe_dirs": list(self.recipe_dirs),
             "workflow": self.workflow,
         }
 
     @classmethod
     def from_dict(cls, d, path=None):
+        # Migrate the legacy single recipe_dir string into the ordered list.
+        dirs = d.get("recipe_dirs")
+        if not dirs:
+            single = d.get("recipe_dir")
+            dirs = [single] if single else []
+        dirs = [x for x in dirs if x]
         return cls(
             path=path,
             usermail=d.get("usermail", ""),
             molecules=[Molecule.from_dict(m) for m in d.get("molecules", [])],
             planned_calcs=[PlannedCalc.from_dict(c) for c in d.get("planned_calcs", [])],
-            recipe_dir=d.get("recipe_dir"),
+            recipe_dir=(dirs[0] if dirs else None),
+            recipe_dirs=list(dirs),
             workflow=d.get("workflow"),
         )
 

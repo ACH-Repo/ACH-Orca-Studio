@@ -191,3 +191,99 @@ def test_unreadable_format_fast_rejected(tmp_path):
     p = _write(tmp_path / "input_file.adf", "dummy content\n")
     with pytest.raises(coords.CoordGenError):
         coords.read_structures(p)
+
+
+def _has_rdkit():
+    try:
+        import rdkit  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------- SMILES lists
+def test_is_smiles_list_file():
+    assert coords.is_smiles_list_file("a.smi")
+    assert coords.is_smiles_list_file("A.SMILES")
+    assert coords.is_smiles_list_file("set.csv")
+    assert not coords.is_smiles_list_file("a.xyz")
+
+
+def test_dialog_filetypes_includes_smiles_lists():
+    ft = coords.import_dialog_filetypes()
+    assert ft[0][0] == "Coordinate files"           # still first
+    assert ft[-1] == ("All files", "*.*")           # still last
+    assert any("*.smi" in pat and "*.csv" in pat for _label, pat in ft)
+
+
+def test_read_smiles_file_one_per_line(tmp_path):
+    p = _write(tmp_path / "list.smi", "CCO\nc1ccccc1\n# a comment\n")
+    pairs = coords.read_smiles_file(p)
+    assert ("CCO", None) in pairs and ("c1ccccc1", None) in pairs
+
+
+def test_read_smiles_file_csv_with_header_and_name(tmp_path):
+    # Header-row skipping + column auto-detection need RDKit to judge validity.
+    if not _has_rdkit():
+        pytest.skip("RDKit needed to detect the SMILES column / skip header")
+    p = _write(tmp_path / "set.csv", "smiles,name\nCCO,ethanol\nCCC,propane\n")
+    pairs = coords.read_smiles_file(p)
+    assert pairs == [("CCO", "ethanol"), ("CCC", "propane")]
+
+
+def test_read_smiles_file_reversed_columns(tmp_path):
+    if not _has_rdkit():
+        pytest.skip("RDKit needed to detect which column is the SMILES")
+    p = _write(tmp_path / "set.csv", "name,smiles\nethanol,CCO\npropane,CCC\n")
+    pairs = coords.read_smiles_file(p)
+    assert pairs == [("CCO", "ethanol"), ("CCC", "propane")]
+
+
+def test_read_smiles_file_empty_raises(tmp_path):
+    with pytest.raises(coords.CoordGenError):
+        coords.read_smiles_file(_write(tmp_path / "empty.smi", "\n\n"))
+
+
+# --------------------------------------------------------------- heuristic salvage
+ACESIN_LIKE = """\
+*ACES2(BASIS=PVDZ)
+some header line that is not coordinates
+O   0.000000   0.000000   0.117300
+H   0.000000   0.757200  -0.469200
+H   0.000000  -0.757200  -0.469200
+
+*END
+"""
+
+# A numeric table (gradient components) must NOT be mistaken for coordinates.
+GRADIENT_TABLE = """\
+gradient
+1   0.001234   -0.004567   0.008910
+2  -0.002345    0.005678  -0.009012
+"""
+
+
+def test_heuristic_extracts_xyz_block():
+    atoms = coords.heuristic_atoms_from_text(ACESIN_LIKE)
+    assert [a[0] for a in atoms] == ["O", "H", "H"]
+    assert atoms[1][2] == 0.7572
+
+
+def test_heuristic_rejects_numeric_table():
+    assert coords.heuristic_atoms_from_text(GRADIENT_TABLE) == []
+
+
+def test_heuristic_handles_fortran_d_exponent():
+    text = "C  1.0D-01  2.0d+00  -3.0D-01\nH  0.5  0.5  0.5\n"
+    atoms = coords.heuristic_atoms_from_text(text)
+    assert atoms[0][1] == pytest.approx(0.1)
+
+
+def test_read_structures_heuristic_fallback(tmp_path):
+    # A write-only/input-deck extension with an embedded xyz block is salvaged.
+    p = _write(tmp_path / "mol.acesin", ACESIN_LIKE)
+    structs = coords.read_structures(p)
+    assert len(structs) == 1
+    atoms, meta = structs[0]
+    assert [a[0] for a in atoms] == ["O", "H", "H"]
+    assert meta.get("source") == "heuristic"

@@ -79,8 +79,9 @@ class RecipesTab(ttk.Frame):
 
         self.dir_label = ttk.Label(toolbar, text="", foreground="#666")
         self.dir_label.pack(side=tk.LEFT, padx=20)
-        tip(self.dir_label, "Folder holding the recipe JSON files. Change it via Recipes menu > "
-                            "Set recipe directory.")
+        tip(self.dir_label, "Recipe folder(s) holding the JSON files. Add more via Recipes menu > "
+                            "Add recipe directory; reorder/remove via Manage recipe directories. "
+                            "When several are loaded, the list is grouped by folder.")
 
         # Search bar.
         search_bar = ttk.Frame(self)
@@ -121,6 +122,10 @@ class RecipesTab(ttk.Frame):
                 self.tree.heading(col, text=label)
             self.tree.column(col, width=width, minwidth=minw, anchor=anchor, stretch=stretch)
         self._refresh_heading_arrows()
+        # Folder-divider rows (shown only when several recipe folders are loaded):
+        # a non-selectable header above each folder's recipes.
+        self.tree.tag_configure("divider", background="#dfe3e8",
+                                font=("TkDefaultFont", 9, "bold"))
 
         # Pack the scrollbar BEFORE the tree so the (wide) table doesn't starve it
         # of width — otherwise the bar is zero-width: wheel-scrollable but undraggable.
@@ -258,19 +263,32 @@ class RecipesTab(ttk.Frame):
         self._rerender_tree(preserve_editor=False)
 
     def _rerender_tree(self, preserve_editor=False):
-        self.dir_label.configure(text="Library: {}".format(self.app.recipe_dir))
+        dirs = list(getattr(self.app, "recipe_dirs", None) or [self.app.recipe_dir])
+        self.dir_label.configure(text=self._dir_label_text(dirs))
         sel = self._selected_path
         self.tree.delete(*self.tree.get_children())
-        visible = self._sort_recipes(self._filter_recipes(self.app.recipes))
-        for r in visible:
-            iid = r.source_path or r.name
-            if self.tree.exists(iid):
+        # Group by source folder (in the app's folder order); within each folder
+        # apply the same filter + sort. Dividers only when several folders load —
+        # search & sort still operate across every recipe shown.
+        show_dividers = len(dirs) > 1
+        for d, recipes in self._group_recipes_by_dir(dirs):
+            shown = self._sort_recipes(self._filter_recipes(recipes))
+            if not shown:
                 continue
-            star = "*" if r.favorite else ""
-            self.tree.insert("", tk.END, iid=iid,
-                             values=(star, r.name, r.calctype, r.method_label, r.variant,
-                                     _fmt_created(r.created_at)))
-        if sel and self.tree.exists(sel):
+            if show_dividers:
+                div_iid = "__divider__" + (d or "")
+                if not self.tree.exists(div_iid):
+                    self.tree.insert("", tk.END, iid=div_iid, tags=("divider",),
+                                     values=("", self._dir_display(d), "", "", "", ""))
+            for r in shown:
+                iid = r.source_path or r.name
+                if self.tree.exists(iid):
+                    continue
+                star = "*" if r.favorite else ""
+                self.tree.insert("", tk.END, iid=iid,
+                                 values=(star, r.name, r.calctype, r.method_label, r.variant,
+                                         _fmt_created(r.created_at)))
+        if sel and self.tree.exists(sel) and not sel.startswith("__divider__"):
             self._suppress_tree_select = preserve_editor
             try:
                 self.tree.selection_set(sel)
@@ -280,10 +298,45 @@ class RecipesTab(ttk.Frame):
         elif not preserve_editor:
             self._clear_editor()
 
+    def _group_recipes_by_dir(self, dirs):
+        """Return [(dir, [recipes])] in the app's folder order, grouping each
+        recipe by the folder its source file lives in. Any recipe whose folder
+        isn't in the list (shouldn't normally happen) lands in a trailing
+        (dir=None) 'other' group so nothing is silently hidden."""
+        def norm(p):
+            return os.path.normcase(os.path.abspath(p)) if p else None
+        order = [norm(d) for d in dirs]
+        buckets = {k: [] for k in order}
+        disp = {norm(d): d for d in dirs}
+        other = []
+        for r in self.app.recipes:
+            key = norm(os.path.dirname(r.source_path)) if r.source_path else None
+            if key in buckets:
+                buckets[key].append(r)
+            else:
+                other.append(r)
+        groups = [(disp[k], buckets[k]) for k in order]
+        if other:
+            groups.append((None, other))
+        return groups
+
+    def _dir_display(self, d):
+        if d is None:
+            return "(other recipes)"
+        from orca_workbench.ui.app import DEFAULT_RECIPE_DIR
+        if os.path.normcase(os.path.abspath(d)) == os.path.normcase(os.path.abspath(DEFAULT_RECIPE_DIR)):
+            return "Built-in recipes  ({})".format(d)
+        return d
+
+    def _dir_label_text(self, dirs):
+        if len(dirs) <= 1:
+            return "Library: {}".format(dirs[0] if dirs else self.app.recipe_dir)
+        return "Library: {} folders (primary: {})".format(len(dirs), dirs[0])
+
     def _on_select(self, _event):
         if getattr(self, "_suppress_tree_select", False):
             return
-        sel = self.tree.selection()
+        sel = [s for s in self.tree.selection() if not s.startswith("__divider__")]
         if not sel:
             return
         if len(sel) > 1:
@@ -322,7 +375,7 @@ class RecipesTab(ttk.Frame):
         self._set_status("")
 
     def _select_all(self, _event=None):
-        items = self.tree.get_children("")
+        items = [i for i in self.tree.get_children("") if not i.startswith("__divider__")]
         if items:
             self.tree.selection_set(items)
         return "break"
@@ -479,7 +532,7 @@ class RecipesTab(ttk.Frame):
         return "{} {}".format(base, i)
 
     def on_delete(self):
-        sel = list(self.tree.selection())
+        sel = [s for s in self.tree.selection() if not s.startswith("__divider__")]
         if not sel:
             messagebox.showinfo("No selection", "Select one or more recipes to delete.")
             return

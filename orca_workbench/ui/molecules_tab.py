@@ -99,9 +99,12 @@ class MoleculesTab(ttk.Frame):
         tip(b_import, "Import one or many existing structure files as molecules. Multi-select in "
                       "the dialog (Ctrl+A = all, Shift-click = range, Ctrl-click = add one). "
                       "Reads .xyz natively (incl. JSON metadata) and converts SDF/MOL/MOL2/PDB/"
-                      "CIF/etc. to .xyz via OpenBabel/RDKit. Each is copied into XYZ_INI/. "
+                      "CIF/etc. to .xyz via OpenBabel/RDKit. Each is copied into XYZ_INI/ and "
+                      "locked to its original coordinates (no SMILES regeneration). "
                       "Multi-structure files (e.g. multi-conformer SDF) let you pick one, "
-                      "several (0,2,5 / 0-3), or all.")
+                      "several (0,2,5 / 0-3), or all.\n\n"
+                      "SMILES-list files (.smi/.smiles/.csv with SMILES, optionally a name "
+                      "column) are added instead as pending molecules to Generate.")
         tip(b_import_dir, "Import every supported structure file in a chosen folder (e.g. a folder "
                           "full of .xyz or .sdf), in one go. Same conversion + conformer handling "
                           "as Import files.")
@@ -499,8 +502,11 @@ class MoleculesTab(ttk.Frame):
                 if self.app.project.molecule_by_filename(new_fname) is None:
                     target.filename = new_fname
                     self._focus_filename = new_fname
-            # SMILES change on a real molecule invalidates the existing geometry.
-            if field == "smiles" and target.gen_status == "ok":
+            # SMILES change on a real molecule invalidates the existing geometry —
+            # but NOT for imported (locked) coords: their geometry is the original
+            # file, independent of any SMILES the user records for reference.
+            if (field == "smiles" and target.gen_status == "ok"
+                    and not target.coords_locked):
                 target.generated = False
                 target.gen_status = "pending"
                 target.gen_error = None
@@ -648,11 +654,15 @@ class MoleculesTab(ttk.Frame):
     def on_generate(self):
         selected = list(self.tree.selection())
         if len(selected) > 1:
-            # Bulk generate selected.
+            # Bulk generate selected. Skip imported (locked) coords — they're the
+            # original geometry and must not be overwritten by SMILES generation.
             mols = [self.app.project.molecule_by_filename(f) for f in selected]
-            mols = [m for m in mols if m is not None and m.smiles]
+            mols = [m for m in mols if m is not None and m.smiles and not m.coords_locked]
             if not mols:
-                messagebox.showinfo("Nothing to generate", "None of the selected molecules has a SMILES.")
+                messagebox.showinfo("Nothing to generate",
+                                    "None of the selected molecules has a SMILES to generate "
+                                    "from (imported structures are locked to their original "
+                                    "coordinates).")
                 return
             failures = []
             for mol in mols:
@@ -686,7 +696,7 @@ class MoleculesTab(ttk.Frame):
         # or edit its SMILES (which resets it to pending and then this picks
         # it up on the next run).
         pending = [m for m in self.app.project.molecules
-                   if m.gen_status == "pending" and m.smiles]
+                   if m.gen_status == "pending" and m.smiles and not m.coords_locked]
         if not pending:
             messagebox.showinfo("Nothing to do",
                                 "No molecules with status 'pending' have a SMILES to generate from.")
@@ -707,6 +717,20 @@ class MoleculesTab(ttk.Frame):
 
     def _generate_one(self, mol, interactive):
         # type: (Molecule, bool) -> bool
+        # Coordinates imported from a file are the original geometry — never
+        # overwrite them by re-generating from SMILES. (To use SMILES instead,
+        # delete this entry and add a fresh one.) Leave status untouched.
+        if mol.coords_locked:
+            if interactive:
+                src = mol.comment or "an imported file"
+                messagebox.showinfo(
+                    "Generation blocked",
+                    "'{}' has coordinates imported from {}.\n\n"
+                    "Generation is blocked so the original geometry (and its "
+                    "provenance) is never overwritten. To build coordinates from "
+                    "SMILES instead, delete this entry and add it again from a "
+                    "SMILES.".format(mol.name or mol.filename, src))
+            return False
         # Use the alternate gen_smiles if set (metal-swap hack), else the real SMILES.
         gen_was_used = bool((mol.gen_smiles or "").strip())
         smiles_for_gen = (mol.gen_smiles or "").strip() or mol.smiles
@@ -793,12 +817,15 @@ class MoleculesTab(ttk.Frame):
             return
         paths = [os.path.join(d, n) for n in names
                  if os.path.isfile(os.path.join(d, n))
-                 and coords_mod.is_supported_import_file(n)]
+                 and (coords_mod.is_supported_import_file(n)
+                      or coords_mod.is_smiles_list_file(n))]
         if not paths:
             messagebox.showinfo(
                 "Import folder",
-                "No supported coordinate files found in\n{}\n\nSupported: {}".format(
-                    d, ", ".join(ext for ext, _f, _l in coords_mod.SUPPORTED_IMPORT_FORMATS)))
+                "No supported coordinate or SMILES-list files found in\n{}\n\n"
+                "Supported: {}".format(
+                    d, ", ".join([ext for ext, _f, _l in coords_mod.SUPPORTED_IMPORT_FORMATS]
+                                 + [ext for ext, _l in coords_mod.SMILES_LIST_FORMATS])))
             return
         self._import_paths(paths)
 
@@ -814,6 +841,19 @@ class MoleculesTab(ttk.Frame):
         first_fname = None
         for path in paths:
             base_name = os.path.basename(path)
+            # SMILES-list files (.smi/.smiles/.csv) hold SMILES, not coordinates:
+            # add them as pending molecules to GENERATE, not locked structures.
+            if coords_mod.is_smiles_list_file(path):
+                try:
+                    pairs = coords_mod.read_smiles_file(path)
+                except Exception as e:
+                    errors.append("{}: {}".format(base_name, e))
+                    continue
+                new = self._add_smiles_entries(pairs)
+                imported += len(new)
+                if first_fname is None and new:
+                    first_fname = new[0]
+                continue
             try:
                 structs = coords_mod.read_structures(path)
             except Exception as e:
@@ -880,6 +920,9 @@ class MoleculesTab(ttk.Frame):
                     generated=True,
                     gen_status="ok",
                     method="imported",
+                    coords_locked=True,   # the imported .xyz is the original — don't let
+                                          # SMILES generation overwrite it (delete + re-add
+                                          # from SMILES if that's what you want instead).
                     xyz_path=os.path.relpath(target, root).replace("\\", "/"),
                 ))
                 imported += 1
@@ -939,6 +982,9 @@ class MoleculesTab(ttk.Frame):
                 text = f.read()
         except IOError as e:
             text = "(failed to read XYZ: {})".format(e)
+        if mol.coords_locked:
+            text = ("# imported coordinates (locked — SMILES generation is "
+                    "disabled for this entry)\n" + text)
         self._set_preview(text)
 
     def _set_preview(self, text):
@@ -1116,12 +1162,14 @@ class MoleculesTab(ttk.Frame):
             clip = ""
         PasteSmilesDialog(self, self.app, initial_text=clip, on_commit=self._add_pasted_molecules)
 
-    def _add_pasted_molecules(self, entries):
-        # type: (list) -> None
-        """Add a list of (smiles, name_or_None) pairs as new molecules. Filenames
-        always default to the next zero-padded numeric (so paths stay free of
-        whitespace and special characters that SLURM/SUSE may choke on).
-        Charge & multiplicity auto-filled from each SMILES via RDKit."""
+    def _add_smiles_entries(self, entries):
+        # type: (list) -> list
+        """Append (smiles, name_or_None) pairs as new PENDING molecules (to be
+        generated from SMILES). Filenames are the next zero-padded numeric (so
+        paths stay free of whitespace/special characters SLURM/SUSE may choke on);
+        the name column becomes the display name. Charge & multiplicity are
+        auto-filled from each SMILES via RDKit. Returns the new filenames.
+        Shared by the paste-SMILES dialog and SMILES-list file import."""
         added = []
         for smiles, name in entries:
             smiles = (smiles or "").strip()
@@ -1130,15 +1178,20 @@ class MoleculesTab(ttk.Frame):
             fname = self._next_numeric_filename()
             charge, mult = coords_mod.smiles_charge_and_mult(smiles)
             display_name = (name or "").strip() or smiles
-            mol = Molecule(
+            self.app.project.molecules.append(Molecule(
                 name=display_name,
                 filename=fname,
                 smiles=smiles,
                 charge=charge if charge is not None else 0,
                 multiplicity=mult if mult is not None else 1,
-            )
-            self.app.project.molecules.append(mol)
+            ))
             added.append(fname)
+        return added
+
+    def _add_pasted_molecules(self, entries):
+        # type: (list) -> None
+        """Add a list of (smiles, name_or_None) pairs as new molecules."""
+        added = self._add_smiles_entries(entries)
         if added:
             self.app.mark_dirty()
             self.refresh()

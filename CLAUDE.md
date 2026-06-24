@@ -74,6 +74,18 @@ off the core path and gracefully degradable.
 - **Right-click a finished OPT** → open optimised geometry / trajectory movie
   (via shared `open_xyz_3d`, → molden on gateway). (`ui/calculations_tab.py`,
   `ui/molecules_tab.py`)
+- **Import/recipe improvements** (branch `import-and-recipes-improvements`) —
+  (a) file-imported structures carry `Molecule.coords_locked` so SMILES
+  generation can't overwrite the original geometry (refused with a note; delete +
+  re-add to use SMILES); recovered jobs lock too when an xyz was found.
+  (b) `.smi/.smiles/.csv` SMILES-list files import as *pending* molecules to
+  generate (`coords.read_smiles_file`, reusing `parse_smiles_list`).
+  (c) write-only/input-deck formats (e.g. `.acesin`) get a last-resort
+  `Label x y z` salvage (`coords.heuristic_atoms_from_text`, flagged "VERIFY").
+  (d) **multiple recipe directories**: `Project.recipe_dirs` (the `<builtin>`
+  sentinel keeps project.json portable), `inputs.load_recipes_from_dirs` (global
+  name dedup), Recipes menu *Add*/*Manage* dirs, and the tab groups recipes under
+  per-folder dividers while search/sort span all of them.
 - **UI polish** — Ctrl+Shift+N, ASCII button labels, Calc/Recipes scrollbars.
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven

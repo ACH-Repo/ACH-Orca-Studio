@@ -21,6 +21,7 @@ from orca_workbench.core.inputs import Recipe
 from orca_workbench.core.project import Project, load_project, save_project
 from orca_workbench.ui import extprog
 from orca_workbench.ui import tooltip as tooltip_mod
+from orca_workbench.ui.modal import make_modal
 from orca_workbench.ui.shortcuts import install_global_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
@@ -30,6 +31,12 @@ DEFAULT_RECIPE_DIR = os.path.join(
     "data",
     "recipes",
 )
+
+# Portable stand-in for the packaged default recipe folder inside a project's
+# recipe_dirs list. Its absolute path is machine-specific (it lives inside the
+# installed package), so we persist this sentinel instead and resolve it to
+# DEFAULT_RECIPE_DIR at load time — keeping project.json shareable.
+DEFAULT_RECIPE_SENTINEL = "<builtin>"
 
 # Auto-created scratch project for a session started without a project file, so
 # unsaved work (and a freshly imported orphan project) is never lost to a crash
@@ -69,7 +76,8 @@ class App(object):
 
         self.project = Project()
         self.recipes = []  # type: List[Recipe]
-        self.recipe_dir = DEFAULT_RECIPE_DIR
+        self.recipe_dir = DEFAULT_RECIPE_DIR          # primary dir (where new recipes save)
+        self.recipe_dirs = [DEFAULT_RECIPE_DIR]       # ordered, resolved dirs the tab shows
         self._dirty = False
         # Email lives in per-user config (~/.orca_workbench.json), NOT in project
         # files — so a shared/published project never carries someone's address.
@@ -147,7 +155,9 @@ class App(object):
 
         recipemenu = tk.Menu(menubar, tearoff=0)
         recipemenu.add_command(label="Reload recipes", command=self.reload_recipes)
-        recipemenu.add_command(label="Set recipe directory...", command=self.on_set_recipe_dir)
+        recipemenu.add_command(label="Add recipe directory...", command=self.on_add_recipe_dir)
+        recipemenu.add_command(label="Manage recipe directories...",
+                               command=self.on_manage_recipe_dirs)
         menubar.add_cascade(label="Recipes", menu=recipemenu)
 
         # Settings — explicit places to set (and fix) external-program paths.
@@ -493,13 +503,32 @@ class App(object):
             if tab is not None and hasattr(tab, "refresh"):
                 tab.refresh()
 
+    def _resolve_recipe_dir(self, d):
+        # type: (str) -> str
+        """Resolve one recipe_dirs entry to an absolute path: the <builtin>
+        sentinel → the packaged default; a relative path → vs the project root;
+        an absolute path is returned as-is."""
+        if d == DEFAULT_RECIPE_SENTINEL:
+            return DEFAULT_RECIPE_DIR
+        if d and not os.path.isabs(d) and self.project.path:
+            return os.path.join(self.project.root(), d)
+        return d
+
     def reload_recipes(self):
-        rdir = self.project.recipe_dir or self.recipe_dir
-        if not os.path.isabs(rdir) and self.project.path:
-            rdir = os.path.join(self.project.root(), rdir)
-        self.recipe_dir = rdir
-        self.recipes = inputs_mod.load_recipes_from_dir(rdir)
-        self.set_status("Loaded {} recipes from {}".format(len(self.recipes), rdir))
+        # Resolve the ordered list of recipe folders (the project's list, or just
+        # the built-in default when none are set). The first folder is the
+        # primary — where New/Duplicate save new recipes.
+        raw = list(self.project.recipe_dirs) or [DEFAULT_RECIPE_SENTINEL]
+        resolved = []
+        for d in raw:
+            rd = self._resolve_recipe_dir(d)
+            if rd and rd not in resolved:
+                resolved.append(rd)
+        self.recipe_dirs = resolved
+        self.recipe_dir = resolved[0] if resolved else DEFAULT_RECIPE_DIR
+        self.recipes = inputs_mod.load_recipes_from_dirs(resolved)
+        self.set_status("Loaded {} recipes from {} folder(s)".format(
+            len(self.recipes), len(resolved)))
         if hasattr(self, "recipes_tab"):
             self.refresh_all_tabs()
 
@@ -605,13 +634,35 @@ class App(object):
         self.set_status("Saved {}".format(path))
         return True
 
-    def on_set_recipe_dir(self):
-        path = filedialog.askdirectory(title="Choose recipe directory")
+    def on_add_recipe_dir(self):
+        """Append a recipe directory to the project (recipes accumulate across
+        folders; the tab groups them with dividers)."""
+        path = filedialog.askdirectory(title="Add recipe directory")
         if not path:
             return
-        self.project.recipe_dir = path
+        dirs = list(self.project.recipe_dirs)
+        if not dirs:
+            # Seed with the built-in default (portable sentinel) so the new folder
+            # is APPENDED to what's already shown rather than replacing it.
+            dirs = [DEFAULT_RECIPE_SENTINEL]
+        if any(self._resolve_recipe_dir(d) == path for d in dirs):
+            self.set_status("That recipe directory is already in the list.")
+            return
+        dirs.append(path)
+        self.project.recipe_dirs = dirs
         self.mark_dirty()
         self.reload_recipes()
+        self.set_status("Added recipe directory: {}".format(path))
+
+    def on_manage_recipe_dirs(self):
+        """Open the dialog to remove / reorder recipe folders or set the primary."""
+        # Ensure there's an explicit list to manage (seed from the current view).
+        if not self.project.recipe_dirs:
+            self.project.recipe_dirs = [DEFAULT_RECIPE_SENTINEL]
+        dlg = _RecipeDirsDialog(self.root, self)
+        if dlg.changed:
+            self.mark_dirty()
+            self.reload_recipes()
 
     def on_about(self):
         messagebox.showinfo(
@@ -694,6 +745,98 @@ def _enable_windows_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+class _RecipeDirsDialog(tk.Toplevel):
+    """Manage the project's ordered recipe folders: remove, reorder, set primary.
+
+    Edits `app.project.recipe_dirs` in place and sets self.changed=True if anything
+    changed (the caller then marks dirty + reloads). The <builtin> sentinel shows
+    as '(built-in default)'; the top entry is the primary where new recipes save."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.changed = False
+        self._dirs = list(app.project.recipe_dirs)
+        self.title("Manage recipe directories")
+
+        ttk.Label(self, text="Recipe folders, in order. The top one is the primary "
+                  "(new recipes are saved there).",
+                  wraplength=440, justify=tk.LEFT).pack(
+                      side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
+
+        body = ttk.Frame(self)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=4)
+        self.listbox = tk.Listbox(body, height=8, width=64, exportselection=False)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.LEFT, fill=tk.Y)
+
+        side = ttk.Frame(body)
+        side.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
+        ttk.Button(side, text="Set primary", command=self._set_primary).pack(fill=tk.X, pady=2)
+        ttk.Button(side, text="Move up", command=lambda: self._move(-1)).pack(fill=tk.X, pady=2)
+        ttk.Button(side, text="Move down", command=lambda: self._move(1)).pack(fill=tk.X, pady=2)
+        ttk.Button(side, text="Remove", command=self._remove).pack(fill=tk.X, pady=2)
+
+        btns = ttk.Frame(self)
+        btns.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+
+        self._render()
+        make_modal(self, parent)
+        self.wait_window()
+
+    def _label(self, d):
+        return "(built-in default)" if d == DEFAULT_RECIPE_SENTINEL else d
+
+    def _render(self, select=0):
+        self.listbox.delete(0, tk.END)
+        for i, d in enumerate(self._dirs):
+            tag = "  [primary]" if i == 0 else ""
+            self.listbox.insert(tk.END, self._label(d) + tag)
+        if self._dirs:
+            sel = max(0, min(select, len(self._dirs) - 1))
+            self.listbox.selection_set(sel)
+            self.listbox.activate(sel)
+
+    def _sel(self):
+        cur = self.listbox.curselection()
+        return cur[0] if cur else None
+
+    def _commit(self, new_sel):
+        self.app.project.recipe_dirs = list(self._dirs)
+        self.changed = True
+        self._render(new_sel)
+
+    def _set_primary(self):
+        i = self._sel()
+        if i is None or i == 0:
+            return
+        self._dirs.insert(0, self._dirs.pop(i))
+        self._commit(0)
+
+    def _move(self, delta):
+        i = self._sel()
+        if i is None:
+            return
+        j = i + delta
+        if 0 <= j < len(self._dirs):
+            self._dirs[i], self._dirs[j] = self._dirs[j], self._dirs[i]
+            self._commit(j)
+
+    def _remove(self):
+        i = self._sel()
+        if i is None:
+            return
+        if len(self._dirs) == 1:
+            messagebox.showinfo("Keep at least one",
+                                "At least one recipe folder must remain.", parent=self)
+            return
+        del self._dirs[i]
+        self._commit(min(i, len(self._dirs) - 1))
 
 
 def _apply_ui_scaling(root):

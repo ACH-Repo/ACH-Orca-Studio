@@ -390,6 +390,11 @@ def import_dir(project, src_dir, save_recipe=None, category="imported",
                 generated=bool(xyz_rel),
                 xyz_path=xyz_rel,
                 method=(meta.get("method") or "imported"),
+                # A recovered initial geometry is the original that was actually
+                # run — lock it so SMILES generation can't overwrite it. When no
+                # xyz could be recovered (pending), leave it unlocked so the user
+                # can still build coords from the SMILES.
+                coords_locked=bool(xyz_rel),
                 gen_status=("ok" if xyz_rel else "pending"))
             project.molecules.append(mol)
             summary["molecules"] += 1

@@ -505,6 +505,58 @@ def is_supported_import_file(path):
     return ext in _EXT_TO_OBABEL
 
 
+# A SMILES-list file holds SMILES (optionally with names) rather than 3D
+# coordinates: importing it creates molecules to GENERATE, not locked structures.
+# (extension, human label) — drives the file dialog.
+SMILES_LIST_FORMATS = [
+    ("smi", "SMILES list"),
+    ("smiles", "SMILES list"),
+    ("csv", "CSV (SMILES + name)"),
+]
+_SMILES_LIST_EXTS = {ext for ext, _ in SMILES_LIST_FORMATS}
+
+
+def is_smiles_list_file(path):
+    # type: (str) -> bool
+    """True if the file's extension is a SMILES-list format (.smi/.smiles/.csv)."""
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    return ext in _SMILES_LIST_EXTS
+
+
+def read_smiles_file(path):
+    # type: (str) -> List[Tuple[str, Optional[str]]]
+    """Read a SMILES-list file (.smi/.smiles/.csv) into (smiles, name) pairs.
+
+    The content is parsed by parse_smiles_list, which handles one-SMILES-per-line,
+    a two-column SMILES+name table (delimiter and column order auto-detected), and
+    a single-line dot-separated paste. When RDKit is available, entries whose
+    SMILES doesn't parse are dropped — this transparently skips a header row
+    (e.g. 'smiles,name') and any stray non-SMILES lines. Without RDKit we can't
+    tell, so everything parse_smiles_list returns is kept.
+
+    Raises CoordGenError if the file can't be read or yields no usable SMILES.
+    """
+    if not os.path.isfile(path):
+        raise CoordGenError("File not found: {}".format(path))
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        raise CoordGenError("Could not read {}: {}".format(path, e))
+    pairs = parse_smiles_list(text)
+    # When RDKit is available, keep only entries that actually parse — this drops
+    # a header row ('smiles,name'), stray columns, and rejects a non-SMILES CSV
+    # outright (rather than turning its rows into junk molecules). Without RDKit
+    # we can't tell, so we keep whatever parse_smiles_list returned.
+    if smiles_is_valid("C"):   # True only if RDKit is importable
+        pairs = [(s, n) for s, n in pairs if smiles_is_valid(s)]
+    if not pairs:
+        raise CoordGenError(
+            "No valid SMILES found in {} (expected one SMILES per line, or a "
+            "SMILES,name table).".format(os.path.basename(path)))
+    return pairs
+
+
 def import_dialog_filetypes():
     # type: () -> list
     """Tk `filetypes` for the import dialog: an 'all coordinate files' entry first,
@@ -512,6 +564,10 @@ def import_dialog_filetypes():
     list has a single source of truth and stays testable."""
     all_pat = " ".join("*.{}".format(ext) for ext, _, _ in SUPPORTED_IMPORT_FORMATS)
     types = [("Coordinate files", all_pat)]
+    # SMILES-list files are a separate group: importing them creates molecules to
+    # generate (not locked structures), so keep the intent visibly distinct.
+    smi_pat = " ".join("*.{}".format(ext) for ext, _ in SMILES_LIST_FORMATS)
+    types.append(("SMILES lists ({})".format(smi_pat), smi_pat))
     for ext, _fmt, label in SUPPORTED_IMPORT_FORMATS:
         types.append(("{} (*.{})".format(label, ext), "*.{}".format(ext)))
     types.append(("All files", "*.*"))
@@ -635,6 +691,79 @@ def _read_with_rdkit(path, fmt):
         return None, "RDKit failed: {}: {}".format(type(e).__name__, e)
 
 
+# --- heuristic Cartesian-block salvage (for write-only / input-deck formats) ---
+#
+# Some formats OpenBabel can only WRITE (input decks like ACES's .acesin, and
+# various output files) still contain a plain "Label x y z" Cartesian block
+# somewhere in the text. Rather than refuse them outright, we scan for the
+# longest run of lines that have the same footprint as an .xyz body and lift the
+# coordinates out — flagged as heuristic so the user knows to verify them.
+
+# Element symbols (upper-cased) we accept as an atom label; gates out numeric
+# tables (gradients, basis sets) that would otherwise look float-shaped.
+_HEUR_ELEMENTS = {s.upper() for s in _PERIODIC_TABLE[1:]}
+# A coordinate token: must carry a decimal point (rejects integer index columns);
+# accepts Fortran 'D' exponents (1.23D-01).
+_HEUR_FLOAT = r"[-+]?(?:\d+\.\d*|\.\d+)(?:[eEdD][-+]?\d+)?"
+# An atom line: element symbol (+ optional index digits) then EXACTLY three
+# coordinates, end of line. Requiring exactly three rejects e.g. GAMESS's
+# "C 6.0 x y z" (symbol, nuclear charge, then coords).
+_HEUR_ATOM_RE = re.compile(
+    r"^\s*([A-Za-z]{1,2})\d*\s+(" + _HEUR_FLOAT + r")\s+(" + _HEUR_FLOAT
+    + r")\s+(" + _HEUR_FLOAT + r")\s*$")
+
+
+def _heur_float(tok):
+    # type: (str) -> float
+    return float(tok.replace("D", "E").replace("d", "e"))
+
+
+def heuristic_atoms_from_text(text):
+    # type: (str) -> List[Atom]
+    """Salvage a Cartesian block from arbitrary text by footprint matching.
+
+    Returns the longest contiguous run of lines shaped like an .xyz body
+    (`<element> x y z`), as Atom tuples; [] if no run of at least two such lines
+    exists. The element-symbol gate means a numeric table (gradient components,
+    basis-set exponents) is not mistaken for coordinates."""
+    best = []      # type: List[Atom]
+    run = []       # type: List[Atom]
+    for line in text.split("\n"):
+        m = _HEUR_ATOM_RE.match(line)
+        if m and m.group(1).upper() in _HEUR_ELEMENTS:
+            run.append((m.group(1), _heur_float(m.group(2)),
+                        _heur_float(m.group(3)), _heur_float(m.group(4))))
+        else:
+            if len(run) > len(best):
+                best = run
+            run = []
+    if len(run) > len(best):
+        best = run
+    return best if len(best) >= 2 else []
+
+
+def _try_heuristic_file(path, fmt):
+    # type: (str, str) -> Optional[list]
+    """Last-resort reader: text-scan a file for an embedded xyz-footprint block.
+    Returns [(atoms, meta)] with heuristic provenance, or None (no block / binary
+    file / unreadable). Capped read — a coordinate block is small and near the top."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(1024 * 1024)
+    except OSError:
+        return None
+    if b"\x00" in raw:
+        return None   # looks binary — don't text-scan it
+    atoms = heuristic_atoms_from_text(raw.decode("utf-8", "replace"))
+    if not atoms:
+        return None
+    meta = {"name": os.path.splitext(os.path.basename(path))[0],
+            "source": "heuristic",
+            "comment": "coordinates heuristically extracted from .{} - VERIFY "
+                       "before use".format(fmt)}
+    return [(atoms, meta)]
+
+
 def read_structures(path, fmt=None, timeout=IMPORT_READ_TIMEOUT_S):
     # type: (str, Optional[str], float) -> List[Tuple[List[Atom], Optional[dict]]]
     """Read ALL structures (records/frames) from a coordinate file.
@@ -661,9 +790,15 @@ def read_structures(path, fmt=None, timeout=IMPORT_READ_TIMEOUT_S):
     # spawning a worker per file. (Only when we could query the format list.)
     informats = _openbabel_informats()
     if informats is not None and fmt not in informats:
+        # OpenBabel can't read this format (write-only/input-deck/output). Before
+        # giving up, try to salvage a Cartesian block from the text (e.g. .acesin).
+        heur = _try_heuristic_file(path, fmt)
+        if heur:
+            return heur
         raise CoordGenError(
             "'{}' is not a readable structure format - OpenBabel can only write "
-            "it, not read it (it's an input-deck/output/non-coordinate format).".format(fmt))
+            "it, not read it (it's an input-deck/output/non-coordinate format). "
+            "No xyz-style coordinate block was found to salvage either.".format(fmt))
 
     structs, ob_err = _read_with_openbabel(path, fmt, timeout=timeout)
     if structs:
@@ -671,6 +806,10 @@ def read_structures(path, fmt=None, timeout=IMPORT_READ_TIMEOUT_S):
     rd_structs, rd_err = _read_with_rdkit(path, fmt)
     if rd_structs:
         return rd_structs
+    # Both proper readers failed — last-resort heuristic salvage.
+    heur = _try_heuristic_file(path, fmt)
+    if heur:
+        return heur
     raise CoordGenError(
         "Could not read {} (format '{}').\n  OpenBabel: {}\n  RDKit: {}".format(
             path, fmt, ob_err or "no structures returned", rd_err or "no reader"))

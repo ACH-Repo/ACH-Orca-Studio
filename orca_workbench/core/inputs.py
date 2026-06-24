@@ -117,6 +117,28 @@ def load_recipes_from_dir(dirpath):
     return recipes
 
 
+def load_recipes_from_dirs(dirs):
+    # type: (List[str]) -> List[Recipe]
+    """Load recipes from several directories in order, merged into one list with
+    GLOBAL name de-duplication (a recipe's `name` is its app-wide identity — see
+    load_recipes_from_dir). The first directory to define a name wins; a later
+    folder claiming the same name is skipped with a warning. Each Recipe keeps its
+    source_path, so the UI can group the merged list back by folder."""
+    recipes = []
+    seen = {}  # name -> source path kept
+    for d in dirs:
+        for r in load_recipes_from_dir(d):
+            if r.name in seen:
+                sys.stderr.write(
+                    "orca_workbench: skipping duplicate recipe name {!r} from a later "
+                    "recipe folder\n  ignored: {}\n  kept:    {}\n".format(
+                        r.name, r.source_path, seen[r.name]))
+                continue
+            seen[r.name] = r.source_path
+            recipes.append(r)
+    return recipes
+
+
 def save_recipe(recipe, dirpath):
     # type: (Recipe, str) -> str
     """Write a recipe to disk and return the file path. Stamps created_at on
