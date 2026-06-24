@@ -588,13 +588,7 @@ def _read_with_openbabel(path, fmt, timeout=IMPORT_READ_TIMEOUT_S):
     structs = []
     for s in data.get("structures", []):
         atoms = [(a[0], float(a[1]), float(a[2]), float(a[3])) for a in s.get("atoms", [])]
-        meta = _meta_from_title(s.get("name"), path)
-        perceived = s.get("smiles")
-        if perceived:
-            if meta is None:
-                meta = {}
-            meta.setdefault("smiles", perceived)   # title's SMILES wins if it had one
-        structs.append((atoms, meta))
+        structs.append((atoms, _meta_from_title(s.get("name"), path)))
     return structs, None
 
 

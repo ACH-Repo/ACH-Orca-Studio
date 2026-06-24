@@ -174,13 +174,14 @@ def test_meta_from_title_truncated_json_dropped():
     assert coords._meta_from_title('{"name": "x"') is None        # unterminated
 
 
-def test_perceived_smiles_filled_from_geometry(tmp_path):
-    # For a structure whose title carries no SMILES, OpenBabel perceives one from
-    # the 3D geometry so the molecule's SMILES field still populates.
+def test_no_fabricated_smiles_for_titleless_format(tmp_path):
+    # A geometry file with no SMILES in its title must NOT get a perceived/guessed
+    # SMILES (OpenBabel's 3D bond-order perception is unreliable) — better blank.
     if coords._openbabel_informats() is None:
         pytest.skip("OpenBabel not available")
     structs = coords.read_structures(_write(tmp_path / "two.sdf", SDF_TWO_RECORDS))
-    assert structs[0][1] and structs[0][1].get("smiles")
+    for _atoms, meta in structs:
+        assert not (meta or {}).get("smiles")
 
 
 def test_unreadable_format_fast_rejected(tmp_path):
