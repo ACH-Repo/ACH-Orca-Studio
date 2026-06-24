@@ -31,6 +31,11 @@ DEFAULT_RECIPE_DIR = os.path.join(
     "recipes",
 )
 
+# Auto-created scratch project for a session started without a project file, so
+# unsaved work (and a freshly imported orphan project) is never lost to a crash
+# or an accidental close. Lives in the launch directory; superseded by Save As.
+TEMPSAVE_NAME = "tempsave.json"
+
 
 def _maximize(root):
     # type: (tk.Tk) -> None
@@ -98,6 +103,32 @@ class App(object):
 
         if project_path:
             self._open_project_path(project_path)
+        else:
+            self._init_tempsave()
+
+    def _init_tempsave(self):
+        """No project file was opened: bind the session to an autosaving
+        tempsave.json in the launch dir so unsaved work survives a crash/close.
+        If one already exists (a prior unsaved session), offer to resume it."""
+        path = os.path.abspath(os.path.join(os.getcwd(), TEMPSAVE_NAME))
+        if os.path.isfile(path):
+            if messagebox.askyesno(
+                    "Resume previous session?",
+                    "An unsaved session was found in this folder:\n{}\n\n"
+                    "Resume it?\n\n(No = start a new project; this file will be "
+                    "overwritten.)".format(path)):
+                self._open_project_path(path)
+                return
+        self.project = Project(path=path)
+        try:
+            save_project(self.project)
+        except Exception as e:
+            self.set_status("Could not create {}: {}".format(TEMPSAVE_NAME, e))
+            return
+        self.refresh_all_tabs()
+        self.mark_clean()
+        self.set_status("Autosaving to {} - use File > Save As for a permanent "
+                        "project.".format(TEMPSAVE_NAME))
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
@@ -483,12 +514,19 @@ class App(object):
         if not self._confirm_discard():
             return
         with diag.timed("project:new"):
-            self.project = Project()
+            # Bind the new project to a tempsave in the launch dir so autosave
+            # covers it immediately (no "forgot to Save" data loss).
+            self.project = Project(path=os.path.abspath(
+                os.path.join(os.getcwd(), TEMPSAVE_NAME)))
+            try:
+                save_project(self.project)
+            except Exception:
+                pass
             # Email is per-user config, not per-project — leave the field as-is.
             self.reload_recipes()
             self.refresh_all_tabs()
         self.mark_clean()
-        self.set_status("New empty project.")
+        self.set_status("New project (autosaving to {}).".format(TEMPSAVE_NAME))
 
     def on_open(self):
         if not self._confirm_discard():
@@ -542,6 +580,7 @@ class App(object):
         return True
 
     def on_save_as(self):
+        prev = self.project.path
         path = filedialog.asksaveasfilename(
             title="Save project as",
             defaultextension=".json",
@@ -554,6 +593,14 @@ class App(object):
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return False
+        # If we were autosaving to a tempsave.json, it's now superseded — remove it
+        # so it doesn't linger and re-prompt on the next launch in this folder.
+        if (prev and os.path.basename(prev) == TEMPSAVE_NAME
+                and os.path.abspath(prev) != os.path.abspath(path)):
+            try:
+                os.remove(prev)
+            except OSError:
+                pass
         self.mark_clean()
         self.set_status("Saved {}".format(path))
         return True

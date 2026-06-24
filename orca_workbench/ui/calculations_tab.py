@@ -1332,14 +1332,16 @@ class CalculationsTab(ttk.Frame):
                 s["already"], len(s["unlinked"]), note))
 
     def on_import_calcs(self):
-        """Import a directory of standalone .inp (+ outputs) as molecules/calcs."""
+        """Import a directory of standalone .inp (+ outputs) as molecules/calcs,
+        then auto-detect job ids. One-shot recovery for a project whose save file
+        was lost: point it at the parent dir holding calcs/ (and XYZ_INI/)."""
         src = filedialog.askdirectory(title="Import ORCA .inp files from directory")
         if not src:
             return
 
         def _persist(recipe):
-            # Save to the recipe dir and register on the app, unless the name
-            # already exists (re-import) — then reuse the existing one.
+            # Save a newly-reconstructed recipe and register it, unless that name
+            # already exists (re-import) — then reuse it.
             if self.app.get_recipe(recipe.name) is not None:
                 return
             try:
@@ -1348,22 +1350,48 @@ class CalculationsTab(ttk.Frame):
                 self._log("Import: could not save recipe {!r}: {}".format(recipe.name, e))
             self.app.recipes.append(recipe)
 
-        s = discovery_mod.import_dir(self.app.project, src, save_recipe=_persist)
-        self._log("Import: scanned {}, imported {}, skipped {} (already present), "
-                  "{} had outputs, {} new recipe(s).".format(
-                      s["scanned"], s["imported"], s["skipped"],
-                      s["with_output"], len(s["new_recipes"])))
+        # If the source ships its own recipes/ (the app writes one there), load them
+        # first so reconstructed calcs reuse the real recipes instead of duplicating.
+        src_recipes = os.path.join(src, "recipes")
+        if os.path.isdir(src_recipes):
+            have = {r.name for r in self.app.recipes}
+            added = 0
+            for r in inputs_mod.load_recipes_from_dir(src_recipes):
+                if r.name not in have:
+                    self.app.recipes.append(r)
+                    have.add(r.name)
+                    added += 1
+            if added:
+                self._log("Import: loaded {} recipe(s) from {}".format(added, src_recipes))
+
+        s = discovery_mod.import_dir(self.app.project, src, save_recipe=_persist,
+                                     existing_recipes=self.app.recipes)
+        self._log("Import: scanned {}, imported {} calc(s) in {} molecule(s), "
+                  "skipped {} (already present), {} had outputs, {} reconstructed "
+                  "geometry, {} new recipe(s).".format(
+                      s["scanned"], s["imported"], s["molecules"], s["skipped"],
+                      s["with_output"], s["reconstructed_xyz"], len(s["new_recipes"])))
         for err in s["errors"]:
             self._log("  ! " + err)
+
+        relinked = 0
         if s["imported"]:
             self.app.mark_dirty()
+            # Combined import + detect: recover job ids in the same action.
+            namemap = slurm_runtime.query_name_map()
+            rs = discovery_mod.relink_project(self.app.project, name_to_jobid=namemap)
+            relinked = rs["changed"]
+            self._log("Detect jobs: linked {} ({} from files, {} from queue).".format(
+                rs["changed"], rs["from_files"], rs["from_queue"]))
             self.app.refresh_all_tabs()
         self.on_refresh_status()
         messagebox.showinfo(
             "Import calcs",
-            "Imported {} calculation(s) from\n{}\n\n"
-            "{} already in the project (skipped); {} have outputs ready to harvest.".format(
-                s["imported"], src, s["skipped"], s["with_output"]))
+            "Imported {} calculation(s) in {} molecule(s) from\n{}\n\n"
+            "{} already present (skipped); {} have outputs ready to harvest; "
+            "{} geometry/geometries reconstructed; {} job id(s) linked.".format(
+                s["imported"], s["molecules"], src, s["skipped"], s["with_output"],
+                s["reconstructed_xyz"], relinked))
 
     # --------------------------------------------------- unattended (dependency chain)
 
@@ -1988,10 +2016,74 @@ class CalculationsTab(ttk.Frame):
                 menu.add_command(label="Open trajectory as movie",
                                  command=lambda p=trj: self._open_3d(p))
 
+        # Manual dependency re-linking — e.g. after importing a project whose save
+        # file was lost, point a flat NMR/FREQ calc at its OPT as the parent so it
+        # inherits the optimised geometry. (Affects future rebuilds, not the run
+        # that already happened.)
+        if len(calcs) == 1:
+            one = calcs[0]
+            menu.add_separator()
+            menu.add_command(label="Set parent (inherit another calc's geometry)...",
+                             command=lambda c=one: self._set_parent_interactive(c))
+            if one.parent_id:
+                menu.add_command(label="Clear parent",
+                                 command=lambda c=one: self._clear_parent(c))
+
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _descendant_ids(self, calc):
+        """Ids of calcs reachable from `calc` via parent_id links (to avoid making
+        a calc its own ancestor when re-linking)."""
+        out = set()
+        stack = [calc.id]
+        while stack:
+            cur = stack.pop()
+            for c in self.app.project.planned_calcs:
+                if c.parent_id == cur and c.id not in out:
+                    out.add(c.id)
+                    stack.append(c.id)
+        return out
+
+    def _set_parent_interactive(self, calc):
+        desc = self._descendant_ids(calc)
+        cands = [c for c in self.app.project.planned_calcs
+                 if c.molecule_filename == calc.molecule_filename
+                 and c.id != calc.id and c.id not in desc]
+        if not cands:
+            messagebox.showinfo(
+                "Set parent",
+                "No other calculation for molecule '{}' to use as a parent.".format(
+                    calc.molecule_filename))
+            return
+
+        def _label(c):
+            r = self.app.get_recipe(c.recipe_name)
+            ct = r.calctype if r else "?"
+            return "{} | {} | {}".format(ct, c.recipe_name, c.category)
+
+        chosen = _ChooseCalcDialog(self, calc, cands, _label).result
+        if chosen is None:
+            return
+        calc.parent_id = chosen.id
+        calc.geometry_source = "parent:" + chosen.id
+        if not calc.job_id:
+            calc.exported = False   # a not-yet-run calc must rebuild from the new geom
+        self.app.mark_dirty()
+        self.refresh()
+        self._log("Set parent of {} -> {}".format(self._short(calc), self._short(chosen)))
+
+    def _clear_parent(self, calc):
+        calc.parent_id = None
+        if calc.geometry_source.startswith("parent:"):
+            calc.geometry_source = "initial"
+        if not calc.job_id:
+            calc.exported = False
+        self.app.mark_dirty()
+        self.refresh()
+        self._log("Cleared parent of {}".format(self._short(calc)))
 
     def _calc_file(self, calc, name):
         """Absolute path to <rundir>/<name> if it exists, else None."""
@@ -2162,3 +2254,47 @@ def _ask_choice(parent, title, prompt, choices):
     make_modal(top, parent)
     top.wait_window()
     return result["value"]
+
+
+class _ChooseCalcDialog(tk.Toplevel):
+    """Pick one calculation from a list (used to set a calc's parent manually).
+    self.result is the chosen PlannedCalc, or None if cancelled."""
+
+    def __init__(self, parent, calc, candidates, label_fn):
+        super().__init__(parent)
+        self.result = None
+        self._cands = list(candidates)
+        self.title("Choose parent calculation")
+        ttk.Label(self,
+                  text="Use which calculation's geometry as the parent for this "
+                       "calc?\n(They share molecule '{}'.)".format(calc.molecule_filename),
+                  justify=tk.LEFT).pack(side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
+        frame = ttk.Frame(self)
+        frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12)
+        self.lb = tk.Listbox(frame, height=min(12, max(3, len(self._cands))), width=52)
+        for c in self._cands:
+            self.lb.insert(tk.END, label_fn(c))
+        self.lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.lb.yview)
+        self.lb.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.lb.selection_set(0)
+        btns = ttk.Frame(self)
+        btns.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Set parent", command=self._ok).pack(side=tk.RIGHT, padx=4)
+        self.lb.bind("<Double-Button-1>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self._cancel())
+        make_modal(self, parent)
+        self.wait_window()
+
+    def _ok(self):
+        sel = self.lb.curselection()
+        if not sel:
+            return
+        self.result = self._cands[sel[0]]
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
