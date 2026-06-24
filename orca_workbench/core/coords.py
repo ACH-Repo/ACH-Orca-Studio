@@ -465,13 +465,18 @@ def _openbabel_informats():
     return _obabel_informats_cache or None
 
 
-def _meta_from_title(title):
-    # type: (Optional[str]) -> Optional[dict]
+def _meta_from_title(title, source_path=None):
+    # type: (Optional[str], Optional[str]) -> Optional[dict]
     """Turn a structure's title/comment into metadata. If it's a JSON object
     (our XYZ convention: {"name","smiles","charge","multiplicity",...}) parse it
     so SMILES/charge/etc. pre-fill the molecule on import; otherwise treat it as
     a plain display name. Lets embedded info ride along from any format that keeps
-    a title line, for free."""
+    a title line, for free.
+
+    Guard: OpenBabel defaults a missing title to the input file path/name for many
+    formats (.hin, .gzmat, ...). That's not a molecule name, so a path-like or
+    filename-equal title is dropped — the caller then falls back to the clean
+    filename instead of stamping a full path as the molecule's name."""
     if not title:
         return None
     t = title.strip()
@@ -482,7 +487,13 @@ def _meta_from_title(title):
                 return d
         except ValueError:
             pass
-    return {"name": title}
+    if "/" in t or "\\" in t:
+        return None
+    if source_path:
+        base = os.path.basename(source_path)
+        if t == base or t == os.path.splitext(base)[0]:
+            return None
+    return {"name": t}
 
 
 def is_supported_import_file(path):
@@ -575,7 +586,7 @@ def _read_with_openbabel(path, fmt, timeout=IMPORT_READ_TIMEOUT_S):
     structs = []
     for s in data.get("structures", []):
         atoms = [(a[0], float(a[1]), float(a[2]), float(a[3])) for a in s.get("atoms", [])]
-        structs.append((atoms, _meta_from_title(s.get("name"))))
+        structs.append((atoms, _meta_from_title(s.get("name"), path)))
     return structs, None
 
 
@@ -614,7 +625,7 @@ def _read_with_rdkit(path, fmt):
                 pos = conf.GetAtomPosition(atom.GetIdx())
                 atoms.append((atom.GetSymbol(), float(pos.x), float(pos.y), float(pos.z)))
             name = m.GetProp("_Name").strip() if m.HasProp("_Name") else ""
-            structs.append((atoms, _meta_from_title(name)))
+            structs.append((atoms, _meta_from_title(name, path)))
         if not structs:
             return None, "RDKit found no 3D structures in {}".format(path)
         return structs, None

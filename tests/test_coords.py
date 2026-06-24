@@ -158,6 +158,16 @@ def test_meta_from_title_plain_and_empty():
     assert coords._meta_from_title(None) is None
 
 
+def test_meta_from_title_drops_paths_and_filenames():
+    # OpenBabel often stuffs the input file path/name into the title — not a name.
+    assert coords._meta_from_title("C:/Users/x/input_file.hin") is None
+    assert coords._meta_from_title("/home/x/mol.gzmat") is None
+    assert coords._meta_from_title("input_file.hin", "/some/dir/input_file.hin") is None
+    assert coords._meta_from_title("input_file", "/d/input_file.hin") is None
+    # a genuine name (no separators, not the filename) is still kept
+    assert coords._meta_from_title("Aspirin", "/d/input_file.hin") == {"name": "Aspirin"}
+
+
 def test_unreadable_format_fast_rejected(tmp_path):
     # A write-only OpenBabel format (ADF input deck) must be refused, not hang.
     if not _has_chem_backend():

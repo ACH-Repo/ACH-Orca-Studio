@@ -827,13 +827,25 @@ class MoleculesTab(ttk.Frame):
                 meta = meta or {}
                 fname = self._unique_filename(base)
                 target = os.path.join(root, "XYZ_INI", fname + ".xyz")
+                # If the file being imported already IS the destination (launched
+                # from a folder whose XYZ_INI is the source), don't rewrite it —
+                # that would clobber the original and re-encode its comment.
+                in_place = (os.path.normcase(os.path.abspath(target))
+                            == os.path.normcase(os.path.abspath(path)))
                 try:
-                    coords_mod.write_xyz(target, atoms, meta or None)
+                    if not in_place:
+                        coords_mod.write_xyz(target, atoms, meta or None)
                 except Exception as e:
                     errors.append("{} [#{}]: write failed: {}".format(base_name, idx, e))
                     continue
+                # If the stored name is just the SMILES (common for structures the
+                # app generated from SMILES), don't echo it in the Name column —
+                # use the filename; the SMILES still shows in its own column.
+                mname = meta.get("name")
+                if mname and mname == meta.get("smiles"):
+                    mname = None
                 self.app.project.molecules.append(Molecule(
-                    name=meta.get("name") or fname,
+                    name=mname or fname,
                     filename=fname,
                     smiles=meta.get("smiles"),
                     gen_smiles=meta.get("gen_smiles"),
