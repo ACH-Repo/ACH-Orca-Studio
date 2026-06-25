@@ -1018,6 +1018,7 @@ class CalculationsTab(ttk.Frame):
                 shutil.rmtree(d)
                 n_dirs += 1
                 self._log("DELETED dir {}".format(c.rundir))
+                self._prune_empty_parents(d, root_abs)
             except OSError as e:
                 self._log("DELETE FAILED {}: {}".format(c.rundir, e))
         remove_ids = sel_ids | {c.id for c in orphans}
@@ -1029,6 +1030,23 @@ class CalculationsTab(ttk.Frame):
         self.app.set_status(
             "Deconstructed {} calc(s); deleted {} run dir(s) from disk.".format(
                 len(remove_ids), n_dirs))
+
+    def _prune_empty_parents(self, start_dir, root_abs):
+        """After deleting a calc's run dir, remove any parent dirs that are now
+        empty, walking up toward the project root — so deconstructing a molecule's
+        only calc doesn't leave empty scaffolding (calcs/<mol>/<category>/OPT/ ->
+        ... -> calcs/<mol>/) behind. os.rmdir removes a dir only when it's empty,
+        so the walk stops at the first ancestor that still has siblings; the
+        project root itself is never removed."""
+        parent = os.path.dirname(os.path.abspath(start_dir))
+        while parent != root_abs and parent.startswith(root_abs + os.sep):
+            try:
+                os.rmdir(parent)   # succeeds only if empty -> natural stop on siblings
+            except OSError:
+                break
+            self._log("pruned empty dir {}".format(
+                os.path.relpath(parent, root_abs).replace("\\", "/")))
+            parent = os.path.dirname(parent)
 
     def on_browse_geom(self):
         path = filedialog.askopenfilename(

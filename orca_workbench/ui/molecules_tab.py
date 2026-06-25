@@ -14,7 +14,7 @@ from orca_workbench.core import coords as coords_mod
 from orca_workbench.core import resolve as resolve_mod
 from orca_workbench.core.project import Molecule
 from orca_workbench.ui.depict import smiles_to_photoimage
-from orca_workbench.ui.modal import make_modal
+from orca_workbench.ui.modal import fit_to_content, make_modal
 from orca_workbench.ui.shortcuts import install_text_shortcuts, install_tree_shift_select
 from orca_workbench.ui.tooltip import tip
 
@@ -1574,11 +1574,16 @@ class ResolveNameDialog(tk.Toplevel):
             self.status_var.set("No structure found.")
             self.detail_var.set(res.error or "could not resolve.")
             self._show_suggestions(res.candidates)
+            fit_to_content(self)
             return
         self.status_var.set("Resolved via {}.".format(res.source or "?"))
         self._refresh_detail(res)
         self._render_fragments(res)
         self.add_btn.config(state=tk.NORMAL)
+        # The chooser/suggestions are added after the async resolve, so grow the
+        # dialog to fit them — otherwise they sit below the initial fixed size and
+        # are hidden until the window is dragged larger.
+        fit_to_content(self)
 
     def _refresh_detail(self, res):
         """(Re)draw the detail text + 2D depiction for the result's current
@@ -1686,6 +1691,7 @@ class ResolveNameDialog(tk.Toplevel):
         self.detail_var.set("\n".join(
             "{} {}  ({})".format("OK  " if ok else "FAIL", label, detail)
             for label, ok, detail in rows))
+        fit_to_content(self)
 
     def _retry(self, name):
         self.query_var.set(name)

@@ -68,8 +68,11 @@ class RecipesTab(ttk.Frame):
         b_managefolder = ttk.Button(toolbar, text="Manage folders...",
                                     command=self.app.on_manage_recipe_dirs)
         b_reload = ttk.Button(toolbar, text="Reload library", command=self.app.reload_recipes)
-        for b in (b_new, b_dup, b_del, b_addfolder, b_managefolder, b_reload):
+        for b in (b_new, b_dup, b_addfolder, b_managefolder, b_reload):
             b.pack(side=tk.LEFT, padx=2)
+        # Destructive — placed last (after Reload library) with a wide gap so it
+        # isn't fat-fingered next to the routine buttons.
+        b_del.pack(side=tk.LEFT, padx=(40, 2))
         tip(b_new, "Create a new recipe (a blank skeleton) and select it for editing. It's saved "
                    "immediately — no Save step. Edit it in place; delete it if you don't want it.")
         tip(b_dup, "Duplicate the selected recipe (with '(copy)' appended). The copy appears in "
