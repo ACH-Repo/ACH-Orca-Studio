@@ -16,6 +16,32 @@ from typing import Optional, Tuple
 from orca_workbench.core import coords as _coords  # noqa: F401
 
 
+def _apply_consistent_scale(opts, size):
+    """Make the atom-label font scale consistently with the skeletal bonds across
+    molecules of any size.
+
+    The usual RDKit behaviour is to fit each molecule to the canvas, so a small
+    molecule is blown up (huge labels) and a big one shrunk (tiny labels) — the
+    font-to-bond ratio drifts. Pinning the bond length with `fixedBondLength`
+    fixes the *scale* instead: every depiction draws bonds at the same pixel
+    length (RDKit only shrinks below it when a molecule wouldn't otherwise fit),
+    so the font — which RDKit derives from the bond length — stays proportional.
+    A min/max font clamp is a guard for the shrink-to-fit case. Each option is set
+    defensively since older RDKit builds may lack some of them.
+
+    `fixedBondLength` is tied to the canvas so a larger preview panel draws a
+    correspondingly larger (but still consistent) structure."""
+    bond_px = max(18.0, min(size) / 9.0)
+    for attr, value in (("padding", 0.08),
+                        ("fixedBondLength", bond_px),
+                        ("minFontSize", 9),
+                        ("maxFontSize", 20)):
+        try:
+            setattr(opts, attr, value)
+        except Exception:
+            pass
+
+
 def render_smiles_png(smiles, size=(360, 240)):
     # type: (str, Tuple[int, int]) -> Tuple[Optional[bytes], Optional[str]]
     """Return (png_bytes, None) on success, (None, error_message) on failure."""
@@ -34,10 +60,7 @@ def render_smiles_png(smiles, size=(360, 240)):
         rdDepictor.Compute2DCoords(mol)
         drawer = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
         opts = drawer.drawOptions()
-        try:
-            opts.padding = 0.08
-        except Exception:
-            pass
+        _apply_consistent_scale(opts, size)
         drawer.DrawMolecule(mol)
         drawer.FinishDrawing()
         return drawer.GetDrawingText(), None

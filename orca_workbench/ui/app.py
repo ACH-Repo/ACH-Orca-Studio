@@ -191,6 +191,9 @@ class App(object):
         self.root.bind_all("<Control-o>", lambda e: self.on_open())
         self.root.bind_all("<Control-s>", lambda e: self.on_save())
         self.root.bind_all("<Control-Shift-N>", lambda e: self._add_by_name_shortcut())
+        # Ctrl+I = import structure files (Ctrl+O is taken by Open project).
+        self.root.bind_all("<Control-i>", lambda e: self._import_files_shortcut())
+        self.root.bind_all("<Control-I>", lambda e: self._import_files_shortcut())
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
 
     def _build_layout(self):
@@ -338,6 +341,18 @@ class App(object):
             pass
         if hasattr(tab, "on_add_by_name"):
             tab.on_add_by_name()
+
+    def _import_files_shortcut(self):
+        """Ctrl+I: jump to the Molecules tab and open the Import files dialog."""
+        tab = self._ensure_tab("molecules_tab")
+        if tab is None:
+            return
+        try:
+            self.notebook.select(tab)
+        except Exception:
+            pass
+        if hasattr(tab, "on_import_files"):
+            tab.on_import_files()
 
     def _select_tab(self, attr):
         # type: (str) -> Optional[ttk.Frame]

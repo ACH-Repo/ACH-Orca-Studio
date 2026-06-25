@@ -15,7 +15,7 @@ from orca_workbench.core import resolve as resolve_mod
 from orca_workbench.core.project import Molecule
 from orca_workbench.ui.depict import smiles_to_photoimage
 from orca_workbench.ui.modal import make_modal
-from orca_workbench.ui.shortcuts import install_text_shortcuts
+from orca_workbench.ui.shortcuts import install_text_shortcuts, install_tree_shift_select
 from orca_workbench.ui.tooltip import tip
 
 
@@ -104,7 +104,8 @@ class MoleculesTab(ttk.Frame):
                       "Multi-structure files (e.g. multi-conformer SDF) let you pick one, "
                       "several (0,2,5 / 0-3), or all.\n\n"
                       "SMILES-list files (.smi/.smiles/.csv with SMILES, optionally a name "
-                      "column) are added instead as pending molecules to Generate.")
+                      "column) are added instead as pending molecules to Generate.\n\n"
+                      "Shortcut: Ctrl+I.")
         tip(b_import_dir, "Import every supported structure file in a chosen folder (e.g. a folder "
                           "full of .xyz or .sdf), in one go. Same conversion + conformer handling "
                           "as Import files.")
@@ -163,6 +164,7 @@ class MoleculesTab(ttk.Frame):
         self.tree.bind("<Delete>", lambda e: (self.on_remove(), "break")[1])
         self.tree.bind("<Control-Return>", lambda e: (self.on_generate(), "break")[1])
         self.tree.bind("<Control-KP_Enter>", lambda e: (self.on_generate(), "break")[1])
+        install_tree_shift_select(self.tree)
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
         tip(self.tree, "Molecules in this project.\n\n"

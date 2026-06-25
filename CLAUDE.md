@@ -87,6 +87,14 @@ off the core path and gracefully degradable.
   name dedup), Recipes menu *Add*/*Manage* dirs, and the tab groups recipes under
   per-folder dividers while search/sort span all of them.
 - **UI polish** — Ctrl+Shift+N, ASCII button labels, Calc/Recipes scrollbars.
+  Later on the same import/recipes branch: consistent RDKit depiction font
+  (`depict._apply_consistent_scale` pins `fixedBondLength` so the label font
+  scales with the bonds, not the canvas); **Shift+Up/Down** additive row select
+  across all row tabs (`shortcuts.install_tree_shift_select`, skips dividers);
+  **Ctrl+I** = Import files (Ctrl+O is Open project); Recipes toolbar gains
+  *Add folder*/*Manage folders* buttons, and recipe **Delete** now states plainly
+  it removes the file from disk (folder *unlink* via Manage folders is the
+  non-destructive option).
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR

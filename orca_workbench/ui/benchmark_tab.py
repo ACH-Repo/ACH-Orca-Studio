@@ -22,6 +22,7 @@ from tkinter import messagebox, ttk
 from typing import List
 
 from orca_workbench.core.project import PlannedCalc, new_calc_id
+from orca_workbench.ui.shortcuts import install_tree_shift_select
 from orca_workbench.ui.tooltip import tip
 
 
@@ -152,6 +153,7 @@ class BenchmarkTab(ttk.Frame):
         tree.bind("<<TreeviewSelect>>", lambda e: self._update_count())
         tree.bind("<Control-a>", lambda e: self._select_all(tree))
         tree.bind("<Control-A>", lambda e: self._select_all(tree))
+        install_tree_shift_select(tree)
         tree.bind("<Enter>", lambda e: tree.focus_set(), add="+")
         return tree
 

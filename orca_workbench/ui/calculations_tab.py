@@ -28,6 +28,7 @@ from orca_workbench.core import config as config_mod
 from orca_workbench.core import coords as coords_mod
 from orca_workbench.core import discovery as discovery_mod
 from orca_workbench.core import inputs as inputs_mod
+from orca_workbench.ui.shortcuts import install_tree_shift_select
 from orca_workbench.core import local_runner as local_runner_mod
 from orca_workbench.core import orca_parser
 from orca_workbench.core import provenance as provenance_mod
@@ -262,6 +263,7 @@ class CalculationsTab(ttk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Control-a>", self._select_all)
         self.tree.bind("<Control-A>", self._select_all)
+        install_tree_shift_select(self.tree)
         self.tree.bind("<Control-c>", lambda e: self._copy())
         self.tree.bind("<Control-C>", lambda e: self._copy())
         self.tree.bind("<Control-v>", lambda e: self._paste())

@@ -51,6 +51,44 @@ def install_global_text_shortcuts(root):
     root.bind_class("Text", "<Control-A>", _text_select_all, add="+")
 
 
+def install_tree_shift_select(tree):
+    # type: (tk.Widget) -> None
+    """Bind Shift+Up / Shift+Down on a ttk.Treeview to extend the selection
+    additively toward the previous / next row (and move focus there), the way a
+    file list does. The plain Up/Down arrows still move the selection normally.
+
+    Rows whose iid starts with '__' (e.g. the Recipes tab's '__divider__' folder
+    headers) are non-selectable and are skipped over. The tree should be
+    selectmode='extended'."""
+    tree.bind("<Shift-Up>", lambda e: _tree_shift_extend(e, -1), add="+")
+    tree.bind("<Shift-Down>", lambda e: _tree_shift_extend(e, +1), add="+")
+
+
+def _tree_shift_extend(event, direction):
+    tree = event.widget
+    items = list(tree.get_children(""))
+    if not items:
+        return "break"
+    sel = tree.selection()
+    cur = tree.focus() or (sel[-1] if sel else items[0])
+    if cur not in items:
+        cur = items[0]
+    idx = items.index(cur)
+    # step to the next selectable row in the given direction (skip dividers)
+    j = idx + direction
+    while 0 <= j < len(items) and items[j].startswith("__"):
+        j += direction
+    if j < 0 or j >= len(items):
+        return "break"
+    nitem = items[j]
+    if not cur.startswith("__"):
+        tree.selection_add(cur)
+    tree.selection_add(nitem)
+    tree.focus(nitem)
+    tree.see(nitem)
+    return "break"
+
+
 def _text_select_all(event):
     w = event.widget
     w.tag_remove("sel", "1.0", "end")

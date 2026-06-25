@@ -16,6 +16,7 @@ from orca_workbench.core import orca_parser
 from orca_workbench.core import reporting
 from orca_workbench.core import slurm_runtime
 from orca_workbench.ui.progress import ProgressDialog
+from orca_workbench.ui.shortcuts import install_tree_shift_select
 from orca_workbench.ui.tooltip import tip
 
 
@@ -56,6 +57,7 @@ class ReportTab(ttk.Frame):
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<Control-a>", self._select_all)
         self.tree.bind("<Control-A>", self._select_all)
+        install_tree_shift_select(self.tree)
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
         tip(self.tree, "Calculations that terminated normally (only these have results to "
                        "extract). Multi-select with click / Ctrl+click / Shift+click / Ctrl+A. "

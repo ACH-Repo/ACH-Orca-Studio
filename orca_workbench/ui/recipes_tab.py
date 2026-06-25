@@ -22,7 +22,7 @@ from typing import Optional
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.core.inputs import COORDS_PLACEHOLDER, Recipe
 from orca_workbench.ui import extprog
-from orca_workbench.ui.shortcuts import install_text_shortcuts
+from orca_workbench.ui.shortcuts import install_text_shortcuts, install_tree_shift_select
 from orca_workbench.ui.tooltip import tip
 
 
@@ -60,17 +60,28 @@ class RecipesTab(ttk.Frame):
         b_new = ttk.Button(toolbar, text="New", command=self.on_new)
         b_dup = ttk.Button(toolbar, text="Duplicate", command=self.on_duplicate)
         b_del = ttk.Button(toolbar, text="Delete", command=self.on_delete)
+        b_addfolder = ttk.Button(toolbar, text="Add folder...", command=self.app.on_add_recipe_dir)
+        b_managefolder = ttk.Button(toolbar, text="Manage folders...",
+                                    command=self.app.on_manage_recipe_dirs)
         b_reload = ttk.Button(toolbar, text="Reload library", command=self.app.reload_recipes)
-        for b in (b_new, b_dup, b_del, b_reload):
+        for b in (b_new, b_dup, b_del, b_addfolder, b_managefolder, b_reload):
             b.pack(side=tk.LEFT, padx=2)
         tip(b_new, "Create a new recipe (a blank skeleton) and select it for editing. It's saved "
                    "immediately — no Save step. Edit it in place; delete it if you don't want it.")
         tip(b_dup, "Duplicate the selected recipe (with '(copy)' appended). The copy appears in "
                    "the list right away as its own file; edit it freely without touching the original.")
-        tip(b_del, "Delete the selected recipe(s) — single or bulk. Removes the JSON files. "
-                   "Planned calculations referencing them will show 'recipe missing'.\n\n"
+        tip(b_del, "DELETE the selected recipe(s) — single or bulk. This permanently removes the "
+                   "JSON file(s) from disk; it cannot be undone. Planned calculations referencing "
+                   "them will show 'recipe missing'.\n\nTo stop showing a whole folder WITHOUT "
+                   "deleting any files, use Manage folders instead.\n\n"
                    "Keyboard shortcut: Delete (with the recipe list focused).")
-        tip(b_reload, "Re-scan the recipe directory from disk. Use after editing a recipe file "
+        tip(b_addfolder, "Add another recipe folder to this project. Its recipes are appended to "
+                         "the library and shown under their own divider; new recipes still save to "
+                         "the primary folder. (Same as Recipes menu > Add recipe directory.)")
+        tip(b_managefolder, "Reorder recipe folders, set which is primary (where New/Duplicate "
+                            "save), or UNLINK a folder. Unlinking only removes it from this "
+                            "project's list — it never deletes any files on disk.")
+        tip(b_reload, "Re-scan the recipe folder(s) from disk. Use after editing a recipe file "
                       "externally (double-click → your text editor).")
 
         # Auto-save status indicator, far right.
@@ -136,6 +147,7 @@ class RecipesTab(ttk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Control-a>", self._select_all)
         self.tree.bind("<Control-A>", self._select_all)
+        install_tree_shift_select(self.tree)
         self.tree.bind("<Delete>", lambda e: (self.on_delete(), "break")[1])
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
@@ -540,13 +552,18 @@ class RecipesTab(ttk.Frame):
         recipes = [r for r in recipes if r is not None and r.source_path]
         if not recipes:
             return
+        tail = ("\n\nThis permanently deletes the file(s) from disk and cannot be undone. "
+                "(To stop showing a whole folder without deleting files, cancel and use "
+                "Manage folders.)")
         if len(recipes) == 1:
-            prompt = "Delete '{}'?\n\nFile: {}".format(recipes[0].name, recipes[0].source_path)
+            prompt = "Permanently delete the recipe '{}' from disk?\n\nFile: {}{}".format(
+                recipes[0].name, recipes[0].source_path, tail)
         else:
             preview = "\n".join("  - " + r.name for r in recipes[:8])
             extra = "" if len(recipes) <= 8 else "\n  ... ({} more)".format(len(recipes) - 8)
-            prompt = "Delete {} recipes?\n\n{}{}".format(len(recipes), preview, extra)
-        if not messagebox.askyesno("Delete recipes", prompt):
+            prompt = "Permanently delete {} recipe file(s) from disk?\n\n{}{}{}".format(
+                len(recipes), preview, extra, tail)
+        if not messagebox.askyesno("Delete recipe files", prompt):
             return
         failures = []
         for r in recipes:
