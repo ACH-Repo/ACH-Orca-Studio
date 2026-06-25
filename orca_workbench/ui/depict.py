@@ -30,12 +30,15 @@ def _apply_consistent_scale(opts, size):
     defensively since older RDKit builds may lack some of them.
 
     `fixedBondLength` is tied to the canvas so a larger preview panel draws a
-    correspondingly larger (but still consistent) structure."""
-    bond_px = max(18.0, min(size) / 9.0)
-    for attr, value in (("padding", 0.08),
+    correspondingly larger (but still consistent) structure. RDKit treats it as a
+    maximum: a molecule too big to fit at this bond length is scaled down to fit
+    the pane, so a huge molecule still fits while a small one is drawn at a
+    comfortable size instead of a few tiny lines."""
+    bond_px = max(26.0, min(size) / 6.0)
+    for attr, value in (("padding", 0.06),
                         ("fixedBondLength", bond_px),
-                        ("minFontSize", 9),
-                        ("maxFontSize", 20)):
+                        ("minFontSize", 10),
+                        ("maxFontSize", 26)):
         try:
             setattr(opts, attr, value)
         except Exception:

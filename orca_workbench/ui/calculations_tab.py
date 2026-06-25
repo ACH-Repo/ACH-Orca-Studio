@@ -127,7 +127,7 @@ class CalculationsTab(ttk.Frame):
         b_remove = ttk.Button(bar, text="Remove", command=self.on_remove)
         for b in (b_add, b_derive, b_remove):
             b.pack(side=tk.LEFT, padx=2)
-        b_deconstruct = tk.Button(bar, text="Deconstruct", command=self.on_deconstruct,
+        b_deconstruct = tk.Button(bar, text="DECONSTRUCT", command=self.on_deconstruct,
                                   bg="#c0392b", activebackground="#a93226",
                                   fg="white", activeforeground="white")
         b_deconstruct.pack(side=tk.LEFT, padx=2)

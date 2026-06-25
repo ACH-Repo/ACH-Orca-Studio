@@ -59,7 +59,11 @@ class RecipesTab(ttk.Frame):
         toolbar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=4)
         b_new = ttk.Button(toolbar, text="New", command=self.on_new)
         b_dup = ttk.Button(toolbar, text="Duplicate", command=self.on_duplicate)
-        b_del = ttk.Button(toolbar, text="Delete", command=self.on_delete)
+        # Destructive (removes files from disk) — styled red like the Calculations
+        # tab's DECONSTRUCT so it reads as dangerous, not a routine button.
+        b_del = tk.Button(toolbar, text="DELETE", command=self.on_delete,
+                          bg="#c0392b", activebackground="#a93226",
+                          fg="white", activeforeground="white")
         b_addfolder = ttk.Button(toolbar, text="Add folder...", command=self.app.on_add_recipe_dir)
         b_managefolder = ttk.Button(toolbar, text="Manage folders...",
                                     command=self.app.on_manage_recipe_dirs)

@@ -115,6 +115,30 @@ def test_salt_is_stripped_to_largest_fragment():
     assert res.note and "fragment" in res.note
 
 
+def test_fragments_of_lists_components_largest_first():
+    frags = R.fragments_of("CC(=O)[O-].[Na+]")
+    assert len(frags) == 2
+    assert frags[0]["n_heavy"] >= frags[1]["n_heavy"]   # largest first
+    assert any(f["has_metal"] for f in frags)           # Na flagged as a metal
+    assert not all(f["has_metal"] for f in frags)       # acetate is not
+
+
+def test_resolution_exposes_fragments_for_salt():
+    # The default still keeps the largest fragment, but the others are exposed so
+    # the UI can offer "keep which part" (metal complexes vs counter-ions).
+    get = make_get([("opsin/", (404, "")), ("/cids/", cids(1)),
+                    ("/property/", prop("CCN.Cl"))])
+    res = R.resolve("ethylamine hydrochloride", get=get)
+    assert res.ok and res.smiles == "CCN"               # default unchanged
+    assert len(res.fragments) == 2
+    assert {f["smiles"] for f in res.fragments} >= {"CCN"}
+
+
+def test_single_fragment_has_no_chooser_data():
+    res = R.resolve("CCO", allow_network=False)
+    assert res.ok and res.fragments == []               # nothing to choose
+
+
 def test_stripping_keeps_a_charged_fragment_as_is():
     # honest behaviour: stripping a salt can leave a charged ion; we report it,
     # the user confirms/adjusts charge before adding (no silent neutralisation).

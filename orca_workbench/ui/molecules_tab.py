@@ -105,7 +105,7 @@ class MoleculesTab(ttk.Frame):
                       "several (0,2,5 / 0-3), or all.\n\n"
                       "SMILES-list files (.smi/.smiles/.csv with SMILES, optionally a name "
                       "column) are added instead as pending molecules to Generate.\n\n"
-                      "Shortcut: Ctrl+I.")
+                      "Shortcut: Ctrl+Shift+O.")
         tip(b_import_dir, "Import every supported structure file in a chosen folder (e.g. a folder "
                           "full of .xyz or .sdf), in one go. Same conversion + conformer handling "
                           "as Import files.")
@@ -1520,6 +1520,10 @@ class ResolveNameDialog(tk.Toplevel):
         ttk.Label(det, textvariable=self.detail_var, justify=tk.LEFT, wraplength=300).pack(anchor=tk.NW)
         self.sugg_frame = ttk.Frame(det)
         self.sugg_frame.pack(anchor=tk.NW, pady=4)
+        # Fragment chooser, shown only for multi-component results (salts, complexes).
+        self.frag_var = tk.StringVar(value="")
+        self.frag_frame = ttk.Frame(det)
+        self.frag_frame.pack(anchor=tk.NW, fill=tk.X, pady=2)
 
         btns = ttk.Frame(self)
         btns.pack(fill=tk.X, padx=10, pady=(4, 10))
@@ -1538,6 +1542,7 @@ class ResolveNameDialog(tk.Toplevel):
         self._result = None
         self.add_btn.config(state=tk.DISABLED)
         self._clear_suggestions()
+        self._clear_fragments()
         self.detail_var.set("")
         self.depict_label.config(image="")
         self._img = None
@@ -1564,12 +1569,20 @@ class ResolveNameDialog(tk.Toplevel):
     def _show(self, res):
         if res is None:
             return
+        self._clear_fragments()
         if not res.ok:
             self.status_var.set("No structure found.")
             self.detail_var.set(res.error or "could not resolve.")
             self._show_suggestions(res.candidates)
             return
         self.status_var.set("Resolved via {}.".format(res.source or "?"))
+        self._refresh_detail(res)
+        self._render_fragments(res)
+        self.add_btn.config(state=tk.NORMAL)
+
+    def _refresh_detail(self, res):
+        """(Re)draw the detail text + 2D depiction for the result's current
+        SMILES — called on first show and whenever the fragment choice changes."""
         lines = ["SMILES:  {}".format(res.smiles),
                  "Formula: {}    charge {}".format(
                      res.formula or "?", res.charge if res.charge is not None else "?")]
@@ -1580,7 +1593,54 @@ class ResolveNameDialog(tk.Toplevel):
         img, _err = smiles_to_photoimage(res.smiles, size=(220, 200), master=self.depict_label)
         self._img = img
         self.depict_label.config(image=img if img else "")
-        self.add_btn.config(state=tk.NORMAL)
+
+    def _render_fragments(self, res):
+        """When the structure had several components, offer a radio choice of
+        which fragment to keep (default = the largest, matching res.smiles), plus
+        'keep all'. Fragments containing a metal are flagged so a coordination
+        complex isn't mistaken for a counter-ion to discard."""
+        self._clear_fragments()
+        frags = res.fragments or []
+        if len(frags) <= 1:
+            return
+        ttk.Label(self.frag_frame, text="Multiple fragments — choose which to keep:",
+                  foreground="#555").pack(anchor=tk.W)
+        self.frag_var.set(res.smiles)   # default = largest (already in res.smiles)
+        for f in frags:
+            metal = " [metal]" if f.get("has_metal") else ""
+            label = "{}  charge {}{}".format(f.get("formula") or f["smiles"],
+                                             f.get("charge"), metal)
+            ttk.Radiobutton(self.frag_frame, text=label, value=f["smiles"],
+                            variable=self.frag_var,
+                            command=lambda r=res: self._select_fragment(r)).pack(anchor=tk.W)
+        ttk.Radiobutton(self.frag_frame, text="Keep ALL fragments (multi-component)",
+                        value="__all__", variable=self.frag_var,
+                        command=lambda r=res: self._select_fragment(r)).pack(anchor=tk.W)
+
+    def _select_fragment(self, res):
+        choice = self.frag_var.get()
+        frags = res.fragments or []
+        if choice == "__all__":
+            res.smiles = ".".join(f["smiles"] for f in frags)
+            res.charge = sum(int(f.get("charge") or 0) for f in frags)
+            res.formula = None
+            res.note = "kept ALL {} fragments (multi-component)".format(len(frags))
+        else:
+            f = next((f for f in frags if f["smiles"] == choice), None)
+            if f is None:
+                return
+            res.smiles, res.formula, res.charge = f["smiles"], f.get("formula"), f.get("charge")
+            if f is frags[0]:
+                res.note = ("stripped {} extra fragment(s) (salt/solvent); kept the "
+                            "largest".format(len(frags) - 1))
+            else:
+                res.note = ("kept the selected fragment; dropped the other {}"
+                            .format(len(frags) - 1))
+        self._refresh_detail(res)
+
+    def _clear_fragments(self):
+        for w in self.frag_frame.winfo_children():
+            w.destroy()
 
     def _show_suggestions(self, names):
         self._clear_suggestions()
@@ -1599,6 +1659,7 @@ class ResolveNameDialog(tk.Toplevel):
             return
         self._svc = None
         self._clear_suggestions()
+        self._clear_fragments()
         self.add_btn.config(state=tk.DISABLED)
         self.status_var.set("Testing OPSIN / PubChem reachability …")
         self._pending = True

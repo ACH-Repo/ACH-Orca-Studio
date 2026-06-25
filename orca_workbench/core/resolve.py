@@ -49,6 +49,10 @@ class Resolution:
     charge: Optional[int] = None
     retrieved: Optional[str] = None     # ISO date for web sources
     candidates: List[str] = field(default_factory=list)  # did-you-mean / ambiguity
+    fragments: List[dict] = field(default_factory=list)  # per-fragment breakdown when
+                                      # the resolved structure had >1 component, so the
+                                      # UI can offer "which fragment to keep" (e.g. keep
+                                      # the metal complex cation, not the counter-ion).
     note: Optional[str] = None
     error: Optional[str] = None
 
@@ -102,6 +106,19 @@ def _rdkit():
         return None, None
 
 
+# Metal / metalloid symbols, used only to FLAG coordination-complex fragments in
+# the fragment chooser (so the user keeps the complex, not the counter-ion). It is
+# deliberately NOT used to pick a default — "largest fragment" stays the default,
+# because a metal can equally be a spectator counter-ion (e.g. Na+ in an acetate).
+_METAL_SYMBOLS = {
+    "Li", "Be", "Na", "Mg", "Al", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe",
+    "Co", "Ni", "Cu", "Zn", "Ga", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru",
+    "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
+    "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W",
+    "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi",
+}
+
+
 def sanitize(smiles):
     """RDKit-sanitise + salt-strip to the largest fragment. Returns
     (clean_smiles, formula, charge, n_fragments), or (None, None, None, 0) if
@@ -118,6 +135,32 @@ def sanitize(smiles):
         mol = max(frags, key=lambda m: m.GetNumHeavyAtoms())
     return (Chem.MolToSmiles(mol), desc.CalcMolFormula(mol),
             Chem.GetFormalCharge(mol), n)
+
+
+def fragments_of(smiles):
+    """Per-fragment breakdown of a (possibly multi-component) SMILES, largest
+    heavy-atom count first. Returns [] if RDKit is unavailable or the SMILES won't
+    parse. Each item: {smiles, formula, charge, n_heavy, has_metal}. Lets the UI
+    offer a 'which fragment to keep' choice instead of silently dropping all but
+    the largest — important for coordination complexes where the largest fragment
+    can be the counter-ion, not the metal complex."""
+    Chem, desc = _rdkit()
+    if Chem is None:
+        return []
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return []
+    out = []
+    for f in Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False):
+        out.append({
+            "smiles": Chem.MolToSmiles(f),
+            "formula": desc.CalcMolFormula(f),
+            "charge": Chem.GetFormalCharge(f),
+            "n_heavy": f.GetNumHeavyAtoms(),
+            "has_metal": any(a.GetSymbol() in _METAL_SYMBOLS for a in f.GetAtoms()),
+        })
+    out.sort(key=lambda d: d["n_heavy"], reverse=True)
+    return out
 
 
 def classify(text):
@@ -160,6 +203,7 @@ def _finish(res, raw):
     res.raw_smiles, res.smiles = raw, clean
     res.formula, res.charge = formula, charge
     if n > 1:
+        res.fragments = fragments_of(raw)
         res.note = "stripped {} extra fragment(s) (salt/solvent); kept the largest".format(n - 1)
     return res
 

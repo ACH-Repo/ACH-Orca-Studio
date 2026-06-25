@@ -191,9 +191,8 @@ class App(object):
         self.root.bind_all("<Control-o>", lambda e: self.on_open())
         self.root.bind_all("<Control-s>", lambda e: self.on_save())
         self.root.bind_all("<Control-Shift-N>", lambda e: self._add_by_name_shortcut())
-        # Ctrl+I = import structure files (Ctrl+O is taken by Open project).
-        self.root.bind_all("<Control-i>", lambda e: self._import_files_shortcut())
-        self.root.bind_all("<Control-I>", lambda e: self._import_files_shortcut())
+        # Ctrl+Shift+O = import structure files (plain Ctrl+O is Open project).
+        self.root.bind_all("<Control-Shift-O>", lambda e: self._import_files_shortcut())
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
 
     def _build_layout(self):

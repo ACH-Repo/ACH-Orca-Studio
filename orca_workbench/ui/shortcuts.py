@@ -53,39 +53,56 @@ def install_global_text_shortcuts(root):
 
 def install_tree_shift_select(tree):
     # type: (tk.Widget) -> None
-    """Bind Shift+Up / Shift+Down on a ttk.Treeview to extend the selection
-    additively toward the previous / next row (and move focus there), the way a
-    file list does. The plain Up/Down arrows still move the selection normally.
+    """Bind Shift+Up / Shift+Down on a ttk.Treeview to grow OR shrink a
+    contiguous selection, the way a file list does: an anchor is set where the
+    shift-selection begins, and the selection is always the range between that
+    anchor and the row the arrows have walked to. Reversing direction therefore
+    *deselects* rows back toward the anchor (not just keeps adding). A plain
+    Up/Down or a mouse click drops the anchor, so the next shift-select starts
+    fresh from wherever the focus then is.
 
     Rows whose iid starts with '__' (e.g. the Recipes tab's '__divider__' folder
-    headers) are non-selectable and are skipped over. The tree should be
+    headers) are non-selectable and skipped. The tree should be
     selectmode='extended'."""
     tree.bind("<Shift-Up>", lambda e: _tree_shift_extend(e, -1), add="+")
     tree.bind("<Shift-Down>", lambda e: _tree_shift_extend(e, +1), add="+")
+    # A plain navigation / click ends the current shift-range; clear the anchor so
+    # the next Shift+arrow re-anchors at the (new) focus. add="+" + returning None
+    # leaves Tk's own selection handling intact.
+    for seq in ("<Up>", "<Down>", "<Button-1>"):
+        tree.bind(seq, _tree_clear_anchor, add="+")
+
+
+def _tree_clear_anchor(event):
+    try:
+        event.widget._shift_anchor = None
+    except Exception:
+        pass
+    return None
 
 
 def _tree_shift_extend(event, direction):
     tree = event.widget
-    items = list(tree.get_children(""))
+    # selectable rows only (skip dividers); map iid -> index within them
+    items = [i for i in tree.get_children("") if not i.startswith("__")]
     if not items:
         return "break"
-    sel = tree.selection()
-    cur = tree.focus() or (sel[-1] if sel else items[0])
-    if cur not in items:
-        cur = items[0]
-    idx = items.index(cur)
-    # step to the next selectable row in the given direction (skip dividers)
-    j = idx + direction
-    while 0 <= j < len(items) and items[j].startswith("__"):
-        j += direction
-    if j < 0 or j >= len(items):
-        return "break"
-    nitem = items[j]
-    if not cur.startswith("__"):
-        tree.selection_add(cur)
-    tree.selection_add(nitem)
-    tree.focus(nitem)
-    tree.see(nitem)
+    foc = tree.focus()
+    sel = [s for s in tree.selection() if not s.startswith("__")]
+    lead = foc if foc in items else (sel[-1] if sel else items[0])
+    anchor = getattr(tree, "_shift_anchor", None)
+    if anchor not in items:
+        anchor = lead
+        tree._shift_anchor = anchor
+    li = items.index(lead)
+    ni = li + direction
+    if ni < 0 or ni >= len(items):
+        return "break"           # already at an end
+    ai = items.index(anchor)
+    lo, hi = sorted((ai, ni))
+    tree.selection_set(items[lo:hi + 1])     # exact range anchor..new lead
+    tree.focus(items[ni])
+    tree.see(items[ni])
     return "break"
 
 

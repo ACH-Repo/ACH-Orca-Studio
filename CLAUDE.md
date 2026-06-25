@@ -88,13 +88,17 @@ off the core path and gracefully degradable.
   per-folder dividers while search/sort span all of them.
 - **UI polish** — Ctrl+Shift+N, ASCII button labels, Calc/Recipes scrollbars.
   Later on the same import/recipes branch: consistent RDKit depiction font
-  (`depict._apply_consistent_scale` pins `fixedBondLength` so the label font
-  scales with the bonds, not the canvas); **Shift+Up/Down** additive row select
-  across all row tabs (`shortcuts.install_tree_shift_select`, skips dividers);
-  **Ctrl+I** = Import files (Ctrl+O is Open project); Recipes toolbar gains
-  *Add folder*/*Manage folders* buttons, and recipe **Delete** now states plainly
-  it removes the file from disk (folder *unlink* via Manage folders is the
-  non-destructive option).
+  (`depict._apply_consistent_scale` pins `fixedBondLength` — a max, so small mols
+  draw at a comfortable size and huge ones scale to fit — and the font follows the
+  bonds, not the canvas); **Shift+Up/Down** range row-select across all row tabs
+  (`shortcuts.install_tree_shift_select`, anchor-based so reversing shrinks the
+  range; skips dividers); **Ctrl+Shift+O** = Import files (plain Ctrl+O is Open
+  project); Recipes toolbar gains *Add folder*/*Manage folders* buttons and a red
+  **DELETE** (matching the Calc tab's red **DECONSTRUCT**) that states plainly it
+  removes the file from disk — folder *unlink* via Manage folders is the
+  non-destructive option; and the Add-by-name dialog now shows a **fragment
+  chooser** for multi-component hits (`resolve.fragments_of`) so a coordination
+  complex isn't auto-reduced to its counter-ion (default still = largest fragment).
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR
