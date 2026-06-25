@@ -114,6 +114,21 @@ class App(object):
         else:
             self._init_tempsave()
 
+        # Claim the keyboard at launch. On some window managers (and over
+        # ThinLinc/X) a freshly-mapped maximized window — especially after a
+        # startup messagebox like the tempsave-resume prompt — has mouse focus
+        # but NOT keyboard focus, so arrow / Shift+arrow keys don't reach the
+        # tables until the user alt-tabs out and back. Forcing focus once after
+        # the window is mapped fixes that without the alt-tab dance.
+        self.root.after(80, self._grab_initial_focus)
+
+    def _grab_initial_focus(self):
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+
     def _init_tempsave(self):
         """No project file was opened: bind the session to an autosaving
         tempsave.json in the launch dir so unsaved work survives a crash/close.
