@@ -103,3 +103,96 @@ def test_substitute_masses():
     base = [zpva.M_H, zpva.M_H, zpva.M_H]
     out = zpva.substitute_masses(base, {0: zpva.M_D, 2: zpva.M_D})
     assert out[0] == zpva.M_D and out[1] == zpva.M_H and out[2] == zpva.M_D
+
+
+# --------------------------------------------------------------- spec + plan + assemble
+def test_parse_isotopologue_spec():
+    isos = zpva.parse_isotopologue_spec("6:D,8:D ; 6:D")
+    assert isos[0] == ("base", {})                      # base always first
+    labels = [lab for lab, _ in isos]
+    assert labels == ["base", "6D_8D", "6D"]
+    assert isos[1][1] == {6: zpva.M_D, 8: zpva.M_D}
+    assert isos[2][1] == {6: zpva.M_D}
+
+
+def test_parse_isotopologue_spec_numeric_mass_and_empty():
+    assert zpva.parse_isotopologue_spec("") == [("base", {})]
+    isos = zpva.parse_isotopologue_spec("0:13.00335")
+    assert isos[1][1] == {0: pytest.approx(13.00335)}
+
+
+def _write_diatomic_hess(path):
+    H = np.zeros((6, 6))
+    H[2, 2] = H[5, 5] = 0.5
+    H[2, 5] = H[5, 2] = -0.5
+    out = ["$orca_hessian_file", "", "$hessian", "6"]
+    cols = list(range(6))
+    out.append("   " + "".join("{:>14d}".format(c) for c in cols))
+    for r in range(6):
+        out.append("{:>6d}".format(r) + "".join("{:>16.10f}".format(H[r, c]) for c in cols))
+    out += ["", "$atoms", "2",
+            "H  {:.7f}  0.0 0.0 0.0".format(zpva.M_H),
+            "H  {:.7f}  0.0 0.0 1.4".format(zpva.M_H),
+            "", "$vibrational_frequencies", "6"]
+    for i in range(6):
+        out.append("{:>6d}  0.0".format(i))
+    out += ["", "$end", ""]
+    with open(str(path), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out))
+    return str(path)
+
+
+def test_plan_zpva_structure():
+    h = _diatomic_hess()
+    geoms, man = zpva.plan_zpva(h, "mol", 1.0, [("base", {})],
+                                {"kind": "energy", "target": None}, "X.hess")
+    # 1 shared eq + (1 real mode x +/-) = 3 geometries
+    assert len(geoms) == 3
+    assert geoms[0]["role"] == "eq" and geoms[0]["filename"] == "mol_zpva_eq"
+    assert man["eq_filename"] == "mol_zpva_eq"
+    assert set(man["isotopologues"]) == {"base"}
+    assert len(man["isotopologues"]["base"]["calcs"]) == 2
+
+
+def test_assemble_zpva_end_to_end(tmp_path):
+    hpath = _write_diatomic_hess(tmp_path / "mol.hess")
+    h = hess_mod.parse_hess(hpath)
+    geoms, man = zpva.plan_zpva(h, "mol", 1.0,
+                                zpva.parse_isotopologue_spec("0:D,1:D"),
+                                {"kind": "energy", "target": None}, hpath)
+
+    # Synthetic outputs: a symmetric energy well + a small constant-ish gradient.
+    energies = {}
+    grads = {}
+    for g in geoms:
+        if g["role"] == "eq":
+            energies[g["filename"]] = -76.0
+        else:
+            energies[g["filename"]] = -76.0 + 0.01      # symmetric +/- => harmonic only
+        grads[g["filename"]] = np.full(6, 1e-3)
+
+    def read_out(fn):
+        e = energies.get(fn)
+        return None if e is None else "FINAL SINGLE POINT ENERGY {:.8f}\n".format(e)
+
+    def read_engrad(fn):
+        return grads.get(fn)
+
+    res = zpva.assemble_zpva(man, read_out, read_engrad, hess_path=hpath)
+    assert res["missing"] == []
+    assert res["P_e"] == pytest.approx(-76.0)
+    assert "base" in res["isotopologues"] and "0D_1D" in res["isotopologues"]
+    assert res["isotopologues"]["base"]["shift_vs_base"] == pytest.approx(0.0)
+    # each isotopologue produced a finite ZPVA-corrected value
+    for r in res["isotopologues"].values():
+        assert np.isfinite(r["property_zpva"])
+
+
+def test_assemble_zpva_reports_missing(tmp_path):
+    hpath = _write_diatomic_hess(tmp_path / "mol.hess")
+    h = hess_mod.parse_hess(hpath)
+    _g, man = zpva.plan_zpva(h, "mol", 1.0, [("base", {})],
+                             {"kind": "energy", "target": None}, hpath)
+    # No outputs available at all -> base can't be assembled.
+    res = zpva.assemble_zpva(man, lambda fn: None, lambda fn: None, hess_path=hpath)
+    assert "base" in res["missing"] and res["isotopologues"] == {}

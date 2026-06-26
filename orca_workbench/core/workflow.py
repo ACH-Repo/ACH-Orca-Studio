@@ -64,9 +64,23 @@ NODE_TYPES = {
         "kind": "sink",
         "config": {"name": "report"},
     },
+    # A "builder" is a meta-node that does NOT expand through expand_to_calcs;
+    # it runs its own action (here, the two-step ZPVA builder) from the config
+    # panel. ZPVA reads the .hess of a finished upstream Frequencies job, then
+    # generates the mode-displaced single-points and, once they finish, averages
+    # the chosen property (with optional isotopologue shifts).
+    "zpva": {
+        "label": "ZPVA",
+        "inputs": [("geometry", "geometry")],
+        "outputs": [("results", "results")],
+        "kind": "builder",
+        "config": {"recipe": "", "property": "nmr_shielding", "target": "",
+                   "dq": 1.0, "isotopologues": "", "manifests": []},
+    },
 }
 
 CALC_NODE_TYPES = {t for t, d in NODE_TYPES.items() if d["kind"] == "calc"}
+BUILDER_NODE_TYPES = {t for t, d in NODE_TYPES.items() if d["kind"] == "builder"}
 
 
 # Condition predicates: evaluated at runtime on the .out of the calculation

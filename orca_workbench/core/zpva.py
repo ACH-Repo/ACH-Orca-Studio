@@ -204,6 +204,138 @@ def substitute_masses(base_masses, substitutions):
 
 
 # --------------------------------------------------------------------------
+# isotopologue spec + high-level plan / assemble (the two-step builder core)
+# --------------------------------------------------------------------------
+ISOTOPE_MASSES = {"H": M_H, "D": M_D, "T": 3.0160492777}
+
+
+def parse_isotopologue_spec(text):
+    """Parse a text isotopologue spec into [(label, {atom_index: mass_amu}), ...].
+
+    Format: isotopologues separated by ';'; each is a comma/space list of
+    'index:isotope' where isotope is H/D/T or a numeric amu mass. 0-based atom
+    indices (matching the .hess / xyz order). The base (no substitution)
+    isotopologue is ALWAYS returned first, as the reference for isotope shifts.
+
+      "6:D,8:D ; 6:D"  ->  [("base", {}), ("6D_8D", {6:2.014, 8:2.014}),
+                            ("6D", {6:2.014})]
+    """
+    out = [("base", {})]
+    for chunk in (text or "").split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        subs, toks = {}, []
+        for tok in chunk.replace(",", " ").split():
+            if ":" not in tok:
+                continue
+            idx_s, sym = tok.split(":", 1)
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                continue
+            sym = sym.strip()
+            mass = ISOTOPE_MASSES.get(sym.upper())
+            if mass is None:
+                try:
+                    mass = float(sym)
+                except ValueError:
+                    continue
+            subs[idx] = mass
+            toks.append("{}{}".format(idx, sym.upper() if sym.upper() in ISOTOPE_MASSES else sym))
+        if subs:
+            out.append(("_".join(toks), subs))
+    return out
+
+
+def plan_zpva(hessian, base, dq, isotopologues, property_cfg, hess_path, tol=1.0):
+    """Plan the displaced single-points for a ZPVA run (the 'two-step builder'
+    first step). Pure: returns (geometries, manifest); the caller writes the xyz
+    files / creates the calcs / saves the manifest.
+
+    geometries : list of dicts {filename, isotopologue, mode, sign, coords_ang,
+                 role} — one shared equilibrium ('eq') plus, per isotopologue, the
+                 ±dq displaced points ('disp'). coords_ang is an (N,3) array.
+    manifest   : everything assemble_zpva needs (per-isotopologue masses, real
+                 modes, the filename→(mode,sign) map, the property to extract, and
+                 the path to the shared .hess).
+    """
+    eq_name = "{}_zpva_eq".format(base)
+    geometries = [{"filename": eq_name, "isotopologue": None, "mode": None,
+                   "sign": 0, "coords_ang": hessian.coords_ang, "role": "eq"}]
+    manifest = {"base": base, "hess": hess_path, "dq": float(dq),
+                "symbols": list(hessian.symbols), "property": dict(property_cfg),
+                "eq_filename": eq_name, "isotopologues": {}}
+    for label, subs in isotopologues:
+        masses = substitute_masses(hessian.masses, subs)
+        _coords0, disps, modes = displaced_geometries(hessian, dq=dq, masses_amu=masses, tol=tol)
+        calcs = []
+        for (mode, sign, coords) in disps:
+            tag = "p" if sign > 0 else "m"
+            fname = "{}_zpva_{}_m{:02d}_{}".format(base, label, mode, tag)
+            geometries.append({"filename": fname, "isotopologue": label,
+                               "mode": int(mode), "sign": int(sign),
+                               "coords_ang": coords, "role": "disp"})
+            calcs.append({"filename": fname, "mode": int(mode), "sign": int(sign)})
+        manifest["isotopologues"][label] = {
+            "substitutions": {str(k): float(v) for k, v in subs.items()},
+            "masses_amu": [float(m) for m in masses],
+            "real_modes": [int(i) for i in modes["real"]],
+            "freqs_cm": {str(i): float(modes["freqs_cm"][i]) for i in modes["real"]},
+            "calcs": calcs}
+    return geometries, manifest
+
+
+def assemble_zpva(manifest, read_out, read_engrad_fn, hess_path=None):
+    """Assemble a ZPVA run from finished outputs (the second step). I/O is
+    injected so this stays pure/testable:
+      read_out(filename)        -> the calc's .out text, or None if missing
+      read_engrad_fn(filename)  -> the calc's gradient array, or None if missing
+
+    Returns {P_e, property, isotopologues: {label: {harmonic, anharmonic,
+    correction, property_zpva, shift_vs_base}}, missing: [labels]}.
+    """
+    prop = manifest["property"]
+    kind, target = prop.get("kind"), prop.get("target")
+    dq = manifest["dq"]
+    h = hess_mod.parse_hess(hess_path or manifest["hess"])
+
+    eq_text = read_out(manifest["eq_filename"])
+    P_e = parse_property(eq_text, kind, target) if eq_text else None
+
+    res = {"P_e": P_e, "property": prop, "isotopologues": {}, "missing": []}
+    for label, iso in manifest["isotopologues"].items():
+        real = iso["real_modes"]
+        nm = hess_mod.normal_modes(h, masses_amu=iso["masses_amu"], project=True)
+        modes = {"omega_au": nm["omega_au"], "disp_bohr": nm["disp_bohr"], "real": real}
+        by = {(c["mode"], c["sign"]): c for c in iso["calcs"]}
+        prop_pm, grad_pm, ok = {}, {}, (P_e is not None)
+        for i in real:
+            cp, cm = by.get((i, 1)), by.get((i, -1))
+            if not cp or not cm:
+                ok = False
+                break
+            op, om = read_out(cp["filename"]), read_out(cm["filename"])
+            pp = parse_property(op, kind, target) if op else None
+            pm = parse_property(om, kind, target) if om else None
+            gp, gm = read_engrad_fn(cp["filename"]), read_engrad_fn(cm["filename"])
+            if pp is None or pm is None or gp is None or gm is None:
+                ok = False
+                break
+            prop_pm[i], grad_pm[i] = (pp, pm), (gp, gm)
+        if not ok:
+            res["missing"].append(label)
+            continue
+        res["isotopologues"][label] = zpva_correction(P_e, prop_pm, grad_pm, modes, dq)
+
+    base = res["isotopologues"].get("base")
+    if base is not None:
+        for r in res["isotopologues"].values():
+            r["shift_vs_base"] = r["property_zpva"] - base["property_zpva"]
+    return res
+
+
+# --------------------------------------------------------------------------
 # 1-D numerical validation of the anharmonic prefactor (used by the tests)
 # --------------------------------------------------------------------------
 def selftest(verbose=False):

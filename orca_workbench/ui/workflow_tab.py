@@ -12,6 +12,8 @@ conditional execution comes in a later milestone — for now Generate does a
 static expansion of a condition-free graph.
 """
 
+import csv
+import json
 import os
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -19,7 +21,8 @@ from typing import Optional
 
 from orca_workbench.core import diagnostics as diag
 from orca_workbench.core import workflow as wf_mod
-from orca_workbench.core.project import PlannedCalc, new_calc_id
+from orca_workbench.core.inputs import safe_path_component
+from orca_workbench.core.project import Molecule, PlannedCalc, new_calc_id
 from orca_workbench.ui.tooltip import tip
 
 
@@ -29,7 +32,8 @@ SUMMARY_H = 20   # band under the title for the config summary (recipe / mode / 
 PORT_H = 20
 PORT_R = 5
 
-_KIND_COLOR = {"source": "#cfe8cf", "calc": "#d3e6f5", "sink": "#f0dcc0", "gate": "#ede0c8"}
+_KIND_COLOR = {"source": "#cfe8cf", "calc": "#d3e6f5", "sink": "#f0dcc0", "gate": "#ede0c8",
+               "builder": "#e6d6f2"}
 _BODY = "#fbfbfb"
 _SEL = "#1f6fb2"
 
@@ -84,7 +88,8 @@ class WorkflowTab(ttk.Frame):
         bar = ttk.Frame(self)
         bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(bar, text="Add node:").pack(side=tk.LEFT, padx=(2, 4))
-        for ntype in ("molecules", "optimize", "frequencies", "property", "condition", "report"):
+        for ntype in ("molecules", "optimize", "frequencies", "property", "condition",
+                      "zpva", "report"):
             label = wf_mod.NODE_TYPES[ntype]["label"]
             ttk.Button(bar, text=label, width=max(8, len(label) + 1),
                        command=lambda t=ntype: self._add_node(t)).pack(side=tk.LEFT, padx=1)
@@ -247,6 +252,8 @@ class WorkflowTab(ttk.Frame):
             ent = ttk.Entry(self.cfg_frame, textvariable=var, width=26)
             ent.pack(anchor=tk.W, padx=8, pady=2)
             var.trace_add("write", lambda *_a, n=node, v=var: self._set_cfg(n, "name", v.get()))
+        elif node.type == "zpva":
+            self._build_zpva_panel(node)
 
         if node.type in wf_mod.CALC_NODE_TYPES:
             self._build_results_section(node)
@@ -1065,6 +1072,262 @@ class WorkflowTab(ttk.Frame):
         self._redraw()
         self._build_config_panel()
 
+    # ------------------------------------------------------------- ZPVA builder
+    def _build_zpva_panel(self, node):
+        f = self.cfg_frame
+
+        def labeled_combo(label, key, values, default):
+            ttk.Label(f, text=label).pack(anchor=tk.W, padx=8, pady=(6, 0))
+            var = tk.StringVar(value=node.config.get(key, default))
+            cb = ttk.Combobox(f, textvariable=var, state="readonly", values=list(values), width=26)
+            cb.pack(anchor=tk.W, padx=8, pady=2)
+            cb.bind("<<ComboboxSelected>>", lambda e, k=key, v=var: self._set_cfg(node, k, v.get()))
+
+        def labeled_entry(label, key, default, width=26):
+            ttk.Label(f, text=label).pack(anchor=tk.W, padx=8, pady=(6, 0))
+            var = tk.StringVar(value=str(node.config.get(key, default)))
+            ent = ttk.Entry(f, textvariable=var, width=width)
+            ent.pack(anchor=tk.W, padx=8, pady=2)
+            var.trace_add("write", lambda *_a, k=key, v=var: self._set_cfg(node, k, v.get()))
+
+        labeled_combo("Displaced single-point recipe (property + EnGrad):", "recipe",
+                      [r.name for r in self.app.recipes], "")
+        labeled_combo("Property to ZPVA-correct:", "property",
+                      ("nmr_shielding", "energy", "dipole"), "nmr_shielding")
+        labeled_entry("Target nucleus (NMR: index or element, e.g. 0 or F):", "target", "", 12)
+        labeled_entry("dq (reduced-coordinate step):", "dq", 1.0, 8)
+        labeled_entry("Isotopologues (optional):", "isotopologues", "")
+        ttk.Label(f, text="atom-index:isotope (H/D/T or amu), comma-separated; ';' between "
+                  "isotopologues — e.g. 6:D,8:D ; 6:D. The base (no substitution) is always "
+                  "included as the reference.", foreground="#777", wraplength=220,
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        ttk.Separator(f, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=6)
+        b1 = ttk.Button(f, text="Expand ZPVA (needs finished FREQ)",
+                        command=lambda: self._zpva_expand(node))
+        b1.pack(anchor=tk.W, padx=8, pady=2)
+        tip(b1, "Read the .hess of the finished upstream Frequencies job, generate the +/-dq "
+                "mode-displaced single-points (one shared equilibrium + 2 per real mode per "
+                "isotopologue), and add them as 'zpva' calculations. Build + submit them in the "
+                "Calculations tab as usual.")
+        b2 = ttk.Button(f, text="Assemble ZPVA", command=lambda: self._zpva_assemble(node))
+        b2.pack(anchor=tk.W, padx=8, pady=2)
+        tip(b2, "Once the displaced jobs have finished, average the property over the zero-point "
+                "motion and (if isotopologues were given) report the isotope shifts. Writes a "
+                "report and opens a results window.")
+        ttk.Label(f, text="Wire Frequencies -> ZPVA, run the FREQ job, then Expand. After the "
+                  "displaced jobs finish, Assemble.", foreground="#777", wraplength=220,
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=8, pady=(4, 0))
+
+    def _zpva_freq_node(self, node):
+        """Walk the ZPVA node's geometry input back to the nearest Frequencies
+        node (the one that produces the .hess), or None."""
+        cur = node
+        for _ in range(50):
+            ein = self.wf.edges_into(cur.id, "geometry")
+            if not ein:
+                return None
+            src = self.wf.node(ein[0].src_node)
+            if src is None:
+                return None
+            if src.type == "frequencies":
+                return src
+            cur = src
+        return None
+
+    def _zpva_molecules(self, node):
+        """Molecule filenames feeding this node's network (honouring a Molecules
+        source set to 'selection')."""
+        srcs = self.wf.network_sources([node.id])
+        allm = [m.filename for m in self.app.project.molecules]
+        out = []
+        for sid in srcs:
+            s = self.wf.node(sid)
+            if s is None:
+                continue
+            if s.config.get("mode") == "selection" and s.config.get("filenames"):
+                sel = set(s.config["filenames"])
+                out += [m for m in allm if m in sel]
+            else:
+                out += allm
+        seen, res = set(), []
+        for m in out:
+            if m not in seen:
+                seen.add(m)
+                res.append(m)
+        return res
+
+    def _find_calc_for_node(self, node_id, mol):
+        for c in self.app.project.planned_calcs:
+            if getattr(c, "origin_node", None) == node_id and c.molecule_filename == mol:
+                return c
+        return None
+
+    def _zpva_expand(self, node):
+        from orca_workbench.core import hess as hess_mod
+        from orca_workbench.core import zpva as zpva_mod
+        freq_node = self._zpva_freq_node(node)
+        if freq_node is None:
+            messagebox.showwarning("ZPVA", "Wire a Frequencies node's geometry output into this "
+                                   "ZPVA node first (Molecules -> ... -> Frequencies -> ZPVA).")
+            return
+        recipe = (node.config.get("recipe") or "").strip()
+        if not recipe or self.app.get_recipe(recipe) is None:
+            messagebox.showwarning("ZPVA", "Choose the displaced single-point recipe (it must "
+                                   "request the property AND EnGrad).")
+            return
+        mols = self._zpva_molecules(node)
+        if not mols:
+            messagebox.showwarning("ZPVA", "No molecules feed this pipeline.")
+            return
+        try:
+            dq = float(node.config.get("dq", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            dq = 1.0
+        prop_cfg = {"kind": node.config.get("property", "nmr_shielding"),
+                    "target": (node.config.get("target") or "").strip() or None}
+        isos = zpva_mod.parse_isotopologue_spec(node.config.get("isotopologues", ""))
+        root = self.app.project.root()
+
+        plans, skipped = [], []
+        for mol in mols:
+            fc = self._find_calc_for_node(freq_node.id, mol)
+            if fc is None or not self._calc_done(fc):
+                skipped.append("{}: FREQ not finished".format(mol))
+                continue
+            hess_path = os.path.join(root, fc.rundir or "", mol + ".hess")
+            if not os.path.isfile(hess_path):
+                skipped.append("{}: no .hess in {}".format(mol, fc.rundir or "?"))
+                continue
+            try:
+                hessian = hess_mod.parse_hess(hess_path)
+            except Exception as e:
+                skipped.append("{}: .hess unreadable ({})".format(mol, e))
+                continue
+            molecule = self.app.project.molecule_by_filename(mol)
+            charge = molecule.charge if molecule else 0
+            mult = molecule.multiplicity if molecule else 1
+            hess_rel = os.path.relpath(hess_path, root).replace("\\", "/")
+            geoms, manifest = zpva_mod.plan_zpva(hessian, mol, dq, isos, prop_cfg, hess_rel)
+            manifest["charge"], manifest["multiplicity"], manifest["recipe"] = charge, mult, recipe
+            plans.append((mol, geoms, manifest, charge, mult))
+
+        if not plans:
+            messagebox.showwarning("ZPVA", "Nothing to expand.\n\n" + "\n".join(skipped))
+            return
+        total = sum(len(g) for _m, g, _man, _c, _mu in plans)
+        msg = ("Generate {} displaced single-point(s) across {} molecule(s)?\n\n"
+               "{} isotopologue(s) x real modes x (+/-), plus a shared equilibrium each. "
+               "They become 'zpva' calculations — build + submit them in the Calculations "
+               "tab.".format(total, len(plans), len(isos)))
+        if skipped:
+            msg += "\n\nSkipped:\n  " + "\n  ".join(skipped[:8])
+        if not messagebox.askyesno("Expand ZPVA", msg):
+            return
+
+        manifests_rel, created = [], 0
+        for mol, geoms, manifest, charge, mult in plans:
+            created += self._materialize_zpva(geoms, manifest, recipe, charge, mult, node.id, root)
+            mrel = "ZPVA/{}/zpva_manifest.json".format(safe_path_component(mol))
+            mpath = os.path.join(root, mrel)
+            os.makedirs(os.path.dirname(mpath), exist_ok=True)
+            with open(mpath, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2)
+            manifests_rel.append(mrel)
+        node.config["manifests"] = manifests_rel
+        self._commit()
+        self.app.mark_dirty()
+        self.app.refresh_all_tabs()
+        try:
+            self.app.notebook.select(self.app.calculations_tab)
+        except Exception:
+            pass
+        self.app.set_status("ZPVA: created {} displaced single-point(s). Build + submit them in "
+                            "Calculations, then come back and Assemble.".format(created))
+
+    def _materialize_zpva(self, geoms, manifest, recipe, charge, mult, node_id, root):
+        from orca_workbench.core import coords as coords_mod
+        symbols = manifest["symbols"]
+        base = manifest["base"]
+        sub = safe_path_component(base)
+        n = 0
+        for g in geoms:
+            fname = g["filename"]
+            coords = g["coords_ang"]
+            atoms = [(symbols[k], float(coords[k][0]), float(coords[k][1]), float(coords[k][2]))
+                     for k in range(len(symbols))]
+            xyz_rel = "ZPVA/{}/{}.xyz".format(sub, fname)
+            if self.app.project.molecule_by_filename(fname) is None:
+                coords_mod.write_xyz(os.path.join(root, xyz_rel), atoms,
+                                     {"name": fname, "comment": "ZPVA {} of {}".format(
+                                         g["role"], base)})
+                self.app.project.molecules.append(Molecule(
+                    name=fname, filename=fname, smiles=None, charge=charge, multiplicity=mult,
+                    comment="ZPVA {} geometry of {} (mode {}, sign {})".format(
+                        g["role"], base, g["mode"], g["sign"]),
+                    generated=True, gen_status="ok", method="zpva", coords_locked=True,
+                    xyz_path=xyz_rel))
+            if not any(c.molecule_filename == fname and c.category == "zpva"
+                       for c in self.app.project.planned_calcs):
+                self.app.project.planned_calcs.append(PlannedCalc(
+                    id=new_calc_id(), molecule_filename=fname, recipe_name=recipe,
+                    category="zpva", geometry_source="initial", origin_node=node_id))
+                n += 1
+        return n
+
+    def _zpva_assemble(self, node):
+        from orca_workbench.core import zpva as zpva_mod
+        manifests = node.config.get("manifests") or []
+        if not manifests:
+            messagebox.showinfo("ZPVA", "No ZPVA run for this node yet. Expand ZPVA and run the "
+                                "displaced jobs first.")
+            return
+        root = self.app.project.root()
+        ct = getattr(self.app, "calculations_tab", None)
+        calc_by_fname = {c.molecule_filename: c for c in self.app.project.planned_calcs
+                         if c.category == "zpva"}
+
+        def read_out(fn):
+            c = calc_by_fname.get(fn)
+            p = ct._out_path(c) if (c is not None and ct is not None) else None
+            if not p or not os.path.isfile(p):
+                return None
+            with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+
+        def read_engrad(fn):
+            c = calc_by_fname.get(fn)
+            if c is None or not c.rundir:
+                return None
+            p = os.path.join(root, c.rundir, fn + ".engrad")
+            if not os.path.isfile(p):
+                return None
+            try:
+                return zpva_mod.read_engrad(p)
+            except Exception:
+                return None
+
+        results = []
+        for rel in manifests:
+            mpath = os.path.join(root, rel)
+            if not os.path.isfile(mpath):
+                continue
+            with open(mpath, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            hp = manifest.get("hess", "")
+            hess_abs = hp if os.path.isabs(hp) else os.path.join(root, hp)
+            try:
+                res = zpva_mod.assemble_zpva(manifest, read_out, read_engrad, hess_path=hess_abs)
+            except Exception as e:
+                messagebox.showerror("ZPVA", "Assembly failed for {}: {}".format(
+                    manifest.get("base"), e))
+                continue
+            results.append((manifest.get("base"), manifest, res))
+        if not results:
+            messagebox.showinfo("ZPVA", "No manifests found to assemble.")
+            return
+        _ZpvaResultsWindow(self, results, root)
+
     def _find_existing_calc(self, origin_node, mol, category, recipe_name):
         pc = self.app.project.planned_calcs
         # 1) exact graph-node identity (survives recipe edits on the node)
@@ -1297,3 +1560,138 @@ class WorkflowTab(ttk.Frame):
         driver each tick). Cheap: just a redraw."""
         if self._node_calcs:
             self._redraw()
+
+
+_ZPVA_UNITS = {"nmr_shielding": "ppm", "energy": "Eh", "dipole": "Debye"}
+
+
+class _ZpvaResultsWindow(tk.Toplevel):
+    """Show assembled ZPVA results (per molecule × isotopologue): the static
+    property, the harmonic/anharmonic correction, the ZPVA-averaged value and —
+    when isotopologues were requested — the isotope shift vs the base. Writes a
+    JSON report per molecule plus a combined CSV, and draws a shift/correction
+    bar chart."""
+
+    def __init__(self, parent, results, root):
+        super().__init__(parent)
+        self.title("ZPVA results")
+        self.geometry("820x520")
+        self._results = results            # [(base, manifest, res), ...]
+        self._root = root
+        kind = results[0][2].get("property", {}).get("kind", "")
+        self._unit = _ZPVA_UNITS.get(kind, "")
+
+        ttk.Label(self, text="ZPVA-averaged {} ({}).  P_e = static value; correction = "
+                  "harmonic + anharmonic; shift = vs the base isotopologue.".format(
+                      kind or "property", self._unit or "a.u."),
+                  wraplength=780, foreground="#444").pack(anchor=tk.W, padx=10, pady=(10, 4))
+
+        cols = ("molecule", "isotopologue", "p_e", "harmonic", "anharmonic", "zpva", "shift")
+        heads = ("Molecule", "Isotopologue", "P_e", "Harmonic", "Anharmonic", "<P> (ZPVA)",
+                 "Shift vs base")
+        tree = ttk.Treeview(self, columns=cols, show="headings", height=10)
+        for c, h in zip(cols, heads):
+            tree.heading(c, text=h)
+            tree.column(c, width=110 if c in ("molecule", "isotopologue") else 95,
+                        anchor=tk.W if c in ("molecule", "isotopologue") else tk.E)
+        tree.pack(fill=tk.X, padx=10, pady=4)
+        self._fill_table(tree)
+
+        missing = [lab for _b, _m, r in results for lab in r.get("missing", [])]
+        if missing:
+            ttk.Label(self, text="Incomplete (jobs not finished): {}".format(
+                ", ".join(sorted(set(missing))[:12])), foreground="#b00000",
+                wraplength=780).pack(anchor=tk.W, padx=10)
+
+        self._chart_frame = ttk.Frame(self)
+        self._chart_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        self._draw_chart()
+
+        bar = ttk.Frame(self)
+        bar.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self.status = ttk.Label(bar, text="", foreground="#1a7a1a")
+        self.status.pack(side=tk.LEFT)
+        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self._write_reports()
+
+    def _rows(self):
+        for base, _man, res in self._results:
+            pe = res.get("P_e")
+            for label, r in res.get("isotopologues", {}).items():
+                yield (base, label, pe, r.get("harmonic"), r.get("anharmonic"),
+                       r.get("property_zpva"), r.get("shift_vs_base"))
+
+    @staticmethod
+    def _fmt(v):
+        return "" if v is None else "{:.4f}".format(v)
+
+    def _fill_table(self, tree):
+        for base, label, pe, harm, anh, zp, shift in self._rows():
+            tree.insert("", tk.END, values=(base, label, self._fmt(pe), self._fmt(harm),
+                                            self._fmt(anh), self._fmt(zp), self._fmt(shift)))
+
+    def _draw_chart(self):
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        except Exception as e:
+            ttk.Label(self._chart_frame, text="(chart unavailable: {})".format(e),
+                      foreground="#888").pack()
+            return
+        # Prefer isotope shifts; if there are none (base only), show the corrections.
+        shifts = [("{}:{}".format(b, lab), sh) for b, lab, _pe, _h, _a, _z, sh in self._rows()
+                  if lab != "base" and sh is not None]
+        if shifts:
+            labels, vals = zip(*shifts)
+            title, ylab = "ZPVA isotope shifts", "shift ({})".format(self._unit)
+        else:
+            data = [("{}:{}".format(b, lab), c) for b, lab, _pe, _h, _a, _z, _s in self._rows()
+                    for c in [(_h or 0) + (_a or 0)]]
+            if not data:
+                return
+            labels, vals = zip(*data)
+            title, ylab = "ZPVA corrections", "correction ({})".format(self._unit)
+        fig = Figure(figsize=(7.4, 2.8), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.bar(range(len(vals)), vals, color="#7b5ea7")
+        ax.axhline(0, color="#888", linewidth=0.6)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=40, ha="right", fontsize=7)
+        ax.set_ylabel(ylab)
+        ax.set_title(title, fontsize=10)
+        fig.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=self._chart_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _write_reports(self):
+        wrote = []
+        csv_rows = []
+        for base, _man, res in self._results:
+            jpath = os.path.join(self._root, "ZPVA", "{}_zpva_report.json".format(
+                safe_path_component(base)))
+            try:
+                os.makedirs(os.path.dirname(jpath), exist_ok=True)
+                with open(jpath, "w", encoding="utf-8") as fh:
+                    json.dump(res, fh, indent=2)
+                wrote.append(jpath)
+            except OSError:
+                pass
+        for base, label, pe, harm, anh, zp, shift in self._rows():
+            csv_rows.append({"molecule": base, "isotopologue": label, "P_e": pe,
+                             "harmonic": harm, "anharmonic": anh, "property_zpva": zp,
+                             "shift_vs_base": shift})
+        if csv_rows:
+            cpath = os.path.join(self._root, "ZPVA", "zpva_report.csv")
+            try:
+                with open(cpath, "w", encoding="utf-8", newline="") as fh:
+                    w = csv.DictWriter(fh, fieldnames=["molecule", "isotopologue", "P_e",
+                                       "harmonic", "anharmonic", "property_zpva", "shift_vs_base"])
+                    w.writeheader()
+                    for r in csv_rows:
+                        w.writerow(r)
+                wrote.append(cpath)
+            except OSError:
+                pass
+        if wrote:
+            self.status.configure(text="Wrote {} report file(s) to ZPVA/.".format(len(wrote)))

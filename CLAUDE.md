@@ -99,6 +99,19 @@ off the core path and gracefully degradable.
   non-destructive option; and the Add-by-name dialog now shows a **fragment
   chooser** for multi-component hits (`resolve.fragments_of`) so a coordination
   complex isn't auto-reduced to its counter-ion (default still = largest fragment).
+- **ZPVA workflow node** (branch `zpva-workflow-node`, stacked on the import
+  branch) — the Fim_NMR ZPVA tooling pulled in-app and generalised. Core (pure,
+  numpy, tested): `core/hess.py` (`.hess` parser + `normal_modes` with a
+  `masses_amu` isotopologue override) and `core/zpva.py` (property-agnostic
+  `zpva_correction`, `displaced_geometries`, `plan_zpva`/`assemble_zpva` with
+  injected I/O, `parse_isotopologue_spec`, the 1-D Schrödinger `selftest`). UI: a
+  **ZPVA builder node** (`workflow` kind `builder`, NOT statically expanded). It's
+  two-step — wire `Frequencies -> ZPVA`, run the FREQ, then **Expand ZPVA** reads
+  the `.hess` and drops the ±dq displaced single-points as locked `zpva`-category
+  molecules/calcs (one shared eq + 2·modes per isotopologue); after they finish,
+  **Assemble ZPVA** averages the chosen property (NMR shielding / energy / dipole),
+  reports isotope shifts vs the base, writes JSON+CSV to `ZPVA/`, and shows a
+  table + bar chart. Isotopologues via a text spec (`6:D,8:D ; 6:D`).
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR
@@ -116,5 +129,6 @@ This app grew out of a **ZPVA** study (¹⁹F isotope shifts of deuterated
 4-fluoroimidazole) in `C:\Users\chris\Documents\Claude\Fim_NMR\` on the dev
 machine. Stage 1 concluded: deuteration gives position-resolved, additive ¹⁹F
 shifts (48–351 ppb, all above the 0.03 ppm floor). The reusable tooling from it
-(`hess_tools`, ORCA parsers, job inventory) was deliberately *not* pulled into
-this app — no in-app consumer yet.
+(`hess_tools.py`, `assemble_zpva.py`, `build_zpva_project.py`) has now been ported
+into `core/hess.py` + `core/zpva.py` and exposed as the **ZPVA workflow node**
+(see Recently built) — so the study's pipeline runs end-to-end inside the app.
