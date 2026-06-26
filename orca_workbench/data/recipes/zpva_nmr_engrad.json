@@ -1,0 +1,9 @@
+{
+  "name": "ZPVA NMR + EnGrad (M06-2X, pcSseg-2, DMSO)",
+  "calctype": "NMR",
+  "method_label": "M062X_pcSseg-2",
+  "variant": "ZPVA_EnGrad",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Displaced single point for the ZPVA workflow node.\n# REQUIRED: keep BOTH 'NMR' and 'EnGrad' on the keyword line (the node needs the\n# shielding from the .out AND the analytic gradient from the .engrad), and an\n# %eprnmr block selecting the nucleus you average. Edit method / basis / solvent /\n# nucleus to taste; use the SAME level as the Frequencies job that made the .hess.\n\n! M062X pcSseg-2 AUTOAUX RIJCOSX CPCM(DMSO) NMR EnGrad VeryTightSCF DEFGRID3\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n\n%eprnmr\n   NUCLEI = ALL F { SHIFT }\nEND\n"
+}
