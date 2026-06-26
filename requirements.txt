@@ -10,3 +10,4 @@
 rdkit
 openbabel-wheel
 matplotlib
+numpy

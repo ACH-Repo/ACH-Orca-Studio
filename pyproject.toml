@@ -39,6 +39,7 @@ dependencies = [
     "rdkit",
     "openbabel-wheel",
     "matplotlib",
+    "numpy",
 ]
 
 [project.urls]
