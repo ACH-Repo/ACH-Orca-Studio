@@ -33,7 +33,7 @@ PORT_H = 20
 PORT_R = 5
 
 _KIND_COLOR = {"source": "#cfe8cf", "calc": "#d3e6f5", "sink": "#f0dcc0", "gate": "#ede0c8",
-               "builder": "#e6d6f2"}
+               "builder": "#e6d6f2", "filter": "#cfe6e0"}
 _BODY = "#fbfbfb"
 _SEL = "#1f6fb2"
 
@@ -89,7 +89,7 @@ class WorkflowTab(ttk.Frame):
         bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(bar, text="Add node:").pack(side=tk.LEFT, padx=(2, 4))
         for ntype in ("molecules", "optimize", "frequencies", "property", "condition",
-                      "zpva", "report"):
+                      "filter", "zpva", "report"):
             label = wf_mod.NODE_TYPES[ntype]["label"]
             ttk.Button(bar, text=label, width=max(8, len(label) + 1),
                        command=lambda t=ntype: self._add_node(t)).pack(side=tk.LEFT, padx=1)
@@ -254,6 +254,8 @@ class WorkflowTab(ttk.Frame):
             var.trace_add("write", lambda *_a, n=node, v=var: self._set_cfg(n, "name", v.get()))
         elif node.type == "zpva":
             self._build_zpva_panel(node)
+        elif node.type == "filter":
+            self._build_filter_panel(node)
 
         if node.type in wf_mod.CALC_NODE_TYPES:
             self._build_results_section(node)
@@ -961,16 +963,21 @@ class WorkflowTab(ttk.Frame):
         """Searchable add-node menu (like Blender's Shift+A search). Returns a
         node type string or None. When out_type is given (dragging from an
         output), node types able to accept it are listed first."""
-        order = ["molecules", "optimize", "frequencies", "property", "condition", "report"]
+        # Canonical ordering, but derived from the registry so every node type
+        # (including new ones like ZPVA / Filter) shows up automatically.
+        canonical = ["molecules", "optimize", "frequencies", "property", "condition",
+                     "filter", "zpva", "report"]
+        order = ([t for t in canonical if t in wf_mod.NODE_TYPES]
+                 + [t for t in wf_mod.NODE_TYPES if t not in canonical])
 
         def accepts(ntype):
-            if not out_type:
-                return False
             return any(pt == out_type for _n, pt in wf_mod.NODE_TYPES[ntype]["inputs"])
 
-        all_items = [(wf_mod.NODE_TYPES[t]["label"], t) for t in order]
-        if out_type:
-            all_items.sort(key=lambda it: (not accepts(it[1]),))  # compatible first (stable)
+        # When dragging from an output port, only offer nodes that can ACCEPT that
+        # port's type (context-dependent: a geometry pin won't suggest Report, a
+        # results pin won't suggest Optimize). Unprompted (F3 / right-click) shows all.
+        types = [t for t in order if accepts(t)] if out_type else order
+        all_items = [(wf_mod.NODE_TYPES[t]["label"], t) for t in types]
 
         top = tk.Toplevel(self)
         top.title("Add node")
@@ -993,9 +1000,8 @@ class WorkflowTab(ttk.Frame):
             items = [(lbl, nt) for (lbl, nt) in all_items
                      if q in lbl.lower() or q in nt.lower()]
             state["items"] = items
-            for lbl, nt in items:
-                mark = "  (connects)" if (out_type and accepts(nt)) else ""
-                lb.insert(tk.END, lbl + mark)
+            for lbl, _nt in items:
+                lb.insert(tk.END, lbl)
             if items:
                 lb.selection_set(0)
                 lb.activate(0)
@@ -1071,6 +1077,39 @@ class WorkflowTab(ttk.Frame):
         self._commit()
         self._redraw()
         self._build_config_panel()
+
+    # ------------------------------------------------------------- Filter node
+    def _build_filter_panel(self, node):
+        f = self.cfg_frame
+        ttk.Label(f, text="Keep only the molecules that match — a static subset by name or "
+                  "index (unlike Condition, which gates on a calculation's result).",
+                  foreground="#555", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        mode = tk.StringVar(value=node.config.get("mode", "include"))
+        ttk.Label(f, text="Mode:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        for val, txt in (("include", "Include matches (keep)"),
+                         ("exclude", "Exclude matches (drop)")):
+            ttk.Radiobutton(f, text=txt, variable=mode, value=val,
+                            command=lambda v=mode: self._set_cfg(node, "mode", v.get())
+                            ).pack(anchor=tk.W, padx=16)
+
+        kind = tk.StringVar(value=node.config.get("kind", "substring"))
+        ttk.Label(f, text="Match by:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        for val, txt in (("substring", "Filename substring(s)"),
+                         ("index", "Index range")):
+            ttk.Radiobutton(f, text=txt, variable=kind, value=val,
+                            command=lambda v=kind: self._set_cfg(node, "kind", v.get())
+                            ).pack(anchor=tk.W, padx=16)
+
+        ttk.Label(f, text="Pattern:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        pat = tk.StringVar(value=node.config.get("pattern", ""))
+        ent = ttk.Entry(f, textvariable=pat, width=26)
+        ent.pack(anchor=tk.W, padx=8, pady=2)
+        pat.trace_add("write", lambda *_a, v=pat: self._set_cfg(node, "pattern", v.get()))
+        ttk.Label(f, text="Substrings: comma-separated, match if the filename contains any "
+                  "(e.g. 'fluoro, _opt'). Index range: like 0-3,5 over the molecules feeding "
+                  "this network. Empty = keep all.", foreground="#777", wraplength=220,
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=8)
 
     # ------------------------------------------------------------- ZPVA builder
     def _build_zpva_panel(self, node):

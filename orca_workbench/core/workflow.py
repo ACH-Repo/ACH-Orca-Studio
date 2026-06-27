@@ -57,6 +57,18 @@ NODE_TYPES = {
         "kind": "gate",
         "config": {"predicate": "no_imaginary_freqs"},
     },
+    # A Filter restricts WHICH molecules continue downstream by identity (filename
+    # substring or index range) — a *static* subset chosen by the user. Distinct
+    # from Condition, which gates on a calculation's *result* at runtime. Geometry
+    # passes through unchanged; molecules that don't match simply get no
+    # downstream calcs.
+    "filter": {
+        "label": "Filter",
+        "inputs": [("geometry", "geometry")],
+        "outputs": [("geometry", "geometry")],
+        "kind": "filter",
+        "config": {"mode": "include", "kind": "substring", "pattern": ""},
+    },
     "report": {
         "label": "Report",
         "inputs": [("results", "results")],
@@ -107,6 +119,29 @@ def eval_predicate(name, out_text):
             return len(vibs) > 0 and n_imag == 0
         return n_imag > 0
     return True
+
+
+def filter_matches(config, mol_filename, index, n_total):
+    # type: (dict, str, int, int) -> bool
+    """Whether a molecule passes a Filter node.
+
+    config keys: mode ('include' keeps matches, 'exclude' drops them); kind
+    ('substring' = comma-separated substrings matched against the filename;
+    'index' = an index-range spec like '0-3,5' over the molecule's position in
+    its source set); pattern (the text). An empty pattern matches everything.
+    """
+    pattern = (config.get("pattern") or "").strip()
+    mode = config.get("mode", "include")
+    kind = config.get("kind", "substring")
+    if not pattern:
+        matched = True
+    elif kind == "index":
+        from orca_workbench.core.coords import parse_structure_selection
+        matched = index in parse_structure_selection(pattern, n_total)
+    else:
+        toks = [t.strip().lower() for t in pattern.split(",") if t.strip()]
+        matched = any(t in mol_filename.lower() for t in toks) if toks else True
+    return matched if mode == "include" else not matched
 
 
 def gate_outcome(predicate, source_done, source_out_text):
@@ -361,6 +396,9 @@ class Workflow(object):
                     if feeder is None or feeder.type not in CALC_NODE_TYPES:
                         issues.append("Condition must be fed by a calculation node (so there's "
                                       "a result to test).")
+            elif n.type == "filter":
+                if not self.edges_into(n.id, "geometry"):
+                    issues.append("Filter node has no input connected.")
         if self.topo_order() is None:
             issues.append("The graph contains a cycle.")
         return issues
@@ -459,7 +497,7 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
                                     "predicate": src.config.get("predicate", "terminated_ok")}
                 cur = src
                 continue
-            if src.type in ("frequencies", "property"):
+            if src.type in ("frequencies", "property", "filter"):
                 cur = src
                 continue
             return "initial", None, gate
@@ -495,9 +533,30 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
         if not mols:
             warnings.append("A Molecules node selects no molecules — its network was skipped.")
             continue
+
+        def passes_filters(node, mol, _mols=mols):
+            """False if a Filter node on this node's geometry path excludes mol —
+            so molecules the user filtered out get no downstream calcs."""
+            cur, guard = node, 0
+            while guard < 200:
+                guard += 1
+                port = _geometry_input_port(cur)
+                ein = workflow.edges_into(cur.id, port) if port else []
+                if not ein:
+                    return True
+                s = workflow.node(ein[0].src_node)
+                if s is None or s.type == "molecules":
+                    return True
+                if s.type == "filter" and not filter_matches(
+                        s.config, mol, _mols.index(mol), len(_mols)):
+                    return False
+                cur = s
+
         for mol in mols:
             node_calc = {}  # node_id -> calc id for this molecule
             for node in group:
+                if not passes_filters(node, mol):
+                    continue   # filtered out before this step
                 geometry_source, parent_id, gate = resolve(node, node_calc)
                 calc = planned_calc_factory(mol, node.config.get("recipe", ""),
                                             workflow.category, geometry_source, parent_id,

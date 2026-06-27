@@ -112,6 +112,15 @@ off the core path and gracefully degradable.
   **Assemble ZPVA** averages the chosen property (NMR shielding / energy / dipole),
   reports isotope shifts vs the base, writes JSON+CSV to `ZPVA/`, and shows a
   table + bar chart. Isotopologues via a text spec (`6:D,8:D ; 6:D`).
+- **Workflow editor: Filter node + add-node chooser fix** (same branch) — the
+  drop-a-pin "Add node" search now derives its list from the node registry (so new
+  nodes like ZPVA/Filter appear) and, when you drag from a port, only offers
+  type-compatible nodes (a geometry pin won't suggest Report; a results pin won't
+  suggest Optimize). New **Filter node** (`workflow` kind `filter`,
+  `filter_matches`): statically subsets which molecules continue downstream by
+  filename substring or index range — distinct from Condition (which gates at
+  runtime on a calculation's result). Geometry passes through (parent links
+  survive), so e.g. optimise all, then NMR only a matching subset.
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR
