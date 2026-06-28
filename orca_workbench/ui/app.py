@@ -190,6 +190,8 @@ class App(object):
                                 "editor (Notepad++, Sublime, gedit, …); terminal editors won't work."))
         setmenu.add_command(label="molden module name...", command=self._set_molden_module)
         setmenu.add_command(label="SLURM submission delay...", command=self._set_submit_delay)
+        setmenu.add_command(label="SLURM submit script (template)...",
+                            command=self.on_edit_slurm_template)
         menubar.add_cascade(label="Settings", menu=setmenu)
 
         helpmenu = tk.Menu(menubar, tearoff=0)
@@ -456,6 +458,14 @@ class App(object):
         if val is not None:
             config_mod.set_value("submit_delay_ms", int(val))
             self.set_status("SLURM submission delay set to {} ms.".format(int(val)))
+
+    def on_edit_slurm_template(self):
+        """Edit the per-machine SLURM submit-script template (partition, mem,
+        walltime, …). Stored in config, applied to every job that's built."""
+        from orca_workbench.core import slurm as slurm_mod
+        dlg = _SlurmTemplateDialog(self.root, slurm_mod)
+        if dlg.saved:
+            self.set_status("SLURM submit template updated — applies to newly built jobs.")
 
     def _set_molden_module(self):
         from tkinter import simpledialog
@@ -866,6 +876,71 @@ class _RecipeDirsDialog(tk.Toplevel):
             return
         del self._dirs[i]
         self._commit(min(i, len(self._dirs) - 1))
+
+
+class _SlurmTemplateDialog(tk.Toplevel):
+    """Edit the SLURM submit-script template. Saved per-machine in the user config
+    (never in project files), so changing the partition / memory / walltime here
+    applies to every job built afterward. Empty-relative-to-default tracks the
+    packaged template, so a later app update's improvements still flow through."""
+
+    def __init__(self, parent, slurm_mod):
+        super().__init__(parent)
+        self.slurm = slurm_mod
+        self.saved = False
+        self.title("SLURM submit script template")
+        self.geometry("760x560")
+
+        ttk.Label(self, text="The SLURM submit script used for every job. Edit the #SBATCH "
+                  "directives — partition, --mem, --time, account, … (e.g. change "
+                  "--partition=long to your queue). The !!##CORES##!! / !!##RUNDIR##!! / "
+                  "!!##INPFILE##!! / !!##JOBID##!! / !!##USERMAIL##!! / !!##PREAMBLE##!! "
+                  "placeholders are filled per job — keep them. Stored per-machine in your "
+                  "config, not in project files.", wraplength=720, justify=tk.LEFT,
+                  foreground="#444").pack(anchor=tk.W, padx=10, pady=(10, 6))
+
+        frame = ttk.Frame(self)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        self.text = tk.Text(frame, wrap="none", font=("Courier", 10), undo=True)
+        ys = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.text.yview)
+        xs = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.text.xview)
+        self.text.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        ys.pack(side=tk.RIGHT, fill=tk.Y)
+        xs.pack(side=tk.BOTTOM, fill=tk.X)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text.insert("1.0", slurm_mod.load_template())
+
+        bar = ttk.Frame(self)
+        bar.pack(fill=tk.X, padx=10, pady=8)
+        ttk.Button(bar, text="Reset to packaged default", command=self._reset).pack(side=tk.LEFT)
+        ttk.Button(bar, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(bar, text="Save", command=self._save).pack(side=tk.RIGHT, padx=4)
+
+        make_modal(self, parent)
+        self.wait_window()
+
+    def _reset(self):
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", self.slurm.default_template_text())
+
+    def _save(self):
+        txt = self.text.get("1.0", tk.END).rstrip("\n") + "\n"
+        missing = self.slurm.missing_required_placeholders(txt)
+        if missing and not messagebox.askyesno(
+                "Missing placeholders",
+                "The template is missing required placeholder(s): {}.\n\nJobs built from it "
+                "will be broken. Save anyway?".format(
+                    ", ".join("!!##{}##!!".format(m) for m in missing)),
+                parent=self):
+            return
+        # If it matches the packaged default, store nothing so it keeps tracking
+        # the package (future updates flow through); otherwise store the override.
+        if txt.strip() == self.slurm.default_template_text().strip():
+            config_mod.set_value(self.slurm.CONFIG_KEY, "")
+        else:
+            config_mod.set_value(self.slurm.CONFIG_KEY, txt)
+        self.saved = True
+        self.destroy()
 
 
 def _apply_ui_scaling(root):

@@ -24,12 +24,46 @@ DEFAULT_TEMPLATE_PATH = os.path.join(
 
 _PLACEHOLDERS = ("CORES", "JOBID", "RUNDIR", "INPFILE", "USERMAIL", "PREAMBLE")
 
+# Placeholders a usable template MUST keep, so a hand-edited one that drops them
+# can be flagged before jobs are built with a broken script.
+REQUIRED_PLACEHOLDERS = ("CORES", "RUNDIR", "INPFILE")
+
+# Per-machine SLURM template override (partition, mem, walltime, account, …) lives
+# in the user config — NOT in project files, so a shared/published project never
+# carries one site's queue names. Empty/unset = use the packaged default below.
+CONFIG_KEY = "slurm_template"
+
+
+def default_template_text():
+    # type: () -> str
+    """The packaged default SLURM template (data/slurm_template.sh)."""
+    with open(DEFAULT_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
 
 def load_template(path=None):
     # type: (Optional[str]) -> str
-    path = path or DEFAULT_TEMPLATE_PATH
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    """The effective SLURM template. An explicit `path` always wins (used by
+    tests/builders); otherwise a user override stored in config takes precedence
+    over the packaged default, so 'Settings ▸ SLURM submit script…' changes
+    (e.g. --partition=short) apply everywhere jobs are built."""
+    if path:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    try:
+        from orca_workbench.core import config as config_mod
+        override = config_mod.get(CONFIG_KEY)
+        if override and str(override).strip():
+            return override
+    except Exception:
+        pass
+    return default_template_text()
+
+
+def missing_required_placeholders(text):
+    # type: (str) -> list
+    """Required placeholders absent from `text` — for warning on a bad hand-edit."""
+    return [p for p in REQUIRED_PLACEHOLDERS if "!!##{}##!!".format(p) not in (text or "")]
 
 
 def render_slurm(template, inp_filename, rundir, jobname, cores, usermail, preamble=""):

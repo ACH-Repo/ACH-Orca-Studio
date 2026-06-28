@@ -1,0 +1,132 @@
+{
+  "molecules": [
+    {
+      "name": "water",
+      "filename": "water",
+      "smiles": "O",
+      "charge": 0,
+      "multiplicity": 1,
+      "comment": "gateway test molecule (Generate Pending to build the .xyz)",
+      "generated": false,
+      "xyz_path": null,
+      "method": null,
+      "gen_smiles": null,
+      "gen_status": "pending",
+      "gen_error": null,
+      "coords_locked": false
+    },
+    {
+      "name": "methane",
+      "filename": "methane",
+      "smiles": "C",
+      "charge": 0,
+      "multiplicity": 1,
+      "comment": "gateway test molecule (Generate Pending to build the .xyz)",
+      "generated": false,
+      "xyz_path": null,
+      "method": null,
+      "gen_smiles": null,
+      "gen_status": "pending",
+      "gen_error": null,
+      "coords_locked": false
+    }
+  ],
+  "planned_calcs": [],
+  "recipe_dir": null,
+  "recipe_dirs": [],
+  "workflow": {
+    "category": "wf",
+    "nodes": [
+      {
+        "id": "7d167032d6",
+        "type": "molecules",
+        "x": 40.0,
+        "y": 40.0,
+        "config": {
+          "mode": "selection",
+          "filenames": [
+            "water"
+          ]
+        }
+      },
+      {
+        "id": "a729151aa5",
+        "type": "optimize",
+        "x": 250.0,
+        "y": 40.0,
+        "config": {
+          "recipe": "DEBUG OPT (HF/STO-3G, ~free)"
+        }
+      },
+      {
+        "id": "973b240409",
+        "type": "frequencies",
+        "x": 460.0,
+        "y": 40.0,
+        "config": {
+          "recipe": "DEBUG FREQ (HF/STO-3G, ~free)"
+        }
+      },
+      {
+        "id": "aacbbbf934",
+        "type": "molecules",
+        "x": 40.0,
+        "y": 230.0,
+        "config": {
+          "mode": "selection",
+          "filenames": [
+            "methane"
+          ]
+        }
+      },
+      {
+        "id": "bd28a9ecd9",
+        "type": "optimize",
+        "x": 250.0,
+        "y": 230.0,
+        "config": {
+          "recipe": "DEBUG OPT (HF/STO-3G, ~free)"
+        }
+      },
+      {
+        "id": "76e9e01ac6",
+        "type": "property",
+        "x": 460.0,
+        "y": 230.0,
+        "config": {
+          "recipe": "DEBUG NMR + EnGrad (HF/STO-3G, ~free)"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "cb41a3ff38",
+        "src_node": "7d167032d6",
+        "src_port": "geometry",
+        "dst_node": "a729151aa5",
+        "dst_port": "geometry"
+      },
+      {
+        "id": "9cd4e300ec",
+        "src_node": "a729151aa5",
+        "src_port": "geometry",
+        "dst_node": "973b240409",
+        "dst_port": "geometry"
+      },
+      {
+        "id": "b9f62b8a46",
+        "src_node": "aacbbbf934",
+        "src_port": "geometry",
+        "dst_node": "bd28a9ecd9",
+        "dst_port": "geometry"
+      },
+      {
+        "id": "79c9825358",
+        "src_node": "bd28a9ecd9",
+        "src_port": "geometry",
+        "dst_node": "76e9e01ac6",
+        "dst_port": "geometry"
+      }
+    ]
+  }
+}

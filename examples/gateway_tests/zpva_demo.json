@@ -1,0 +1,92 @@
+{
+  "molecules": [
+    {
+      "name": "fluoromethane",
+      "filename": "fch3",
+      "smiles": "CF",
+      "charge": 0,
+      "multiplicity": 1,
+      "comment": "gateway test molecule (Generate Pending to build the .xyz)",
+      "generated": false,
+      "xyz_path": null,
+      "method": null,
+      "gen_smiles": null,
+      "gen_status": "pending",
+      "gen_error": null,
+      "coords_locked": false
+    }
+  ],
+  "planned_calcs": [],
+  "recipe_dir": null,
+  "recipe_dirs": [],
+  "workflow": {
+    "category": "wf",
+    "nodes": [
+      {
+        "id": "e292ba0d7a",
+        "type": "molecules",
+        "x": 40.0,
+        "y": 120.0,
+        "config": {
+          "mode": "all",
+          "filenames": []
+        }
+      },
+      {
+        "id": "415f07b163",
+        "type": "optimize",
+        "x": 240.0,
+        "y": 120.0,
+        "config": {
+          "recipe": "DEBUG OPT (HF/STO-3G, ~free)"
+        }
+      },
+      {
+        "id": "603dd11d3a",
+        "type": "frequencies",
+        "x": 440.0,
+        "y": 120.0,
+        "config": {
+          "recipe": "DEBUG FREQ (HF/STO-3G, ~free)"
+        }
+      },
+      {
+        "id": "9fb42036e0",
+        "type": "zpva",
+        "x": 640.0,
+        "y": 120.0,
+        "config": {
+          "recipe": "DEBUG NMR + EnGrad (HF/STO-3G, ~free)",
+          "property": "nmr_shielding",
+          "target": "H",
+          "dq": 1.0,
+          "isotopologues": "",
+          "manifests": []
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "23d3a22214",
+        "src_node": "e292ba0d7a",
+        "src_port": "geometry",
+        "dst_node": "415f07b163",
+        "dst_port": "geometry"
+      },
+      {
+        "id": "ec9c693a64",
+        "src_node": "415f07b163",
+        "src_port": "geometry",
+        "dst_node": "603dd11d3a",
+        "dst_port": "geometry"
+      },
+      {
+        "id": "1f3860df7f",
+        "src_node": "603dd11d3a",
+        "src_port": "geometry",
+        "dst_node": "9fb42036e0",
+        "dst_port": "geometry"
+      }
+    ]
+  }
+}

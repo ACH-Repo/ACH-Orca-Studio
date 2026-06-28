@@ -130,6 +130,19 @@ off the core path and gracefully degradable.
   freq check stays as the backstop. (Rationale: ZPVA = a post-BO vibrational
   averaging of a property over zero-point nuclear motion — harmonic curvature +
   anharmonic mean-shift — so it requires normal modes, i.e. a Freq job.)
+- **Editable SLURM template + DEBUG recipes** (same branch) — the SLURM submit
+  script is now editable per-machine via **Settings ▸ SLURM submit script…**
+  (`_SlurmTemplateDialog`), stored in config (`slurm_template` key, NOT in project
+  files) so changing e.g. `--partition=long`→`short` applies to every built job;
+  `slurm.load_template()` prefers the override, falls back to the packaged
+  `data/slurm_template.sh`, and editing to match the default clears the override
+  so package updates keep flowing. (Design note: per-machine template is the 90%
+  case; per-*recipe* SLURM overrides behind an "Advanced" expander would be the
+  next layer for per-job-type control — deliberately NOT a parallel "slurm recipe"
+  tab + per-calc selector, to avoid complexity creep.) Plus three **DEBUG**
+  recipes (HF/STO-3G, 1 core — `data/recipes/debug_*.json`) and
+  `examples/gateway_tests/*.json` (pending-SMILES projects pre-wired for the
+  two-network / branch+merge / ZPVA topologies) for ~free mechanics testing.
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR
