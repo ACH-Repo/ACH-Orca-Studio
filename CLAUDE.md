@@ -121,6 +121,15 @@ off the core path and gracefully degradable.
   filename substring or index range — distinct from Condition (which gates at
   runtime on a calculation's result). Geometry passes through (parent links
   survive), so e.g. optimise all, then NMR only a matching subset.
+- **Node-graph refinements** (same branch) — **Optimize now exposes a `results`
+  output** as well as `geometry`, so `Optimize -> Report` works (the OPT's
+  optimised geometry / final energy / trajectory / gradient are reportable); and
+  the add-node chooser is **node-aware for ZPVA** — it only suggests ZPVA
+  downstream of a node that is (or traces back to) a Frequencies node
+  (`Workflow.traces_to_type`), since ZPVA needs that job's `.hess`. The Expand-time
+  freq check stays as the backstop. (Rationale: ZPVA = a post-BO vibrational
+  averaging of a property over zero-point nuclear motion — harmonic curvature +
+  anharmonic mean-shift — so it requires normal modes, i.e. a Freq job.)
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR

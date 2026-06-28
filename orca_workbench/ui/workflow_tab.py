@@ -656,7 +656,7 @@ class WorkflowTab(ttk.Frame):
         # 3) released in empty space → Blender-style add-node search, then connect
         self._redraw()  # clear the temp wire before the popup
         ntype = self._node_search_popup(event.x_root, event.y_root,
-                                        out_type=self._out_port_type(sn, sp))
+                                        out_type=self._out_port_type(sn, sp), src_node=sn)
         if ntype:
             node = self.wf.add_node(ntype, cx, cy - TITLE_H / 2.0)
             self._commit()
@@ -959,10 +959,11 @@ class WorkflowTab(ttk.Frame):
             self._select_only(node.id)
         return "break"
 
-    def _node_search_popup(self, screen_x, screen_y, out_type=None):
+    def _node_search_popup(self, screen_x, screen_y, out_type=None, src_node=None):
         """Searchable add-node menu (like Blender's Shift+A search). Returns a
         node type string or None. When out_type is given (dragging from an
-        output), node types able to accept it are listed first."""
+        output), only node types able to accept it are listed; `src_node` (the
+        port's owner) lets us refine further by chemical prerequisite."""
         # Canonical ordering, but derived from the registry so every node type
         # (including new ones like ZPVA / Filter) shows up automatically.
         canonical = ["molecules", "optimize", "frequencies", "property", "condition",
@@ -973,10 +974,22 @@ class WorkflowTab(ttk.Frame):
         def accepts(ntype):
             return any(pt == out_type for _n, pt in wf_mod.NODE_TYPES[ntype]["inputs"])
 
-        # When dragging from an output port, only offer nodes that can ACCEPT that
-        # port's type (context-dependent: a geometry pin won't suggest Report, a
-        # results pin won't suggest Optimize). Unprompted (F3 / right-click) shows all.
-        types = [t for t in order if accepts(t)] if out_type else order
+        def offer(ntype):
+            # When dragging from an output port, only offer nodes that ACCEPT that
+            # port's type (a geometry pin won't suggest Report; a results pin won't
+            # suggest Optimize).
+            if not accepts(ntype):
+                return False
+            # ZPVA needs the .hess of an upstream Frequencies job, so only suggest
+            # it downstream of a node that is (or traces back to) a Frequencies —
+            # not a bare Molecules / Optimize / Filter geometry pin.
+            if ntype == "zpva" and src_node is not None and not self.wf.traces_to_type(
+                    src_node, "frequencies"):
+                return False
+            return True
+
+        # Unprompted (F3 / right-click, no out_type) shows everything.
+        types = [t for t in order if offer(t)] if out_type else order
         all_items = [(wf_mod.NODE_TYPES[t]["label"], t) for t in types]
 
         top = tk.Toplevel(self)

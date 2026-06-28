@@ -32,7 +32,10 @@ NODE_TYPES = {
     "optimize": {
         "label": "Optimize",
         "inputs": [("geometry", "geometry")],
-        "outputs": [("geometry", "geometry")],
+        # geometry: the optimised structure flows on to the next calc. results:
+        # an OPT also yields reportable properties (optimised geometry, final
+        # energy, trajectory, gradient), so it can feed a Report node directly.
+        "outputs": [("geometry", "geometry"), ("results", "results")],
         "kind": "calc",
         "config": {"recipe": ""},
     },
@@ -282,6 +285,29 @@ class Workflow(object):
             seen.add(nid)
             stack.extend(adj.get(nid, ()))
         return {n.id for n in self.nodes if n.type == "molecules" and n.id in seen}
+
+    def traces_to_type(self, node_id, node_type):
+        # type: (str, str) -> bool
+        """True if `node_id` is, or has a geometry-input ancestor that is, of
+        `node_type`. Used to decide whether a node with an upstream prerequisite
+        (e.g. ZPVA, which needs a Frequencies job's .hess) belongs downstream of a
+        given port — a check stronger than raw port-type compatibility."""
+        cur = self.node(node_id)
+        seen = set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            if cur.type == node_type:
+                return True
+            port = None
+            for name, t in cur.inputs():
+                if t == "geometry":
+                    port = name
+                    break
+            ein = self.edges_into(cur.id, port) if port else []
+            if not ein:
+                return False
+            cur = self.node(ein[0].src_node)
+        return False
 
     def edges_into(self, node_id, port=None):
         return [e for e in self.edges if e.dst_node == node_id
