@@ -1,0 +1,9 @@
+{
+  "name": "DEBUG NMR + EnGrad (HF/STO-3G, ~free)",
+  "calctype": "NMR",
+  "method_label": "HF_STO-3G",
+  "variant": "debug_ZPVA",
+  "favorite": false,
+  "created_at": null,
+  "template": "# DEBUG NMR shielding + gradient — HF/STO-3G, 1 core. Cheap displaced\n# single-point for testing the ZPVA node end-to-end (keeps both NMR and EnGrad).\n# Computes 1H shieldings so it works on any molecule with hydrogens. NOT for\n# chemistry. For ZPVA set the node's property=nmr_shielding, target=H.\n\n! HF STO-3G NMR EnGrad\n\n%maxcore 1000\n\n%pal nprocs 1\nend\n\n!!##COORDS_SEC##!!\n\n%eprnmr\n   NUCLEI = ALL H { SHIFT }\nEND\n"
+}

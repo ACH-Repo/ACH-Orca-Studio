@@ -406,7 +406,13 @@ class Workflow(object):
         if len(sources) == 0:
             issues.append("No Molecules source node.")
         elif len(sources) > 1:
-            issues.append("More than one Molecules node — only the first is used.")
+            # Informational, not a blocker: each Molecules node is expanded as its
+            # own independent network over its own molecule set (verified in
+            # expand_to_calcs, which iterates every source). Calcs that would
+            # collide on the same molecule+category+recipe target are de-duplicated
+            # to a single run dir, so overlapping sources reuse rather than clash.
+            issues.append("Multiple Molecules nodes — each expands its own molecule "
+                          "set as an independent network (overlapping targets are merged).")
         for n in self.nodes:
             if n.type in CALC_NODE_TYPES:
                 if not n.config.get("recipe"):

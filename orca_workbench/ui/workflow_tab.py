@@ -1411,8 +1411,8 @@ class WorkflowTab(ttk.Frame):
         re-run continues rather than duplicating. If `source_ids` is given, only
         those networks are expanded. Returns (calcs, node_map) or None."""
         issues = self.wf.validate()
-        # 'more than one Molecules' is a warning, not a blocker
-        blockers = [i for i in issues if not i.startswith("More than one")]
+        # the multiple-Molecules note is informational, not a blocker
+        blockers = [i for i in issues if not i.startswith("Multiple Molecules")]
         if blockers:
             messagebox.showwarning("Workflow not ready", "Fix these first:\n\n  • " +
                                    "\n  • ".join(blockers))
