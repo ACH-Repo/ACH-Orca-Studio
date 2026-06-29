@@ -413,12 +413,35 @@ class WorkflowTab(ttk.Frame):
         n = max(len(node.inputs()), len(node.outputs()), 1)
         return TITLE_H + SUMMARY_H + n * PORT_H + 8
 
+    def _title_font_obj(self):
+        f = getattr(self, "_title_font", None)
+        if f is None:
+            try:
+                import tkinter.font as tkfont
+                f = tkfont.Font(font=("TkDefaultFont", 9, "bold"))
+            except Exception:
+                f = False
+            self._title_font = f
+        return f or None
+
+    def _node_width(self, node):
+        """World-unit node width: the base width widened to fit the (bold) title,
+        so long labels (e.g. 'Property (SP/NMR/UV-Vis/…)') don't overflow the box.
+        Used everywhere the node's right edge / port-x is computed, so draw and
+        hit-testing stay consistent."""
+        f = self._title_font_obj()
+        try:
+            measured = f.measure(node.label) if f else int(len(node.label) * 7.2)
+        except Exception:
+            measured = int(len(node.label) * 7.2)
+        return float(max(NODE_W, measured + 28))
+
     def _port_xy(self, node, port_name, is_input):
         ports = node.inputs() if is_input else node.outputs()
         for i, (name, _t) in enumerate(ports):
             if name == port_name:
                 y = node.y + TITLE_H + SUMMARY_H + i * PORT_H + PORT_H / 2
-                x = node.x if is_input else node.x + NODE_W
+                x = node.x if is_input else node.x + self._node_width(node)
                 return x, y
         return None
 
@@ -446,7 +469,7 @@ class WorkflowTab(ttk.Frame):
     def _draw_node(self, node):
         z = self._zoom
         x, y = self._w2s(node.x, node.y)             # screen top-left
-        w = NODE_W * z
+        w = self._node_width(node) * z
         h = self._node_height(node) * z
         th = TITLE_H * z
         sh = SUMMARY_H * z
@@ -722,7 +745,7 @@ class WorkflowTab(ttk.Frame):
     def _node_at(self, cx, cy):
         for n in reversed(self.wf.nodes):   # last drawn = on top
             h = self._node_height(n)
-            if n.x <= cx <= n.x + NODE_W and n.y <= cy <= n.y + h:
+            if n.x <= cx <= n.x + self._node_width(n) and n.y <= cy <= n.y + h:
                 return n.id
         return None
 
@@ -747,7 +770,7 @@ class WorkflowTab(ttk.Frame):
         inside = []
         for n in self.wf.nodes:
             h = self._node_height(n)
-            if (n.x <= hi_x and n.x + NODE_W >= lo_x
+            if (n.x <= hi_x and n.x + self._node_width(n) >= lo_x
                     and n.y <= hi_y and n.y + h >= lo_y):
                 inside.append(n.id)
         if d["add"]:
