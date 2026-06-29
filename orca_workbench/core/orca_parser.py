@@ -331,6 +331,33 @@ def parse_population(text):
     return rows
 
 
+# A Mayer bond-order entry (several per line): "B(  0-O ,  1-H ) :   0.9971"
+_MAYER_BOND = re.compile(
+    r"B\(\s*(\d+)-([A-Za-z]{1,2})\s*,\s*(\d+)-([A-Za-z]{1,2})\s*\)\s*:\s*(\d+\.\d+)")
+
+
+def parse_mayer_bond_orders(text):
+    # type: (str) -> List[dict]
+    """Mayer bond orders from the 'Mayer bond orders larger than ...' block:
+    [{atom1, elem1, atom2, elem2, order}]. Several entries per line. [] if absent."""
+    i = text.rfind("Mayer bond orders")
+    if i == -1:
+        return []
+    out = []
+    started = False
+    for line in text[i:].splitlines()[1:]:
+        ms = list(_MAYER_BOND.finditer(line))
+        if ms:
+            started = True
+            for m in ms:
+                out.append({"atom1": int(m.group(1)), "elem1": m.group(2),
+                            "atom2": int(m.group(3)), "elem2": m.group(4),
+                            "order": float(m.group(5))})
+        elif started:
+            break   # bond list ended
+    return out
+
+
 _ABS_HEADER = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
 _ABS_FLOAT = re.compile(r"[-+]?\d+\.\d+(?:[eE][-+]?\d+)?")
 _CM_PER_EV = 8065.543937

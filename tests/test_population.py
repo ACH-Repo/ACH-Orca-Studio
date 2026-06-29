@@ -81,3 +81,30 @@ def test_report_extractor_and_csv_summary():
 
 def test_report_extractor_none_without_block():
     assert reporting._x_population("nothing", ctx=None) is None
+
+
+# --------------------------------------------------------------- Mayer bond orders
+MAYER = """\
+  Mayer bond orders larger than 0.100000
+B(  0-O ,  1-H ) :   0.9971 B(  0-O ,  2-H ) :   0.9971
+
+-------
+TIMINGS
+"""
+
+
+def test_parse_mayer_bond_orders():
+    b = P.parse_mayer_bond_orders(MAYER)
+    assert len(b) == 2
+    assert b[0] == {"atom1": 0, "elem1": "O", "atom2": 1, "elem2": "H", "order": 0.9971}
+    assert b[1]["atom2"] == 2
+
+
+def test_mayer_none_when_absent():
+    assert P.parse_mayer_bond_orders("no bonds here") == []
+
+
+def test_bond_orders_extractor():
+    frag = reporting._x_bond_orders(MAYER, ctx=None)
+    assert frag["mayer_bond_orders"][0]["order"] == 0.9971
+    assert reporting._x_bond_orders("nothing", ctx=None) is None

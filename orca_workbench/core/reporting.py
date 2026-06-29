@@ -150,6 +150,12 @@ def _x_population(text, ctx):
     return {"population_charges": rows} if rows else None
 
 
+def _x_bond_orders(text, ctx):
+    """Mayer bond orders from the converged SCF (bonding analysis). None if absent."""
+    bonds = P.parse_mayer_bond_orders(text)
+    return {"mayer_bond_orders": bonds} if bonds else None
+
+
 def _x_excited_states(text, ctx):
     """TD-DFT electronic absorption spectrum: the list of excited states (energy,
     wavelength, oscillator strength) plus the brightest transition (lambda_max).
@@ -185,6 +191,7 @@ EXTRACTORS = [
     Extractor("thermochemistry", "Thermochemistry (G, H, S, ZPE)", _x_thermochemistry, "FREQ"),
     Extractor("nmr", "NMR shieldings", _x_nmr, "NMR"),
     Extractor("population", "Population charges (Mulliken/Löwdin)", _x_population, "any"),
+    Extractor("bond_orders", "Mayer bond orders", _x_bond_orders, "any"),
     Extractor("excited_states", "Excited states (TD-DFT UV-Vis)", _x_excited_states, "TDDFT"),
     Extractor("dipole", "Dipole moment", _x_dipole, "any"),
     Extractor("homo_lumo", "HOMO–LUMO gap", _x_homo_lumo, "any"),
