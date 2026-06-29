@@ -283,6 +283,54 @@ def parse_homo_lumo(text):
     return {"homo_eV": homo, "lumo_eV": lumo, "gap_eV": lumo - homo}
 
 
+# An atomic-charge row: "   0 O :   -0.370272"  (+ an optional spin-population
+# column for open-shell jobs: "   0 O :   -0.370272    1.000000").
+_CHARGE_ROW = re.compile(
+    r"^\s*(\d+)\s+([A-Za-z]{1,2})\s*:\s*(-?\d+\.\d+)(?:\s+(-?\d+\.\d+))?\s*$")
+
+
+def _parse_charge_block(text, header):
+    """Per-atom (element, charge, spin) from a '<header> ...' block keyed by atom
+    index. `spin` is None unless the block carries spin populations. {} if absent."""
+    i = text.rfind(header)
+    if i == -1:
+        return {}
+    out = {}
+    started = False
+    for line in text[i:].splitlines()[1:]:
+        m = _CHARGE_ROW.match(line)
+        if m:
+            started = True
+            spin = float(m.group(4)) if m.group(4) is not None else None
+            out[int(m.group(1))] = (m.group(2), float(m.group(3)), spin)
+        elif started:
+            break   # a non-row line (blank / "Sum of atomic charges") ends the block
+    return out
+
+
+def parse_population(text):
+    # type: (str) -> List[dict]
+    """Per-atom population charges, merging the MULLIKEN and LOEWDIN ATOMIC CHARGES
+    blocks by atom index: [{index, element, mulliken, loewdin, spin}]. `spin` is the
+    Mulliken spin population for open-shell jobs (else None). [] if neither block is
+    present. NOTE: verify against a real ORCA 6 .out (the layout is long-stable, but
+    this was written from the documented format)."""
+    # The open-shell header is "MULLIKEN ATOMIC CHARGES AND SPIN POPULATIONS", which
+    # still contains "MULLIKEN ATOMIC CHARGES", so the substring search finds both.
+    mull = _parse_charge_block(text, "MULLIKEN ATOMIC CHARGES")
+    loew = _parse_charge_block(text, "LOEWDIN ATOMIC CHARGES")
+    if not mull and not loew:
+        return []
+    rows = []
+    for idx in sorted(set(mull) | set(loew)):
+        el = (mull.get(idx) or loew.get(idx))[0]
+        rows.append({"index": idx, "element": el,
+                     "mulliken": mull[idx][1] if idx in mull else None,
+                     "loewdin": loew[idx][1] if idx in loew else None,
+                     "spin": mull[idx][2] if idx in mull else None})
+    return rows
+
+
 _ABS_HEADER = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
 _ABS_FLOAT = re.compile(r"[-+]?\d+\.\d+(?:[eE][-+]?\d+)?")
 _CM_PER_EV = 8065.543937

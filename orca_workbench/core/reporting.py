@@ -143,6 +143,13 @@ def _x_gradient(text, ctx):
     }}
 
 
+def _x_population(text, ctx):
+    """Per-atom Mulliken + Löwdin charges (and Mulliken spin populations for
+    open-shell jobs) from the converged SCF. None when there's no population block."""
+    rows = P.parse_population(text)
+    return {"population_charges": rows} if rows else None
+
+
 def _x_excited_states(text, ctx):
     """TD-DFT electronic absorption spectrum: the list of excited states (energy,
     wavelength, oscillator strength) plus the brightest transition (lambda_max).
@@ -177,6 +184,7 @@ EXTRACTORS = [
     Extractor("frequencies", "Frequencies + IR", _x_frequencies, "FREQ"),
     Extractor("thermochemistry", "Thermochemistry (G, H, S, ZPE)", _x_thermochemistry, "FREQ"),
     Extractor("nmr", "NMR shieldings", _x_nmr, "NMR"),
+    Extractor("population", "Population charges (Mulliken/Löwdin)", _x_population, "any"),
     Extractor("excited_states", "Excited states (TD-DFT UV-Vis)", _x_excited_states, "TDDFT"),
     Extractor("dipole", "Dipole moment", _x_dipole, "any"),
     Extractor("homo_lumo", "HOMO–LUMO gap", _x_homo_lumo, "any"),
@@ -243,6 +251,8 @@ def _csv_row(entry):
     hl = p.get("homo_lumo") or {}
     nmr = p.get("nmr_shieldings") or []
     es = p.get("excited_states") or {}
+    mull = [r.get("mulliken") for r in (p.get("population_charges") or [])
+            if r.get("mulliken") is not None]
     row = {
         "id": entry.get("id"),
         "label": entry.get("label"),
@@ -262,6 +272,8 @@ def _csv_row(entry):
         "n_excited_states": (es.get("n_states") if es else None),
         "lambda_max_nm": es.get("lambda_max_nm"),
         "max_fosc": es.get("max_fosc"),
+        "mulliken_min": (min(mull) if mull else None),
+        "mulliken_max": (max(mull) if mull else None),
     }
     return row
 
@@ -269,7 +281,8 @@ def _csv_row(entry):
 _CSV_FIELDS = ["id", "label", "molecule", "calctype", "method", "terminated_normally",
                "final_energy_Eh", "gibbs_free_energy_Eh", "enthalpy_Eh", "zpe_Eh",
                "n_imaginary", "lowest_freq_cm", "dipole_debye", "homo_lumo_gap_eV",
-               "n_nmr_nuclei", "n_excited_states", "lambda_max_nm", "max_fosc"]
+               "n_nmr_nuclei", "n_excited_states", "lambda_max_nm", "max_fosc",
+               "mulliken_min", "mulliken_max"]
 
 
 def write_csv(report, path):
