@@ -11,12 +11,14 @@ from orca_workbench.core import orca_plot as OP
 
 
 def test_density_sequence():
-    # type of plot (1) -> (scf) electron density (2) -> generate (11) -> exit (12)
-    assert OP.plot_stdin("density") == "1\n2\n11\n12\n"
+    # type of plot (1) -> (scf) electron density (2) -> confirm "y" -> generate (11)
+    # -> exit (12). The "y" answers orca_plot's "Is this the one you want (y/n)?"
+    # (verified against real ORCA 6.0.1).
+    assert OP.plot_stdin("density") == "1\n2\ny\n11\n12\n"
 
 
 def test_spin_density_sequence():
-    assert OP.plot_stdin("spin") == "1\n3\n11\n12\n"
+    assert OP.plot_stdin("spin") == "1\n3\ny\n11\n12\n"
 
 
 def test_mo_sequence_alpha():
@@ -29,7 +31,7 @@ def test_mo_sequence_beta_operator():
 
 
 def test_grid_prefixes_the_sequence():
-    assert OP.plot_stdin("density", grid=80) == "4\n80\n1\n2\n11\n12\n"
+    assert OP.plot_stdin("density", grid=80) == "4\n80\n1\n2\ny\n11\n12\n"
 
 
 def test_mo_index_defaults_to_zero():

@@ -2310,9 +2310,8 @@ class CalculationsTab(ttk.Frame):
                 exe += ".exe"
             if not os.path.isfile(exe):
                 return None, "orca_plot not found next to the ORCA executable:\n{}".format(exe)
-            proc = subprocess.run(
-                [exe, gbw_name, "-i"], cwd=rundir_abs, input=stdin,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            args = [exe, gbw_name, "-i"]
+            kw = {"cwd": rundir_abs}
         else:
             import shlex
             template = slurm_mod.load_template()
@@ -2320,9 +2319,18 @@ class CalculationsTab(ttk.Frame):
                                 if ln.strip().startswith("module load"))
             script = "{}\ncd {} && orca_plot {} -i".format(
                 modules, shlex.quote(rundir_abs), shlex.quote(gbw_name))
+            args = ["bash", "-lc", script]
+            kw = {}
+        # Bound the run: if the wizard ever desyncs (a future ORCA adds a prompt),
+        # it loops forever on EOF printing "Invalid input" — the timeout kills it.
+        try:
             proc = subprocess.run(
-                ["bash", "-lc", script], input=stdin,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+                args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                universal_newlines=True, timeout=180, **kw)
+        except subprocess.TimeoutExpired as e:
+            tail = "\n".join((e.output or "").splitlines()[-10:])
+            return None, ("orca_plot timed out (180 s) — likely a menu mismatch with "
+                          "this ORCA version. Last output:\n{}".format(tail))
         out = proc.stdout or ""
         cube = orca_plot_mod.parse_output_cube(out)
         if cube:

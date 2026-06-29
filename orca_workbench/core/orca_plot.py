@@ -16,6 +16,12 @@ Menu integers verified on ORCA 6.0.1:
   type submenu (after `1`): 1=molecular orbitals, 2=(scf) electron density,
               3=(scf) spin density, 4=natural orbitals, ...
 The default output format is ALREADY Gaussian Cube, so option 5 is never used.
+
+IMPORTANT (verified against real ORCA 6.0.1, water/STO-3G): selecting a *density*
+(electron or spin) triggers a follow-up "Is this the one you want (y/n)?" prompt
+that must be answered `y`; selecting a *molecular orbital* does NOT. Feeding the
+wrong number of keystrokes desyncs the wizard, and on EOF it loops forever printing
+"Invalid input" — so the caller must also bound the run with a timeout.
 """
 
 import re
@@ -50,6 +56,8 @@ def plot_stdin(plot_type="density", mo_index=None, operator=0, grid=None):
         keys += ["2", str(int(mo_index or 0))]     # which orbital
         if operator:
             keys += ["3", str(int(operator))]      # alpha(0) / beta(1)
+    else:
+        keys.append("y")    # density/spin: confirm "Is this the one you want (y/n)?"
     keys += ["11", "12"]                           # generate, then exit
     return "\n".join(keys) + "\n"
 
