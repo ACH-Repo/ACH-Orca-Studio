@@ -19,9 +19,10 @@ lives in one place.
 import os
 import platform
 import subprocess
+import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import List, Optional, Tuple
 
 from orca_workbench.core import config as config_mod
@@ -31,6 +32,7 @@ from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.ui.shortcuts import install_tree_shift_select
 from orca_workbench.core import local_runner as local_runner_mod
 from orca_workbench.core import orca_parser
+from orca_workbench.core import orca_plot as orca_plot_mod
 from orca_workbench.core import provenance as provenance_mod
 from orca_workbench.core import slurm as slurm_mod
 from orca_workbench.core import slurm_runtime
@@ -2078,6 +2080,16 @@ class CalculationsTab(ttk.Frame):
                 menu.add_command(label="Open normal modes (3D viewer)",
                                  command=lambda p=out: self._open_3d(p))
 
+        # Finished calc with a converged wavefunction: generate a Gaussian-cube
+        # (electron density / spin density / a molecular orbital) post-hoc with
+        # orca_plot and open it in the external viewer. Only offered when the .gbw
+        # is actually present in the run dir.
+        if len(calcs) == 1 and self._own_state(calcs[0])[2] and \
+                self._calc_file(calcs[0], calcs[0].molecule_filename + ".gbw"):
+            menu.add_separator()
+            menu.add_command(label="Generate density/MO cube...",
+                             command=lambda c=calcs[0]: self._generate_cube(c))
+
         # Manual dependency re-linking — e.g. after importing a project whose save
         # file was lost, point a flat NMR/FREQ calc at its OPT as the parent so it
         # inherits the optimised geometry. (Affects future rebuilds, not the run
@@ -2232,6 +2244,101 @@ class CalculationsTab(ttk.Frame):
     def _open_3d(self, path):
         from orca_workbench.ui.molecules_tab import open_xyz_3d
         open_xyz_3d(self, self.app, path)
+
+    # ---- post-hoc density / MO cubes (orca_plot on a finished .gbw) -----------
+    def _generate_cube(self, calc):
+        """Run orca_plot on a finished calc's .gbw to write a Gaussian cube (total
+        electron density / spin density / one molecular orbital) and open it in the
+        external 3D viewer. orca_plot is a light post-processor — no sbatch; it runs
+        directly (on the cluster inside the same module env the SLURM jobs use)."""
+        gbw = self._calc_file(calc, calc.molecule_filename + ".gbw")
+        if not gbw:
+            messagebox.showinfo(
+                "No wavefunction file",
+                "This calculation has no {}.gbw in its run dir, so there's nothing "
+                "to plot. Re-run it, or pick a job type that writes a .gbw.".format(
+                    calc.molecule_filename))
+            return
+        kind = _ask_choice(
+            self, "Generate cube",
+            "What to plot from {}.gbw:".format(calc.molecule_filename),
+            ["Electron density (total)", "Spin density (open-shell)",
+             "Molecular orbital..."])
+        if not kind:
+            return
+        if kind.startswith("Electron"):
+            stdin = orca_plot_mod.plot_stdin("density")
+        elif kind.startswith("Spin"):
+            stdin = orca_plot_mod.plot_stdin("spin")
+        else:
+            idx = simpledialog.askinteger(
+                "Molecular orbital",
+                "Orbital index (0-based). The HOMO is the highest occupied MO — for "
+                "a closed-shell molecule with N electrons that's index N/2 - 1; the "
+                "LUMO is the next one up.",
+                parent=self, minvalue=0)
+            if idx is None:
+                return
+            stdin = orca_plot_mod.plot_stdin("mo", mo_index=idx)
+        rundir_abs = os.path.join(self.app.project.root(), calc.rundir)
+        gbw_name = calc.molecule_filename + ".gbw"
+        self._log("orca_plot: generating cube from {} ...".format(gbw_name))
+        threading.Thread(target=self._run_cube_worker,
+                         args=(rundir_abs, gbw_name, stdin), daemon=True).start()
+
+    def _run_cube_worker(self, rundir_abs, gbw_name, stdin):
+        try:
+            cube, err = self._run_orca_plot(rundir_abs, gbw_name, stdin)
+        except Exception as e:   # surface, don't crash the worker thread
+            cube, err = None, "{}: {}".format(type(e).__name__, e)
+        self.after(0, lambda: self._cube_done(rundir_abs, cube, err))
+
+    def _run_orca_plot(self, rundir_abs, gbw_name, stdin):
+        """Run orca_plot in `rundir_abs`, feeding `stdin` to its wizard. Returns
+        (cube_basename, error_text). On the cluster, wrap it in a login shell that
+        loads the SAME `module load` lines the SLURM template uses, so the shared
+        ORCA libraries resolve exactly as in a real job. Locally, use the orca_plot
+        that sits beside the configured ORCA executable."""
+        if self._local_mode:
+            orca = config_mod.get("orca_path", "")
+            if not orca:
+                return None, ("No local ORCA executable is configured, so orca_plot "
+                              "can't be located. Run a job locally once (it prompts "
+                              "for the ORCA path), then retry.")
+            exe = os.path.join(os.path.dirname(orca), "orca_plot")
+            if os.name == "nt" and not exe.lower().endswith(".exe"):
+                exe += ".exe"
+            if not os.path.isfile(exe):
+                return None, "orca_plot not found next to the ORCA executable:\n{}".format(exe)
+            proc = subprocess.run(
+                [exe, gbw_name, "-i"], cwd=rundir_abs, input=stdin,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        else:
+            import shlex
+            template = slurm_mod.load_template()
+            modules = "\n".join(ln for ln in template.splitlines()
+                                if ln.strip().startswith("module load"))
+            script = "{}\ncd {} && orca_plot {} -i".format(
+                modules, shlex.quote(rundir_abs), shlex.quote(gbw_name))
+            proc = subprocess.run(
+                ["bash", "-lc", script], input=stdin,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        out = proc.stdout or ""
+        cube = orca_plot_mod.parse_output_cube(out)
+        if cube:
+            return cube, None
+        tail = "\n".join(out.splitlines()[-10:]) or "(no output)"
+        return None, "orca_plot exited {} and wrote no .cube. Last output:\n{}".format(
+            proc.returncode, tail)
+
+    def _cube_done(self, rundir_abs, cube, err):
+        if err:
+            self._log("orca_plot failed: {}".format(err.splitlines()[0]))
+            messagebox.showerror("orca_plot", err)
+            return
+        path = os.path.join(rundir_abs, cube)
+        self._log("orca_plot wrote {}".format(cube))
+        self._open_3d(path)
 
     # Calc types whose richer content (vibrational modes) lives in the ORCA .out,
     # which Avogadro/molden read and animate — a bare .xyz can't show it. (Density/
