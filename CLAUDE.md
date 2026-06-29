@@ -36,6 +36,13 @@ off the core path and gracefully degradable.
 ## Environment (LiDO3 gateway `gw02`, confirmed 2026-06-22)
 - Python **3.9** on the gateway (write 3.9-compatible code: no `match`, no bare
   `X | Y` runtime unions). Dev machine (Windows) is 3.10.
+- **There IS a real ORCA 6.0.1 on the dev machine: `C:\ORCA_6.0.1`** (`orca.exe`,
+  `orca_plot.exe`, `orca_2mkl.exe`) — same major version as the gateway. So
+  ORCA-output work (parsers, `orca_plot` sequences, MOREAD inputs) can be verified
+  **locally** with a tiny job, not shipped "blind." Running `orca` locally is fine —
+  the gateway-only sanction is about not eating *gateway* compute. Local mode finds
+  `orca_plot` beside `orca_path`; the *cluster* env (module wrapper, `.gbw` copyback)
+  still needs a gateway check.
 - Remote access: **ThinLinc** for the GUI (not MobaXterm anymore), **WinSCP**
   for file transfer. Both are in the LiDO First Contact handout.
 - **Do NOT run ORCA on the gateway** — it's sanctioned (account blocked). Always
@@ -213,9 +220,15 @@ off the core path and gracefully degradable.
   the SCF-engine sanction doesn't apply); on the cluster it's launched in a login shell
   that loads the SAME `module load` lines the SLURM template uses. Tests:
   `tests/test_population.py`, `tests/test_moread.py`, `tests/test_orca_plot.py` (~192).
-  All four slices are BLIND builds — gateway-verify before merge (the three parser
-  formats vs a real ORCA 6 `.out`, a MOREAD OPT→NMR derive, an electron-density cube end
-  to end). STILL TODO on this branch (optional): a Multiwfn hand-off (`orca_2mkl -molden`).
+  **Verified against a real local ORCA 6.0.1** (`C:\ORCA_6.0.1`, water/STO-3G): the two
+  parsers vs the real `.out`, `orca_plot` → a real `.eldens`/`.moNa` cube, and
+  `add_moread` → ORCA `INITIAL GUESS: MOREAD` converging in 2 cycles. That testing
+  caught a real bug — the orca_plot density/spin path needs a `y` ("Is this the one you
+  want?") confirm the MO path lacks (now in `plot_stdin`; `_run_orca_plot` also has a
+  `timeout` since orca_plot loops forever on EOF). LEFT for the gateway (environment-
+  only): the cluster `bash -lc`+`module load` launch finds orca_plot, and the SLURM
+  `.gbw` copyback. STILL TODO on this branch (optional): a Multiwfn hand-off
+  (`orca_2mkl -molden`).
 
 ## Open work / TODO
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
