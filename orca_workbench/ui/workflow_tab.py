@@ -88,8 +88,8 @@ class WorkflowTab(ttk.Frame):
         bar = ttk.Frame(self)
         bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(bar, text="Add node:").pack(side=tk.LEFT, padx=(2, 4))
-        for ntype in ("molecules", "optimize", "frequencies", "property", "condition",
-                      "filter", "zpva", "report"):
+        for ntype in ("molecules", "optimize", "frequencies", "property", "excited_states",
+                      "condition", "filter", "zpva", "report"):
             label = wf_mod.NODE_TYPES[ntype]["label"]
             ttk.Button(bar, text=label, width=max(8, len(label) + 1),
                        command=lambda t=ntype: self._add_node(t)).pack(side=tk.LEFT, padx=1)
@@ -300,6 +300,9 @@ class WorkflowTab(ttk.Frame):
             if ctype == "NMR" and done:
                 b = ttk.Button(btns, text="NMR", width=5, command=lambda c=calc: ct._plot_nmr([c]))
                 b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated NMR spectrum.")
+            if ctype == "TDDFT" and done:
+                b = ttk.Button(btns, text="UV-Vis", width=7, command=lambda c=calc: ct._plot_uvvis([c]))
+                b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated UV-Vis absorption spectrum.")
             if calc.job_id:
                 b = ttk.Button(btns, text="Live", width=5, command=lambda c=calc: ct._open_live(c))
                 b.pack(side=tk.LEFT, padx=1)
@@ -966,8 +969,8 @@ class WorkflowTab(ttk.Frame):
         port's owner) lets us refine further by chemical prerequisite."""
         # Canonical ordering, but derived from the registry so every node type
         # (including new ones like ZPVA / Filter) shows up automatically.
-        canonical = ["molecules", "optimize", "frequencies", "property", "condition",
-                     "filter", "zpva", "report"]
+        canonical = ["molecules", "optimize", "frequencies", "property", "excited_states",
+                     "condition", "filter", "zpva", "report"]
         order = ([t for t in canonical if t in wf_mod.NODE_TYPES]
                  + [t for t in wf_mod.NODE_TYPES if t not in canonical])
 

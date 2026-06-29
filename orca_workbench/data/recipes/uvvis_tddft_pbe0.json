@@ -1,0 +1,9 @@
+{
+  "name": "UV-Vis TD-DFT (PBE0)",
+  "calctype": "TDDFT",
+  "method_label": "PBE0_def2-TZVP",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Vertical UV-Vis absorption (20 singlet roots). PBE0 is a solid general-purpose\n# global hybrid; for charge-transfer / Rydberg states prefer the range-separated\n# CAM-B3LYP recipe. Run on a ground-state optimised geometry. Add CPCM(<solvent>)\n# to the keyword line for solution spectra.\n\n! PBE0 def2-TZVP RIJCOSX def2/J D4\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n%tddft\n  nroots 20\n  maxdim 5\n  tda true\nend\n\n!!##COORDS_SEC##!!\n"
+}

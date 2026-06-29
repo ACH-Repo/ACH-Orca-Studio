@@ -1,0 +1,9 @@
+{
+  "name": "DEBUG UV-Vis TD-DFT (HF/STO-3G, ~free)",
+  "calctype": "TDDFT",
+  "method_label": "HF_STO-3G",
+  "variant": "debug",
+  "favorite": false,
+  "created_at": null,
+  "template": "# DEBUG TD-DFT (really TD-HF/CIS at HF/STO-3G), 1 core. Produces an ABSORPTION\n# SPECTRUM block to exercise the parser / UV-Vis plot for next to no compute. NOT\n# for chemistry (no XC, minimal basis). Use a real PBE0/CAM-B3LYP recipe for science.\n\n! HF STO-3G\n\n%maxcore 1000\n\n%pal nprocs 1\nend\n\n%tddft\n  nroots 5\n  maxdim 5\nend\n\n!!##COORDS_SEC##!!\n"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Excited-state Opt S1 (PBE0)",
+  "calctype": "OPT",
+  "method_label": "PBE0_def2-SVP",
+  "variant": "ES_S1",
+  "favorite": false,
+  "created_at": null,
+  "template": "# Excited-state (S1) geometry optimisation — the first step toward fluorescence /\n# adiabatic (0-0) energies: relax the geometry ON the first excited state (iroot 1).\n# Follow with an excited-state Freq at this geometry (confirm a min + ZPE), then a\n# vertical TD-DFT single point here gives the emission energy. Use this recipe in an\n# Optimize node (it outputs the relaxed S1 geometry).\n\n! PBE0 def2-SVP RIJCOSX def2/J Opt\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n%tddft\n  nroots 5\n  iroot 1\nend\n\n!!##COORDS_SEC##!!\n"
+}

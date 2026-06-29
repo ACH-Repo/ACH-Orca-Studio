@@ -143,6 +143,20 @@ off the core path and gracefully degradable.
   recipes (HF/STO-3G, 1 core — `data/recipes/debug_*.json`) and
   `examples/gateway_tests/*.json` (pending-SMILES projects pre-wired for the
   two-network / branch+merge / ZPVA topologies) for ~free mechanics testing.
+- **TD-DFT node set** (same branch) — excited-state / UV-Vis support, scoped to
+  "nodes + recipes + spectra" (no benchmark recreation). `orca_parser.parse_absorption_spectrum`
+  reads the ABSORPTION SPECTRUM block (robust across ORCA 5/6 layouts — anchors on
+  the first float >1000 = cm⁻¹) → `{state,energy_eV,energy_cm,wavelength_nm,fosc}`;
+  a `reporting._x_excited_states` extractor (+ lambda_max/max_fosc CSV cols); an
+  **Excited States** workflow node (`kind` calc, results-only leaf like Property —
+  for excited-state *relaxation* use an Optimize node with an S1-opt recipe);
+  recipes `uvvis_tddft_pbe0` (vertical), the existing CAM-B3LYP (CT), `es_opt_s1_pbe0`
+  (emission/0-0), and a cheap `debug_tddft_hf_sto3g`; and a `UVVisSpectrumWindow`
+  (`ui/spectra.py`, nm/eV axis toggle, FWHM, Gaussian-broadened fosc sticks, shared
+  hover structure panel) opened via right-click ▸ Plot UV-Vis on a finished TDDFT
+  calc or the node's UV-Vis button. (`parse_absorption_spectrum` is a *blind* port —
+  verify against a real ORCA 6 TD-DFT `.out` on the gateway.) Gateway test:
+  `examples/gateway_tests/uvvis_demo.json`.
 - **Plotter overhaul** (`ui/spectra.py`) — IR now stacks multiple molecules like
   NMR (right-click several finished FREQ); both windows share ONE hover-driven
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR

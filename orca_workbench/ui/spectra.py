@@ -441,6 +441,221 @@ class IRSpectrumWindow(tk.Toplevel):
         _save_figure(self.fig, self)
 
 
+# ------------------------------------------------------------------------ UV-Vis
+
+_EV_NM = 1239.841984   # eV*nm: E[eV] = _EV_NM / lambda[nm]
+
+
+class UVVisSpectrumWindow(tk.Toplevel):
+    """Simulated UV-Vis absorption from one or more TD-DFT calcs: oscillator-
+    strength sticks Gaussian-broadened into bands, x-axis in nm (default) or eV,
+    several molecules stacked as colour-matched traces with a hover structure panel."""
+
+    def __init__(self, parent, title, entries):
+        # type: (tk.Misc, str, List[dict]) -> None
+        # entries: [{name, smiles, states:[{wavelength_nm, energy_eV, fosc}]}]
+        super().__init__(parent)
+        self.title("UV-Vis spectrum - {}".format(title))
+        self.geometry("1100x700")
+        try:
+            Figure, FigureCanvasTkAgg = _load_mpl()
+        except Exception as e:
+            self.destroy()
+            _mpl_unavailable_window(parent, e)
+            return
+
+        self.mols = []
+        for idx, e in enumerate(entries):
+            states = [s for s in e.get("states", []) if s.get("wavelength_nm")]
+            if not states:
+                continue
+            self.mols.append({
+                "name": e["name"],
+                "short": e["name"].split(" / ")[0][:18],
+                "color": _COLORS[idx % len(_COLORS)],
+                "nm": [s["wavelength_nm"] for s in states],
+                "ev": [s.get("energy_eV") or (_EV_NM / s["wavelength_nm"]) for s in states],
+                "fosc": [s.get("fosc") or 0.0 for s in states],
+                "smiles": e.get("smiles"),
+            })
+        self._stacked = len(self.mols) > 1
+        self._active = None
+        self._hover_artists = []
+        self._ymax = 1.0
+
+        if not self.mols:
+            ttk.Label(self, text="No excited states found in the selected calculation(s).").pack(
+                padx=20, pady=20)
+            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
+            make_modal(self, parent)
+            return
+
+        bar = ttk.Frame(self)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+        self.axis_var = tk.StringVar(value="nm")
+        ttk.Label(bar, text="x-axis:").pack(side=tk.LEFT)
+        self.axis_btn = ttk.Button(bar, text="Wavelength (nm)", command=self._toggle_axis)
+        self.axis_btn.pack(side=tk.LEFT, padx=6)
+        ttk.Label(bar, text="FWHM:").pack(side=tk.LEFT, padx=(10, 0))
+        self.fwhm_var = tk.DoubleVar(value=20.0)
+        sp = ttk.Spinbox(bar, from_=1, to=200, increment=1, width=6, textvariable=self.fwhm_var,
+                         command=self._redraw)
+        sp.pack(side=tk.LEFT, padx=6)
+        sp.bind("<Return>", lambda e: self._redraw())
+        self.sticks_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Stick lines", variable=self.sticks_var,
+                        command=self._redraw).pack(side=tk.LEFT, padx=10)
+        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+
+        body = ttk.Frame(self)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.struct = _StructurePanel(body, width=300)
+        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
+        self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
+        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
+        pin_device_pixel_ratio(self.canvas)
+        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.after(0, self._first_draw)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        make_modal(self, parent)
+
+    def _first_draw(self):
+        self.update_idletasks()
+        self._redraw()
+
+    def _centers(self, m):
+        return m["nm"] if self.axis_var.get() == "nm" else m["ev"]
+
+    def _toggle_axis(self):
+        if self.axis_var.get() == "nm":
+            self.axis_var.set("ev")
+            self.axis_btn.configure(text="Energy (eV)")
+            self.fwhm_var.set(0.3)
+        else:
+            self.axis_var.set("nm")
+            self.axis_btn.configure(text="Wavelength (nm)")
+            self.fwhm_var.set(20.0)
+        self._redraw()
+
+    def _redraw(self):
+        fwhm = max(0.001, float(self.fwhm_var.get()))
+        nm_axis = self.axis_var.get() == "nm"
+        all_centers = [c for m in self.mols for c in self._centers(m)]
+        lo, hi = S.auto_range(all_centers, min_pad=(30.0 if nm_axis else 0.5))
+        if nm_axis:
+            lo = max(0.0, lo)
+
+        self.fig.clear()
+        self._hover_artists = []
+        ax = self.fig.add_subplot(111)
+        self.ax = ax
+
+        ymax = 0.0
+        for m in self.mols:
+            xs, ys = S.broaden(self._centers(m), m["fosc"], lo, hi, n=1400, fwhm=fwhm,
+                               shape="gaussian")
+            ax.plot(xs, ys, color=m["color"], lw=1.0, label=m["short"])
+            ymax = max(ymax, max(ys) if ys else 0.0)
+            m["_fmax"] = max(m["fosc"]) or 1.0
+        self._ymax = ymax or 1.0
+        ax.set_ylim(0, self._ymax * 1.12)
+
+        if self.sticks_var.get():
+            for m in self.mols:
+                for c, f in zip(self._centers(m), m["fosc"]):
+                    if f <= 0:
+                        continue
+                    ax.vlines(c, 0.0, self._ymax * (f / m["_fmax"]),
+                              color=m["color"], linewidth=0.6, alpha=0.6)
+
+        ax.set_xlim(lo, hi)
+        ax.set_xlabel("wavelength (nm)" if nm_axis else "energy (eV)")
+        ax.set_ylabel("oscillator strength / absorbance (a.u.)")
+        ax.set_title("Simulated UV-Vis spectrum")
+        if self._stacked:
+            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+        else:
+            m = self.mols[0]
+            self.struct.show(0, m["name"], m.get("smiles"), m["color"])
+        self.canvas.draw()
+
+    def _clear_hover(self):
+        for a in self._hover_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._hover_artists = []
+
+    def _on_motion(self, event):
+        ax = getattr(self, "ax", None)
+        if ax is None:
+            return
+        if event.inaxes is not ax or event.xdata is None:
+            if self._hover_artists:
+                self._clear_hover()
+                self.canvas.draw_idle()
+            if self._stacked:
+                self._set_active(None)
+            return
+        x0, x1 = ax.get_xlim()
+        tol = abs(x1 - x0) * 0.012 or 1.0
+        best, best_d = None, 1e9
+        for mi, m in enumerate(self.mols):
+            for c in self._centers(m):
+                d = abs(c - event.xdata)
+                if d < best_d:
+                    best_d, best = d, mi
+        self._clear_hover()
+        if best is None or best_d > tol:
+            if self._stacked:
+                self._set_active(None)
+            self.canvas.draw_idle()
+            return
+        m = self.mols[best]
+        unit = "nm" if self.axis_var.get() == "nm" else "eV"
+        near = [(c, f) for c, f in zip(self._centers(m), m["fosc"])
+                if abs(c - event.xdata) <= tol]
+        if not self._stacked:
+            for c, f in near:
+                if f <= 0:
+                    continue
+                self._hover_artists.append(
+                    ax.vlines(c, 0.0, self._ymax * (f / m["_fmax"]),
+                              color=(0.05, 0.05, 0.05), linewidth=0.9))
+        text = "\n".join("{:.1f} {}   f={:.3f}".format(c, unit, f)
+                         for c, f in sorted(near, key=lambda t: t[0]))
+        if text:
+            self._hover_artists.append(ax.annotate(
+                text, xy=(0.02, 0.98), xycoords="axes fraction", va="top", ha="left",
+                fontsize=9, family="monospace",
+                bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
+        if self._stacked:
+            self._set_active(best)
+        self.canvas.draw_idle()
+
+    def _set_active(self, mi):
+        if mi == self._active:
+            return
+        self._active = mi
+        if mi is None:
+            self.struct.clear()
+        else:
+            m = self.mols[mi]
+            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
+
+    def _save_image(self):
+        _save_figure(self.fig, self)
+
+
 # -------------------------------------------------------------------------- NMR
 
 # Common NMR-active isotopes per element (most-used first). Shielding is

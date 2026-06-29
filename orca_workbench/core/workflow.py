@@ -53,6 +53,17 @@ NODE_TYPES = {
         "kind": "calc",
         "config": {"recipe": ""},
     },
+    # Excited-state (TD-DFT) properties at a fixed geometry: UV-Vis vertical
+    # absorption energies + oscillator strengths. Results-only leaf, like Property
+    # (for excited-state geometry RELAXATION — fluorescence / 0-0 — use an Optimize
+    # node with a TD-DFT opt recipe, which outputs the relaxed geometry).
+    "excited_states": {
+        "label": "Excited States",
+        "inputs": [("geometry", "geometry")],
+        "outputs": [("results", "results")],
+        "kind": "calc",
+        "config": {"recipe": ""},
+    },
     "condition": {
         "label": "Condition",
         "inputs": [("in", "geometry")],
@@ -529,7 +540,7 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
                                     "predicate": src.config.get("predicate", "terminated_ok")}
                 cur = src
                 continue
-            if src.type in ("frequencies", "property", "filter"):
+            if src.type in ("frequencies", "property", "excited_states", "filter"):
                 cur = src
                 continue
             return "initial", None, gate

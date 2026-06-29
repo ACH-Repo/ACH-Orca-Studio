@@ -283,6 +283,56 @@ def parse_homo_lumo(text):
     return {"homo_eV": homo, "lumo_eV": lumo, "gap_eV": lumo - homo}
 
 
+_ABS_HEADER = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
+_ABS_FLOAT = re.compile(r"[-+]?\d+\.\d+(?:[eE][-+]?\d+)?")
+_CM_PER_EV = 8065.543937
+
+
+def parse_absorption_spectrum(text):
+    # type: (str) -> List[dict]
+    """Electronic absorption spectrum from a TD-DFT .out: a list of
+    {state, energy_eV, energy_cm, wavelength_nm, fosc}, in file order.
+
+    Robust across ORCA 5/6 column layouts (ORCA 6 adds an energy-in-eV column
+    before the cm-1 one). We anchor on the row's first float > 1000 — that's the
+    excitation energy in cm-1 (eV values are < ~20, state indices are integers
+    with no decimal point and so aren't matched) — then take the next two floats
+    as wavelength (nm) and oscillator strength. Returns [] if there's no TD-DFT
+    absorption block. NOTE: verify against a real ORCA 6 TD-DFT .out on the gateway.
+    """
+    i = text.rfind(_ABS_HEADER)
+    if i == -1:
+        return []
+    states = []
+    started = False
+    for line in text[i:].splitlines()[1:]:
+        s = line.strip()
+        if not s:
+            if started:
+                break          # blank line ends the table once rows have begun
+            continue
+        if set(s) <= set("-"):
+            continue           # dashed separator
+        vals = [float(x) for x in _ABS_FLOAT.findall(line)]
+        big = next((k for k, v in enumerate(vals) if v > 1000.0), None)
+        if big is None or big + 2 >= len(vals):
+            if started:
+                break
+            continue
+        cm = vals[big]
+        nm = vals[big + 1]
+        fosc = vals[big + 2]
+        if nm <= 0:
+            continue
+        started = True
+        states.append({"state": len(states) + 1,
+                       "energy_cm": cm,
+                       "energy_eV": cm / _CM_PER_EV,
+                       "wavelength_nm": nm,
+                       "fosc": fosc})
+    return states
+
+
 def count_xyz_frames(path):
     # type: (str) -> int
     """Number of frames in a multi-frame .xyz (e.g. an ORCA _trj.xyz). 0 on error."""

@@ -2006,6 +2006,7 @@ class CalculationsTab(ttk.Frame):
 
         finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
         finished_nmr = [c for c in calcs if self._is_finished_type(c, "NMR")]
+        finished_uvvis = [c for c in calcs if self._is_finished_type(c, "TDDFT")]
 
         if finished_freq:
             menu.add_command(label="Plot IR spectrum ({} selected)".format(len(finished_freq)),
@@ -2018,6 +2019,12 @@ class CalculationsTab(ttk.Frame):
                              command=lambda cs=list(finished_nmr): self._plot_nmr(cs))
         else:
             menu.add_command(label="Plot NMR spectrum  (select finished NMR)", state=tk.DISABLED)
+        if finished_uvvis:
+            menu.add_command(label="Plot UV-Vis spectrum ({} selected)".format(len(finished_uvvis)),
+                             command=lambda cs=list(finished_uvvis): self._plot_uvvis(cs))
+        else:
+            menu.add_command(label="Plot UV-Vis spectrum  (select finished TD-DFT)",
+                             state=tk.DISABLED)
 
         if len(calcs) == 1 and calcs[0].job_id:
             menu.add_separator()
@@ -2232,6 +2239,32 @@ class CalculationsTab(ttk.Frame):
         title = (entries[0]["name"].split(" / ")[0] if len(entries) == 1
                  else "{} molecules".format(len(entries)))
         IRSpectrumWindow(self, title, entries)
+
+    def _plot_uvvis(self, calcs):
+        # One or more finished TD-DFT calcs; stacks them as colour-matched traces.
+        entries = []
+        for c in calcs:
+            text = self._read_out(c)
+            if text is None:
+                continue
+            states = orca_parser.parse_absorption_spectrum(text)
+            if not states:
+                continue
+            mol = self.app.project.molecule_by_filename(c.molecule_filename)
+            entries.append({
+                "name": "{} / {}".format(c.molecule_filename, c.recipe_name),
+                "smiles": mol.smiles if mol else None,
+                "states": states,
+            })
+        if not entries:
+            messagebox.showinfo("No UV-Vis data",
+                                "No TD-DFT absorption spectrum found in the selected calculation(s) "
+                                "— are they TD-DFT runs (a %tddft block)?")
+            return
+        from orca_workbench.ui.spectra import UVVisSpectrumWindow
+        title = (entries[0]["name"].split(" / ")[0] if len(entries) == 1
+                 else "{} molecules".format(len(entries)))
+        UVVisSpectrumWindow(self, title, entries)
 
     def _plot_nmr(self, calcs):
         from orca_workbench.ui.spectra import NMROptionsDialog, NMRSpectrumWindow

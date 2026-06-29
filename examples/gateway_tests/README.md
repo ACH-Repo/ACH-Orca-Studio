@@ -32,3 +32,6 @@ self-contained — just copy the one `.json`.
   single-points), build+submit those, then **Assemble ZPVA**. Add isotopologues in
   the node (e.g. an H atom index `2:D`) after Generate Pending shows you the atom
   order.
+- **uvvis_demo.json** — formaldehyde → OPT → **Excited States (TD-DFT)** → Report.
+  Run it, then right-click the finished TD-DFT calc ▸ **Plot UV-Vis spectrum** (or
+  the node's **UV-Vis** button). Uses the cheap DEBUG TD-DFT recipe (TD-HF/STO-3G).

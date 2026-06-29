@@ -143,6 +143,23 @@ def _x_gradient(text, ctx):
     }}
 
 
+def _x_excited_states(text, ctx):
+    """TD-DFT electronic absorption spectrum: the list of excited states (energy,
+    wavelength, oscillator strength) plus the brightest transition (lambda_max).
+    None when there's no TD-DFT absorption block."""
+    states = P.parse_absorption_spectrum(text)
+    if not states:
+        return None
+    bright = max(states, key=lambda s: s["fosc"])
+    return {"excited_states": {
+        "n_states": len(states),
+        "first_eV": states[0]["energy_eV"],
+        "lambda_max_nm": bright["wavelength_nm"],
+        "max_fosc": bright["fosc"],
+        "states": states,
+    }}
+
+
 class Extractor(object):
     def __init__(self, key, label, func, applies_hint=""):
         # type: (str, str, Callable, str) -> None
@@ -160,6 +177,7 @@ EXTRACTORS = [
     Extractor("frequencies", "Frequencies + IR", _x_frequencies, "FREQ"),
     Extractor("thermochemistry", "Thermochemistry (G, H, S, ZPE)", _x_thermochemistry, "FREQ"),
     Extractor("nmr", "NMR shieldings", _x_nmr, "NMR"),
+    Extractor("excited_states", "Excited states (TD-DFT UV-Vis)", _x_excited_states, "TDDFT"),
     Extractor("dipole", "Dipole moment", _x_dipole, "any"),
     Extractor("homo_lumo", "HOMO–LUMO gap", _x_homo_lumo, "any"),
 ]
@@ -224,6 +242,7 @@ def _csv_row(entry):
     thermo = p.get("thermochemistry") or {}
     hl = p.get("homo_lumo") or {}
     nmr = p.get("nmr_shieldings") or []
+    es = p.get("excited_states") or {}
     row = {
         "id": entry.get("id"),
         "label": entry.get("label"),
@@ -240,6 +259,9 @@ def _csv_row(entry):
         "enthalpy_Eh": thermo.get("total_enthalpy"),
         "zpe_Eh": thermo.get("zero_point_energy"),
         "n_nmr_nuclei": (len(nmr) if nmr else None),
+        "n_excited_states": (es.get("n_states") if es else None),
+        "lambda_max_nm": es.get("lambda_max_nm"),
+        "max_fosc": es.get("max_fosc"),
     }
     return row
 
@@ -247,7 +269,7 @@ def _csv_row(entry):
 _CSV_FIELDS = ["id", "label", "molecule", "calctype", "method", "terminated_normally",
                "final_energy_Eh", "gibbs_free_energy_Eh", "enthalpy_Eh", "zpe_Eh",
                "n_imaginary", "lowest_freq_cm", "dipole_debye", "homo_lumo_gap_eV",
-               "n_nmr_nuclei"]
+               "n_nmr_nuclei", "n_excited_states", "lambda_max_nm", "max_fosc"]
 
 
 def write_csv(report, path):
