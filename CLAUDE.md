@@ -191,6 +191,24 @@ off the core path and gracefully degradable.
   structure side panel (`_StructurePanel`) instead of per-trace thumbnails; NMR
   x-range opens with a sensible minimum span (not zoomed to one peak); a
   **Maximize** button on both; on-hover sticks skipped in stacked IR.
+- **Post-hoc properties from converged calcs** (branch `posthoc-properties`, NOT yet
+  merged — gateway-test then merge) — "Q3": more out of a finished job. Three slices:
+  (1) **Population charges** — `orca_parser.parse_population` (Mulliken + Löwdin atomic
+  charges merged by atom index, + Mulliken spin for open-shell) → `reporting._x_population`
+  (auto-appears as a Report-tab checkbox via the `EXTRACTORS` list) + CSV
+  `mulliken_min`/`max`. (2) **Mayer bond orders** — `parse_mayer_bond_orders` (the
+  "Mayer bond orders larger than…" block, several `B(i-El,j-El):order` per line) →
+  `_x_bond_orders`. Both parse the `.out` (no `.gbw` needed) and are BLIND ports —
+  verify vs a real ORCA 6 `.out`. (3) **MOREAD-derive** — a derived calc can restart
+  from a parent's converged wavefunction: `PlannedCalc.orbital_source="parent:<id>"`
+  makes the build inject `! … MOREAD` + `%moinp "<abs parent.gbw>"` via pure
+  `inputs.add_moread`; the Derive flow asks "Restart from orbitals? (MOREAD)". Reuses
+  the existing geometry-parent `afterok` edge; the derived recipe MUST use the same
+  basis as the parent. Tests: `tests/test_population.py`, `tests/test_moread.py` (~182).
+  STILL TODO on this branch (pinned): density/MO **cube generation** (`orca_plot` is a
+  menu-driven integer wizard on gateway 6.0.1 — capture the sequence, drive via a tiny
+  sbatch, open cubes in the EXTERNAL viewer; OR the `%plots`/`MOREAD`/`NOITER` route),
+  and an optional Multiwfn hand-off (`orca_2mkl -molden`).
 
 ## Open work / TODO
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
