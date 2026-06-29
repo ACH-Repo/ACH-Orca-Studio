@@ -226,6 +226,34 @@ def render_inp_xyzfile(recipe, xyz_path, charge, multiplicity):
     return recipe.template.replace(COORDS_PLACEHOLDER, coords)
 
 
+def add_moread(inp_text, gbw_path):
+    # type: (str, str) -> str
+    """Make a rendered ORCA input restart from a converged wavefunction: add
+    `MOREAD` to the first keyword (`!`) line and insert `%moinp "<gbw_path>"` right
+    after it. Use an ABSOLUTE path on the shared filesystem so the job reads the
+    `.gbw` at run time (the parent writes it before this job starts), exactly like
+    the `* xyzfile` geometry mechanism. Idempotent; the input's basis MUST match the
+    `.gbw`'s. Returns the text unchanged if `gbw_path` is empty or there's no `!`
+    line."""
+    if not gbw_path:
+        return inp_text
+    gbw_path = gbw_path.replace("\\", "/")
+    has_moinp = re.search(r"(?im)^\s*%moinp\b", inp_text) is not None
+    out = []
+    done = False
+    for ln in inp_text.split("\n"):
+        if not done and ln.lstrip().startswith("!"):
+            if "moread" not in ln.lower():
+                ln = ln.rstrip() + " MOREAD"
+            out.append(ln)
+            if not has_moinp:
+                out.append('%moinp "{}"'.format(gbw_path))
+            done = True
+            continue
+        out.append(ln)
+    return "\n".join(out) if done else inp_text
+
+
 def parse_cores(inp_text):
     # type: (str) -> int
     """Return the nprocs declared in `%pal nprocs N`. Defaults to 1 if absent."""

@@ -915,7 +915,15 @@ class CalculationsTab(ttk.Frame):
             [r.name for r in self.app.recipes])
         if not recipe_name:
             return
-        children = [self._make_child(p, recipe_name) for p in parents]
+        read_orb = messagebox.askyesno(
+            "Restart from orbitals?",
+            "Restart the derived calculation(s) from each parent's converged orbitals "
+            "(MOREAD)?\n\nThis reuses the parent's .gbw as the SCF guess — much faster "
+            "convergence — and is ideal for getting an extra property (NMR / EPR / "
+            "polarisability / …) from an already-converged job at the same geometry.\n\n"
+            "Requirement: the derived recipe must use the SAME basis set as the parent. "
+            "Choose No for a normal fresh-SCF derived calc.")
+        children = [self._make_child(p, recipe_name, read_orbitals=read_orb) for p in parents]
         self.app.mark_dirty()
         self.refresh()
         keep = [c.id for c in children if self.tree.exists(c.id)]
@@ -924,7 +932,7 @@ class CalculationsTab(ttk.Frame):
             self.tree.see(keep[0])
         self.app.set_status("Derived {} calculation(s).".format(len(children)))
 
-    def _make_child(self, parent, recipe_name):
+    def _make_child(self, parent, recipe_name, read_orbitals=False):
         child = PlannedCalc(
             id=new_calc_id(),
             molecule_filename=parent.molecule_filename,
@@ -932,6 +940,7 @@ class CalculationsTab(ttk.Frame):
             category=parent.category,
             geometry_source="parent:" + parent.id,
             parent_id=parent.id,
+            orbital_source=("parent:" + parent.id) if read_orbitals else None,
         )
         self.app.project.planned_calcs.append(child)
         return child
@@ -1166,6 +1175,18 @@ class CalculationsTab(ttk.Frame):
         else:
             atoms = self._resolve_geometry(calc, mol)
             inp_text = inputs_mod.render_inp(recipe, atoms, mol.charge, mol.multiplicity)
+        # Restart from a parent's converged orbitals (MOREAD), if requested. The .gbw
+        # is referenced by absolute path on the shared FS so it's read at run time
+        # (the parent finishes first via the dependency on its geometry).
+        osrc = getattr(calc, "orbital_source", None)
+        if osrc and osrc.startswith("parent:"):
+            par = self.app.project.calc_by_id(osrc[len("parent:"):])
+            if par is not None and par.rundir:
+                gbw_abs = os.path.join(root, par.rundir, par.molecule_filename + ".gbw")
+                inp_text = inputs_mod.add_moread(inp_text, gbw_abs)
+            else:
+                self._log("MOREAD skipped for {}: orbital parent not built yet (no rundir)."
+                          .format(self._short(calc)))
         # When running on this machine (not a cluster), don't let a recipe ask for
         # more cores than the CPU has — otherwise a first local job over-subscribes
         # and crawls. Clamp %pal nprocs to the detected core count.
@@ -1191,6 +1212,7 @@ class CalculationsTab(ttk.Frame):
             "variant": recipe.variant,
             "category": calc.category,
             "geometry_source": calc.geometry_source,
+            "orbital_source": getattr(calc, "orbital_source", None),
             "initial_xyz": mol.xyz_path,
             "origin_node": calc.origin_node,
         }) + inp_text

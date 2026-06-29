@@ -75,6 +75,10 @@ class PlannedCalc(object):
     # stable identity, so re-running a pipeline reuses calcs instead of
     # duplicating them.
     origin_node: Optional[str] = None
+    # Restart from another calc's converged wavefunction (MOREAD): "parent:<calc_id>"
+    # makes the build inject `! ... MOREAD` + `%moinp "<that calc's .gbw>"`. The
+    # recipe MUST use the same basis as that parent. None = fresh SCF guess.
+    orbital_source: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d):
@@ -84,6 +88,7 @@ class PlannedCalc(object):
         d.setdefault("parent_id", None)
         d.setdefault("gate", None)
         d.setdefault("origin_node", None)
+        d.setdefault("orbital_source", None)
         return cls(**d)
 
     def children(self, project):
