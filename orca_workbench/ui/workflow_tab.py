@@ -1322,6 +1322,7 @@ class WorkflowTab(ttk.Frame):
         def ok():
             node.config[key] = getval()
             self._commit()
+            self._redraw()      # repaint immediately so the new title/text shows
             top.destroy()
 
         if node.type == "comment":
