@@ -308,10 +308,13 @@ class WorkflowTab(ttk.Frame):
                 b.pack(side=tk.LEFT, padx=1)
                 tip(b, "Open the live SCF / geometry-convergence plot.")
             if done:
-                b = ttk.Button(btns, text="Struct", width=7,
+                lbl3d = "Modes" if ctype == "FREQ" else "Struct"
+                b = ttk.Button(btns, text=lbl3d, width=7,
                                command=lambda c=calc: self._open_structure(c))
                 b.pack(side=tk.LEFT, padx=1)
-                tip(b, "Open the (optimised) geometry in your external 3D viewer.")
+                tip(b, "Open in your external 3D viewer (Avogadro/molden). For a FREQ job this "
+                       "opens the .out so you can animate the normal modes; otherwise the "
+                       "optimised geometry.")
                 b2 = ttk.Button(btns, text="Out", width=4,
                                 command=lambda c=calc: self._open_output(c))
                 b2.pack(side=tk.LEFT, padx=1); tip(b2, "Open the ORCA .out file.")
@@ -328,23 +331,16 @@ class WorkflowTab(ttk.Frame):
         self._os_open(path)
 
     def _open_structure(self, calc):
-        """Open the calc's geometry in the user's external 3D viewer (the .xyz the
-        optimisation wrote, else the molecule's input .xyz)."""
-        root = self.app.project.root()
-        mol = self.app.project.molecule_by_filename(calc.molecule_filename)
-        path = None
-        if calc.rundir:
-            cand = os.path.join(root, calc.rundir, calc.molecule_filename + ".xyz")
-            if os.path.isfile(cand):
-                path = cand
-        if path is None and mol is not None and mol.xyz_path:
-            p = mol.xyz_path if os.path.isabs(mol.xyz_path) else os.path.join(root, mol.xyz_path)
-            if os.path.isfile(p):
-                path = p
-        if path is None:
-            self.app.set_status("No geometry file found for this calculation yet.")
+        """Open the calc in the external 3D viewer (Avogadro / molden). Uses the
+        Calculations tab's smart picker, so a FREQ job opens its .out — letting you
+        animate the normal modes — while geometry jobs open the optimised .xyz."""
+        ct = getattr(self.app, "calculations_tab", None)
+        path = ct.viewer_file_for_calc(calc) if ct is not None else None
+        if not path:
+            self.app.set_status("No geometry/output file for this calculation yet.")
             return
-        self._os_open(path)
+        from orca_workbench.ui.molecules_tab import open_xyz_3d
+        open_xyz_3d(self, self.app, path)
 
     def _os_open(self, path):
         import platform

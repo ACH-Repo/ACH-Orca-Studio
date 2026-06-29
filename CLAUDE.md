@@ -74,6 +74,16 @@ off the core path and gracefully degradable.
 - **Right-click a finished OPT** → open optimised geometry / trajectory movie
   (via shared `open_xyz_3d`, → molden on gateway). (`ui/calculations_tab.py`,
   `ui/molecules_tab.py`)
+- **3D-viewer file rule** (same branch) — `calculations_tab.viewer_file_for_calc`
+  picks the *richest* file a molecular viewer can use: a **FREQ** job opens its
+  **`.out`** (Avogadro/molden animate the normal modes; a bare `.xyz` can't),
+  everything else the optimised geometry `.xyz`. Wired into the Calc-tab
+  right-click ("Open normal modes (3D viewer)" for a finished FREQ) and the
+  Workflow node results button (labelled **Modes** for FREQ, **Struct** otherwise;
+  now launches the real viewer via `open_xyz_3d`, not the OS default). Extend
+  `_OUT_VIEWER_CALCTYPES` when density/MO viewing (needs print keywords or `.gbw`)
+  is wired. (molden's ORCA-`.out` mode support is unverified on the gateway — if it
+  won't animate, the fallback is generating a mode-displacement multi-frame xyz.)
 - **Import/recipe improvements** (branch `import-and-recipes-improvements`) —
   (a) file-imported structures carry `Molecule.coords_locked` so SMILES
   generation can't overwrite the original geometry (refused with a note; delete +

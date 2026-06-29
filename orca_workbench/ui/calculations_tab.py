@@ -2046,6 +2046,16 @@ class CalculationsTab(ttk.Frame):
                 menu.add_command(label="Open trajectory as movie",
                                  command=lambda p=trj: self._open_3d(p))
 
+        # Finished FREQ: open the .out in the 3D viewer to animate the normal modes
+        # (Avogadro reads ORCA output directly; a bare .xyz has no mode data).
+        if len(finished_freq) == 1:
+            out = self._out_path(finished_freq[0])
+            if out and os.path.isfile(out):
+                if not finished_opt:
+                    menu.add_separator()
+                menu.add_command(label="Open normal modes (3D viewer)",
+                                 command=lambda p=out: self._open_3d(p))
+
         # Manual dependency re-linking — e.g. after importing a project whose save
         # file was lost, point a flat NMR/FREQ calc at its OPT as the parent so it
         # inherits the optimised geometry. (Affects future rebuilds, not the run
@@ -2200,6 +2210,38 @@ class CalculationsTab(ttk.Frame):
     def _open_3d(self, path):
         from orca_workbench.ui.molecules_tab import open_xyz_3d
         open_xyz_3d(self, self.app, path)
+
+    # Calc types whose richer content (vibrational modes) lives in the ORCA .out,
+    # which Avogadro/molden read and animate — a bare .xyz can't show it. (Density/
+    # MO visualisation needs explicit print keywords or a .gbw, so those aren't a
+    # blanket rule here; FREQ is the always-correct case.)
+    _OUT_VIEWER_CALCTYPES = {"FREQ"}
+
+    def viewer_file_for_calc(self, calc):
+        """Best file to open in a 3D molecular viewer for a finished calc. For a
+        FREQ job that's the ORCA .out — Avogadro (and molden) animate the normal
+        modes from it, which a bare .xyz can't. For everything else it's the
+        geometry: the optimised <mol>.xyz in the run dir, then the .out, then the
+        molecule's input .xyz. Returns an absolute path or None."""
+        recipe = self.app.get_recipe(calc.recipe_name)
+        ctype = (recipe.calctype if recipe else "").upper()
+        if ctype in self._OUT_VIEWER_CALCTYPES:
+            out = self._out_path(calc)
+            if out and os.path.isfile(out):
+                return out
+        geom = self._calc_file(calc, calc.molecule_filename + ".xyz")
+        if geom:
+            return geom
+        out = self._out_path(calc)
+        if out and os.path.isfile(out):
+            return out
+        mol = self.app.project.molecule_by_filename(calc.molecule_filename)
+        if mol and mol.xyz_path:
+            root = self.app.project.root()
+            p = mol.xyz_path if os.path.isabs(mol.xyz_path) else os.path.join(root, mol.xyz_path)
+            if os.path.isfile(p):
+                return p
+        return None
 
     def _is_finished_type(self, calc, calctype):
         recipe = self.app.get_recipe(calc.recipe_name)
