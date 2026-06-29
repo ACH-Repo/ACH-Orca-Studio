@@ -46,19 +46,14 @@ NODE_TYPES = {
         "kind": "calc",
         "config": {"recipe": ""},
     },
+    # Any single-geometry property calculation: SP, NMR, dipole, AND TD-DFT
+    # vertical UV-Vis (excited states ARE a property — geometry in, results out).
+    # Which property is run is the recipe's job (calctype drives the report
+    # extractors + plot buttons). Excited-state geometry RELAXATION (S1 opt,
+    # fluorescence/0-0) is NOT a property — use an Optimize node with a TD-DFT opt
+    # recipe, which outputs the relaxed geometry.
     "property": {
-        "label": "Property (SP/NMR/…)",
-        "inputs": [("geometry", "geometry")],
-        "outputs": [("results", "results")],
-        "kind": "calc",
-        "config": {"recipe": ""},
-    },
-    # Excited-state (TD-DFT) properties at a fixed geometry: UV-Vis vertical
-    # absorption energies + oscillator strengths. Results-only leaf, like Property
-    # (for excited-state geometry RELAXATION — fluorescence / 0-0 — use an Optimize
-    # node with a TD-DFT opt recipe, which outputs the relaxed geometry).
-    "excited_states": {
-        "label": "Excited States",
+        "label": "Property (SP/NMR/UV-Vis/…)",
         "inputs": [("geometry", "geometry")],
         "outputs": [("results", "results")],
         "kind": "calc",
@@ -540,7 +535,7 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
                                     "predicate": src.config.get("predicate", "terminated_ok")}
                 cur = src
                 continue
-            if src.type in ("frequencies", "property", "excited_states", "filter"):
+            if src.type in ("frequencies", "property", "filter"):
                 cur = src
                 continue
             return "initial", None, gate

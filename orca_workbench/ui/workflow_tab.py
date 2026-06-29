@@ -88,8 +88,11 @@ class WorkflowTab(ttk.Frame):
         bar = ttk.Frame(self)
         bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(bar, text="Add node:").pack(side=tk.LEFT, padx=(2, 4))
-        for ntype in ("molecules", "optimize", "frequencies", "property", "excited_states",
-                      "condition", "filter", "zpva", "report"):
+        # Palette = the common pipeline nodes only. Niche/utility nodes (Filter,
+        # ZPVA) stay one keystroke away via the F3 / drag-on-empty search popup,
+        # which is registry-driven so it lists every node type.
+        for ntype in ("molecules", "optimize", "frequencies", "property",
+                      "condition", "report"):
             label = wf_mod.NODE_TYPES[ntype]["label"]
             ttk.Button(bar, text=label, width=max(8, len(label) + 1),
                        command=lambda t=ntype: self._add_node(t)).pack(side=tk.LEFT, padx=1)
@@ -203,13 +206,8 @@ class WorkflowTab(ttk.Frame):
             anchor=tk.W, padx=8, pady=(8, 4))
 
         if node.type in wf_mod.CALC_NODE_TYPES:
-            ttk.Label(self.cfg_frame, text="Recipe:").pack(anchor=tk.W, padx=8)
-            var = tk.StringVar(value=node.config.get("recipe", ""))
-            cb = ttk.Combobox(self.cfg_frame, textvariable=var, state="readonly",
-                              values=[r.name for r in self.app.recipes], width=26)
-            cb.pack(anchor=tk.W, padx=8, pady=2)
-            cb.bind("<<ComboboxSelected>>",
-                    lambda e, n=node, v=var: self._set_cfg(n, "recipe", v.get()))
+            ttk.Label(self.cfg_frame, text="Recipe (type to filter):").pack(anchor=tk.W, padx=8)
+            self._recipe_search_combo(node, "recipe").pack(anchor=tk.W, padx=8, pady=2)
         elif node.type == "molecules":
             mode = tk.StringVar(value=node.config.get("mode", "all"))
             ttk.Radiobutton(self.cfg_frame, text="All molecules", variable=mode, value="all",
@@ -263,6 +261,40 @@ class WorkflowTab(ttk.Frame):
         ttk.Separator(self.cfg_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=6)
         ttk.Button(self.cfg_frame, text="Delete node",
                    command=lambda nid=node.id: self._delete_node(nid)).pack(anchor=tk.W, padx=8)
+
+    def _recipe_search_combo(self, node, key="recipe"):
+        """An editable recipe combobox that filters its list as you TYPE — the
+        recipe library can be long. Only a real recipe name is committed (on pick /
+        Return / focus-out); partial text just narrows the dropdown. Returns the
+        widget so the caller packs it."""
+        names = [r.name for r in self.app.recipes]
+        var = tk.StringVar(value=node.config.get(key, ""))
+        cb = ttk.Combobox(self.cfg_frame, textvariable=var, values=names, width=28)
+
+        def commit(*_a):
+            v = var.get().strip()
+            if v in names:
+                self._set_cfg(node, key, v)
+
+        def on_key(e):
+            if e.keysym in ("Up", "Down", "Return", "Escape", "Tab", "Left", "Right"):
+                return
+            typed = var.get().strip().lower()
+            matches = [n for n in names if typed in n.lower()] if typed else names
+            cb["values"] = matches
+            if typed and matches:
+                try:
+                    cb.tk.call("ttk::combobox::Post", cb)   # show the filtered dropdown
+                    cb.focus_set()                          # keep typing in the entry
+                    cb.icursor("end")
+                except tk.TclError:
+                    pass
+
+        cb.bind("<KeyRelease>", on_key, add="+")
+        cb.bind("<<ComboboxSelected>>", commit, add="+")
+        cb.bind("<Return>", commit, add="+")
+        cb.bind("<FocusOut>", commit, add="+")
+        return cb
 
     def _build_results_section(self, node):
         """List this calc node's expanded calculations with one-click launchers
@@ -965,7 +997,7 @@ class WorkflowTab(ttk.Frame):
         port's owner) lets us refine further by chemical prerequisite."""
         # Canonical ordering, but derived from the registry so every node type
         # (including new ones like ZPVA / Filter) shows up automatically.
-        canonical = ["molecules", "optimize", "frequencies", "property", "excited_states",
+        canonical = ["molecules", "optimize", "frequencies", "property",
                      "condition", "filter", "zpva", "report"]
         order = ([t for t in canonical if t in wf_mod.NODE_TYPES]
                  + [t for t in wf_mod.NODE_TYPES if t not in canonical])
@@ -1141,8 +1173,9 @@ class WorkflowTab(ttk.Frame):
             ent.pack(anchor=tk.W, padx=8, pady=2)
             var.trace_add("write", lambda *_a, k=key, v=var: self._set_cfg(node, k, v.get()))
 
-        labeled_combo("Displaced single-point recipe (property + EnGrad):", "recipe",
-                      [r.name for r in self.app.recipes], "")
+        ttk.Label(f, text="Displaced single-point recipe (property + EnGrad, type to filter):").pack(
+            anchor=tk.W, padx=8, pady=(6, 0))
+        self._recipe_search_combo(node, "recipe").pack(anchor=tk.W, padx=8, pady=2)
         labeled_combo("Property to ZPVA-correct:", "property",
                       ("nmr_shielding", "energy", "dipole"), "nmr_shielding")
         labeled_entry("Target nucleus (NMR: index or element, e.g. 0 or F):", "target", "", 12)

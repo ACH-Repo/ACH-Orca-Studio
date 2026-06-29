@@ -69,34 +69,14 @@ def test_report_extractor_none_without_block():
     assert reporting._x_excited_states("no tddft here", ctx=None) is None
 
 
-# --------------------------------------------------------------- workflow node
+# ----------------------------------------------------- excited states = Property
 from orca_workbench.core import workflow as wf
-from orca_workbench.core.project import PlannedCalc, new_calc_id
 
 
-def test_excited_states_node_registered():
-    assert "excited_states" in wf.NODE_TYPES
-    assert "excited_states" in wf.CALC_NODE_TYPES          # statically expanded
-    assert dict(wf.NODE_TYPES["excited_states"]["outputs"]) == {"results": "results"}
-
-
-def test_excited_states_expands_from_optimize_to_report():
-    w = wf.Workflow()
-    m = w.add_node("molecules")
-    o = w.add_node("optimize", config={"recipe": "opt"})
-    es = w.add_node("excited_states", config={"recipe": "uvvis"})
-    r = w.add_node("report")
-    w.add_edge(m.id, "geometry", o.id, "geometry")
-    w.add_edge(o.id, "geometry", es.id, "geometry")
-    ok, _why = w.can_connect(es.id, "results", r.id, "results")
-    assert ok
-    w.add_edge(es.id, "results", r.id, "results")
-
-    def fac(mol, recipe, cat, gs, par, gate, orig):
-        return PlannedCalc(id=new_calc_id(), molecule_filename=mol, recipe_name=recipe,
-                           category=cat, geometry_source=gs, parent_id=par, gate=gate,
-                           origin_node=orig)
-
-    calcs, _w, _n = wf.expand_to_calcs(w, ["A"], fac)
-    by = {c.recipe_name: c for c in calcs}
-    assert "uvvis" in by and by["uvvis"].parent_id == by["opt"].id   # ES uses the OPT geometry
+def test_excited_states_folded_into_property():
+    # Vertical TD-DFT (UV-Vis) is a property computed at a fixed geometry, so there
+    # is NO dedicated node — the Property node + a TD-DFT recipe covers it (the plot
+    # button + report extractor key off the recipe's calctype, not a node type).
+    assert "excited_states" not in wf.NODE_TYPES
+    assert "property" in wf.NODE_TYPES
+    assert "UV-Vis" in wf.NODE_TYPES["property"]["label"]

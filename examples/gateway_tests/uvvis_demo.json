@@ -23,7 +23,7 @@
     "category": "wf",
     "nodes": [
       {
-        "id": "f8a8cce9c0",
+        "id": "a9dec43aab",
         "type": "molecules",
         "x": 40.0,
         "y": 120.0,
@@ -33,7 +33,7 @@
         }
       },
       {
-        "id": "c7c193089c",
+        "id": "56469beca6",
         "type": "optimize",
         "x": 240.0,
         "y": 120.0,
@@ -42,8 +42,8 @@
         }
       },
       {
-        "id": "3a01c3880e",
-        "type": "excited_states",
+        "id": "5af2b95d00",
+        "type": "property",
         "x": 440.0,
         "y": 120.0,
         "config": {
@@ -51,7 +51,7 @@
         }
       },
       {
-        "id": "c09ad2104c",
+        "id": "92651a2155",
         "type": "report",
         "x": 660.0,
         "y": 120.0,
@@ -62,24 +62,24 @@
     ],
     "edges": [
       {
-        "id": "13cebb2715",
-        "src_node": "f8a8cce9c0",
+        "id": "8bd922084d",
+        "src_node": "a9dec43aab",
         "src_port": "geometry",
-        "dst_node": "c7c193089c",
+        "dst_node": "56469beca6",
         "dst_port": "geometry"
       },
       {
-        "id": "0ea1198bc5",
-        "src_node": "c7c193089c",
+        "id": "f543439eb8",
+        "src_node": "56469beca6",
         "src_port": "geometry",
-        "dst_node": "3a01c3880e",
+        "dst_node": "5af2b95d00",
         "dst_port": "geometry"
       },
       {
-        "id": "34414d7adf",
-        "src_node": "3a01c3880e",
+        "id": "11a63c4c3c",
+        "src_node": "5af2b95d00",
         "src_port": "results",
-        "dst_node": "c09ad2104c",
+        "dst_node": "92651a2155",
         "dst_port": "results"
       }
     ]

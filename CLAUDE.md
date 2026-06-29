@@ -140,6 +140,12 @@ off the core path and gracefully degradable.
   freq check stays as the backstop. (Rationale: ZPVA = a post-BO vibrational
   averaging of a property over zero-point nuclear motion — harmonic curvature +
   anharmonic mean-shift — so it requires normal modes, i.e. a Freq job.)
+- **Workflow UX: searchable recipes + trimmed palette** (same branch) — the
+  per-node "Recipe" picker is now a **type-to-filter** combobox
+  (`_recipe_search_combo`; the library is long), and the top palette buttons are
+  curated to the common pipeline only (Molecules · Optimize · Frequencies ·
+  Property · Condition · Report). Niche/utility nodes (**Filter, ZPVA**) live only
+  in the F3 / drag-on-empty search popup (registry-driven, so still complete).
 - **Editable SLURM template + DEBUG recipes** (same branch) — the SLURM submit
   script is now editable per-machine via **Settings ▸ SLURM submit script…**
   (`_SlurmTemplateDialog`), stored in config (`slurm_template` key, NOT in project
@@ -157,10 +163,12 @@ off the core path and gracefully degradable.
   "nodes + recipes + spectra" (no benchmark recreation). `orca_parser.parse_absorption_spectrum`
   reads the ABSORPTION SPECTRUM block (robust across ORCA 5/6 layouts — anchors on
   the first float >1000 = cm⁻¹) → `{state,energy_eV,energy_cm,wavelength_nm,fosc}`;
-  a `reporting._x_excited_states` extractor (+ lambda_max/max_fosc CSV cols); an
-  **Excited States** workflow node (`kind` calc, results-only leaf like Property —
-  for excited-state *relaxation* use an Optimize node with an S1-opt recipe);
-  recipes `uvvis_tddft_pbe0` (vertical), the existing CAM-B3LYP (CT), `es_opt_s1_pbe0`
+  a `reporting._x_excited_states` extractor (+ lambda_max/max_fosc CSV cols).
+  **No dedicated Excited-States node** — vertical UV-Vis *is* a property, so it's
+  the **Property** node + a TD-DFT recipe (the plot button + extractor key off the
+  recipe's `calctype`, not a node type; Property's label is now `(SP/NMR/UV-Vis/…)`).
+  Excited-state *relaxation* (S1 opt) is an Optimize node with an S1-opt recipe.
+  Recipes `uvvis_tddft_pbe0` (vertical), the existing CAM-B3LYP (CT), `es_opt_s1_pbe0`
   (emission/0-0), and a cheap `debug_tddft_hf_sto3g`; and a `UVVisSpectrumWindow`
   (`ui/spectra.py`, nm/eV axis toggle, FWHM, Gaussian-broadened fosc sticks, shared
   hover structure panel) opened via right-click ▸ Plot UV-Vis on a finished TDDFT
