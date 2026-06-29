@@ -146,6 +146,17 @@ off the core path and gracefully degradable.
   curated to the common pipeline only (Molecules · Optimize · Frequencies ·
   Property · Condition · Report). Niche/utility nodes (**Filter, ZPVA**) live only
   in the F3 / drag-on-empty search popup (registry-driven, so still complete).
+- **Node-editor annotations + auto-size** (same branch) — nodes now **auto-size
+  their width to the (bold) title** (`_node_width`, used everywhere the right
+  edge / ports / hit-test is computed) so long labels don't overflow. Two new
+  `kind:"annotation"` node types (no ports, inert — ignored by validate/expand):
+  **`comment`** (a resizable text note, key **`T`**, double-click to edit) and
+  **`frame`** (key **`C`** frames the selected nodes — a titled box drawn behind
+  them via `_nodes_in_frame` that drags its contents along; double-click the title
+  to rename). Both resize by dragging the bottom-right corner (`_resize_handle_at`
+  + a "resize" drag mode). Annotations are kept out of the F3 popup (spawned only
+  by T/C). Hotkeys are **canvas-scoped** (only fire when the editor has focus —
+  standard, and safe vs. typing in fields).
 - **Editable SLURM template + DEBUG recipes** (same branch) — the SLURM submit
   script is now editable per-machine via **Settings ▸ SLURM submit script…**
   (`_SlurmTemplateDialog`), stored in config (`slurm_template` key, NOT in project

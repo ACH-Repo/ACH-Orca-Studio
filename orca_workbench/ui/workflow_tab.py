@@ -23,6 +23,8 @@ from orca_workbench.core import diagnostics as diag
 from orca_workbench.core import workflow as wf_mod
 from orca_workbench.core.inputs import safe_path_component
 from orca_workbench.core.project import Molecule, PlannedCalc, new_calc_id
+from orca_workbench.ui.modal import make_modal
+from orca_workbench.ui.shortcuts import install_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
 
@@ -127,7 +129,8 @@ class WorkflowTab(ttk.Frame):
         ttk.Label(self, text="Drag a node to move · drag an output port onto an input to wire (drop "
                   "on empty space to pick a new node) · drag empty space to box-select · Ctrl+click "
                   "to multi-select · Ctrl+A all · J connects two selected nodes · F3 adds a node · "
-                  "scroll to zoom · middle/right-drag to pan · Delete removes. "
+                  "C frames the selection · T adds a comment (double-click to edit, drag its corner "
+                  "to resize) · scroll to zoom · middle/right-drag to pan · Delete removes. "
                   "Select a node then Run pipeline to run just that network.",
                   foreground="#666", wraplength=1100, justify=tk.LEFT).pack(
                       side=tk.TOP, anchor=tk.W, padx=8, pady=2)
@@ -181,6 +184,13 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<j>", lambda e: self._connect_selected())
         self.canvas.bind("<J>", lambda e: self._connect_selected())
         self.canvas.bind("<F3>", lambda e: self._on_search_add())
+        # Annotations (canvas-scoped, so they only fire in the node editor):
+        # C frames the selected nodes (Unreal-style), T drops a comment note.
+        self.canvas.bind("<c>", lambda e: self._frame_selection())
+        self.canvas.bind("<C>", lambda e: self._frame_selection())
+        self.canvas.bind("<t>", lambda e: self._add_comment())
+        self.canvas.bind("<T>", lambda e: self._add_comment())
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
 
         self.cfg_frame = ttk.LabelFrame(paned, text="Node settings")
         paned.add(self.cfg_frame, weight=1)
@@ -254,6 +264,16 @@ class WorkflowTab(ttk.Frame):
             self._build_zpva_panel(node)
         elif node.type == "filter":
             self._build_filter_panel(node)
+        elif self._is_annotation(node):
+            what = "title" if node.type == "frame" else "text"
+            ttk.Label(self.cfg_frame, text="A {} annotation (not part of the run).".format(
+                node.type), foreground="#777", wraplength=210, justify=tk.LEFT).pack(
+                    anchor=tk.W, padx=8, pady=(0, 4))
+            ttk.Button(self.cfg_frame, text="Edit {}…".format(what),
+                       command=lambda n=node: self._edit_annotation_text(n)).pack(anchor=tk.W, padx=8)
+            ttk.Label(self.cfg_frame, text="Double-click it on the canvas to edit; drag its "
+                      "bottom-right corner to resize.", foreground="#999", wraplength=210,
+                      justify=tk.LEFT).pack(anchor=tk.W, padx=8, pady=(2, 0))
 
         if node.type in wf_mod.CALC_NODE_TYPES:
             self._build_results_section(node)
@@ -436,6 +456,41 @@ class WorkflowTab(ttk.Frame):
             measured = int(len(node.label) * 7.2)
         return float(max(NODE_W, measured + 28))
 
+    def _is_annotation(self, node):
+        return node is not None and node.kind == "annotation"
+
+    def _node_rect(self, node):
+        """(x, y, w, h) in world units for any node — regular (width fits the
+        title, height fits the ports) or annotation (its own config w/h)."""
+        if self._is_annotation(node):
+            return (node.x, node.y, float(node.config.get("w", 200.0)),
+                    float(node.config.get("h", 90.0)))
+        return (node.x, node.y, self._node_width(node), self._node_height(node))
+
+    def _nodes_in_frame(self, frame):
+        """Ids of non-frame nodes whose centre lies inside the frame's rect — the
+        nodes a frame drags along with it."""
+        fx, fy, fw, fh = self._node_rect(frame)
+        out = []
+        for n in self.wf.nodes:
+            if n.id == frame.id or n.type == "frame":
+                continue
+            x, y, w, h = self._node_rect(n)
+            if fx <= x + w / 2.0 <= fx + fw and fy <= y + h / 2.0 <= fy + fh:
+                out.append(n.id)
+        return out
+
+    def _resize_handle_at(self, cx, cy):
+        """Id of an annotation whose bottom-right resize handle is under (cx, cy)."""
+        tol = 9.0 / max(self._zoom, 0.05)
+        for n in reversed(self.wf.nodes):
+            if not self._is_annotation(n):
+                continue
+            x, y, w, h = self._node_rect(n)
+            if abs(cx - (x + w)) <= tol and abs(cy - (y + h)) <= tol:
+                return n.id
+        return None
+
     def _port_xy(self, node, port_name, is_input):
         ports = node.inputs() if is_input else node.outputs()
         for i, (name, _t) in enumerate(ports):
@@ -449,10 +504,19 @@ class WorkflowTab(ttk.Frame):
 
     def _redraw(self):
         self.canvas.delete("all")
+        # Frames sit behind everything; comments behind the real nodes; then edges;
+        # then the real (computational) nodes on top.
+        for n in self.wf.nodes:
+            if n.type == "frame":
+                self._draw_frame(n)
+        for n in self.wf.nodes:
+            if n.type == "comment":
+                self._draw_comment(n)
         for e in self.wf.edges:
             self._draw_edge(e)
         for n in self.wf.nodes:
-            self._draw_node(n)
+            if not self._is_annotation(n):
+                self._draw_node(n)
         # transient wire while connecting
         if self._mode == "wire" and self._drag and self._drag.get("temp"):
             x0, y0 = self._w2s(*self._drag["from_xy"])
@@ -553,6 +617,47 @@ class WorkflowTab(ttk.Frame):
                                 font=("TkDefaultFont", self._fs(7)), fill="#444",
                                 tags=("P:" + node_id,))
 
+    def _draw_resize_handle(self, x, y, w, h, ntag, color):
+        z = self._zoom
+        s = 6 * z
+        self.canvas.create_line(x + w - s, y + h, x + w, y + h - s, fill=color, tags=(ntag,))
+        self.canvas.create_line(x + w - s * 1.9, y + h, x + w, y + h - s * 1.9, fill=color, tags=(ntag,))
+
+    def _draw_comment(self, node):
+        z = self._zoom
+        x, y = self._w2s(node.x, node.y)
+        _x, _y, ww, hh = self._node_rect(node)
+        w, h = ww * z, hh * z
+        sel = node.id in self._sel_nodes
+        ntag = "N:" + node.id
+        outline = _SEL if sel else "#d4b94a"
+        self.canvas.create_rectangle(x, y, x + w, y + h, fill="#fdf6d8", outline=outline,
+                                     width=2 if sel else 1, tags=(ntag, "nodebody"))
+        self.canvas.create_text(x + 7 * z, y + 6 * z, anchor=tk.NW, width=max(10.0, w - 14 * z),
+                                text=node.config.get("text", ""),
+                                font=("TkDefaultFont", self._fs(9)), fill="#5a4a00", tags=(ntag,))
+        self._draw_resize_handle(x, y, w, h, ntag, outline)
+
+    def _draw_frame(self, node):
+        z = self._zoom
+        x, y = self._w2s(node.x, node.y)
+        _x, _y, ww, hh = self._node_rect(node)
+        w, h = ww * z, hh * z
+        sel = node.id in self._sel_nodes
+        ntag = "N:" + node.id
+        outline = _SEL if sel else "#b9a24a"
+        th = 20 * z
+        # transparent body so contained nodes show through; coloured title bar
+        self.canvas.create_rectangle(x, y, x + w, y + h, fill="", outline=outline,
+                                     width=2 if sel else 1, tags=(ntag, "nodebody"))
+        self.canvas.create_rectangle(x, y, x + w, y + th, fill="#f0e6c2", outline=outline,
+                                     width=1, tags=(ntag,))
+        self.canvas.create_text(x + 7 * z, y + th / 2, anchor=tk.W,
+                                text=node.config.get("title", "Group"),
+                                font=("TkDefaultFont", self._fs(9), "bold"), fill="#5a4a20",
+                                tags=(ntag,))
+        self._draw_resize_handle(x, y, w, h, ntag, outline)
+
     def _draw_edge(self, e):
         src = self.wf.node(e.src_node)
         dst = self.wf.node(e.dst_node)
@@ -596,6 +701,16 @@ class WorkflowTab(ttk.Frame):
         self.canvas.focus_set()
         cx, cy = self._cxy(event)
         ctrl = bool(event.state & 0x0004)
+        # resize handle of a comment / frame takes priority over everything
+        rid = self._resize_handle_at(cx, cy)
+        if rid is not None:
+            n = self.wf.node(rid)
+            self._select_only(rid)
+            self._mode = "resize"
+            self._drag = {"nid": rid, "ox": cx, "oy": cy,
+                          "w0": float(n.config.get("w", 200.0)),
+                          "h0": float(n.config.get("h", 90.0))}
+            return
         hit = self._hit(event)
         if hit is None:
             # empty space → box select (Ctrl extends the current selection)
@@ -638,8 +753,14 @@ class WorkflowTab(ttk.Frame):
             self._drag = None
 
     def _begin_node_drag(self, cx, cy, collapse_to=None):
+        ids = set(self._sel_nodes)
+        # a frame drags the nodes it contains along with it
+        for nid in list(ids):
+            n = self.wf.node(nid)
+            if n is not None and n.type == "frame":
+                ids.update(self._nodes_in_frame(n))
         orig = {}
-        for nid in self._sel_nodes:
+        for nid in ids:
             n = self.wf.node(nid)
             if n is not None:
                 orig[nid] = (n.x, n.y)
@@ -649,6 +770,13 @@ class WorkflowTab(ttk.Frame):
 
     def _on_motion(self, event):
         cx, cy = self._cxy(event)
+        if self._mode == "resize" and self._drag:
+            n = self.wf.node(self._drag["nid"])
+            if n is not None:
+                n.config["w"] = max(80.0, self._drag["w0"] + (cx - self._drag["ox"]))
+                n.config["h"] = max(46.0, self._drag["h0"] + (cy - self._drag["oy"]))
+                self._redraw()
+            return
         if self._mode == "drag" and self._drag:
             dx, dy = cx - self._drag["ox"], cy - self._drag["oy"]
             if abs(dx) > 2 or abs(dy) > 2:
@@ -673,6 +801,9 @@ class WorkflowTab(ttk.Frame):
         mode, drag = self._mode, self._drag
         self._mode = None
         self._drag = None
+        if mode == "resize" and drag:
+            self._commit()
+            return
         if mode == "drag" and drag:
             if drag.get("moved"):
                 self._commit()
@@ -743,10 +874,14 @@ class WorkflowTab(ttk.Frame):
         return None
 
     def _node_at(self, cx, cy):
-        for n in reversed(self.wf.nodes):   # last drawn = on top
-            h = self._node_height(n)
-            if n.x <= cx <= n.x + self._node_width(n) and n.y <= cy <= n.y + h:
-                return n.id
+        # Real (computational) nodes are on top, then comments, then frames behind.
+        for keep in (lambda m: not self._is_annotation(m),
+                     lambda m: m.type == "comment",
+                     lambda m: m.type == "frame"):
+            for n in reversed([m for m in self.wf.nodes if keep(m)]):
+                x, y, w, h = self._node_rect(n)
+                if x <= cx <= x + w and y <= cy <= y + h:
+                    return n.id
         return None
 
     def _out_port_type(self, node_id, port):
@@ -769,9 +904,8 @@ class WorkflowTab(ttk.Frame):
         lo_y, hi_y = sorted((d["y0"], d["cur"][1]))
         inside = []
         for n in self.wf.nodes:
-            h = self._node_height(n)
-            if (n.x <= hi_x and n.x + self._node_width(n) >= lo_x
-                    and n.y <= hi_y and n.y + h >= lo_y):
+            x, y, w, h = self._node_rect(n)
+            if x <= hi_x and x + w >= lo_x and y <= hi_y and y + h >= lo_y:
                 inside.append(n.id)
         if d["add"]:
             self._sel_nodes = d["base"] + [nid for nid in inside if nid not in d["base"]]
@@ -1024,6 +1158,9 @@ class WorkflowTab(ttk.Frame):
                      "condition", "filter", "zpva", "report"]
         order = ([t for t in canonical if t in wf_mod.NODE_TYPES]
                  + [t for t in wf_mod.NODE_TYPES if t not in canonical])
+        # Annotations (Comment/Frame) are spawned by their own keys (T / C), not the
+        # add-node search — keep them out of it.
+        order = [t for t in order if wf_mod.NODE_TYPES[t]["kind"] != "annotation"]
 
         def accepts(ntype):
             return any(pt == out_type for _n, pt in wf_mod.NODE_TYPES[ntype]["inputs"])
@@ -1132,6 +1269,82 @@ class WorkflowTab(ttk.Frame):
             node = self.wf.add_node(ntype, x, y)
             self._commit()
             self._select_only(node.id)
+
+    def _frame_selection(self):
+        """C: draw a titled Frame around the selected real nodes. The frame then
+        drags those nodes together; double-click its title to rename it."""
+        sel = [self.wf.node(nid) for nid in self._sel_nodes]
+        sel = [n for n in sel if n is not None and not self._is_annotation(n)]
+        if not sel:
+            self.app.set_status("Select node(s) first, then press C to frame them.")
+            return
+        rects = [self._node_rect(n) for n in sel]
+        x0 = min(r[0] for r in rects)
+        y0 = min(r[1] for r in rects)
+        x1 = max(r[0] + r[2] for r in rects)
+        y1 = max(r[1] + r[3] for r in rects)
+        pad, title = 18.0, 24.0
+        node = self.wf.add_node("frame", x0 - pad, y0 - pad - title,
+                                {"title": "Group", "w": (x1 - x0) + 2 * pad,
+                                 "h": (y1 - y0) + 2 * pad + title})
+        self._commit()
+        self._select_only(node.id)
+        self.app.set_status("Framed {} node(s) — drag the frame to move them together; "
+                            "double-click the title to rename.".format(len(sel)))
+
+    def _add_comment(self):
+        """T: drop a resizable comment note at the pointer and open it for editing."""
+        rx = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+        ry = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+        if not (0 <= rx <= self.canvas.winfo_width() and 0 <= ry <= self.canvas.winfo_height()):
+            rx, ry = 60, 60
+        cx, cy = self._s2w(rx, ry)
+        node = self.wf.add_node("comment", cx, cy, {"text": "Comment", "w": 200.0, "h": 90.0})
+        self._commit()
+        self._select_only(node.id)
+        self._edit_annotation_text(node)
+
+    def _on_double_click(self, event):
+        n = self.wf.node(self._node_at(*self._cxy(event)))
+        if self._is_annotation(n):
+            self._edit_annotation_text(n)
+            return "break"
+
+    def _edit_annotation_text(self, node):
+        key = "title" if node.type == "frame" else "text"
+        cur = str(node.config.get(key, ""))
+        top = tk.Toplevel(self)
+        top.title("Edit " + node.label)
+        top.geometry("420x230" if node.type == "comment" else "420x130")
+        ttk.Label(top, text=("Comment text:" if node.type == "comment" else "Frame title:")).pack(
+            anchor=tk.W, padx=10, pady=(10, 2))
+
+        def ok():
+            node.config[key] = getval()
+            self._commit()
+            top.destroy()
+
+        if node.type == "comment":
+            txt = tk.Text(top, wrap="word", height=7, undo=True)
+            txt.pack(fill=tk.BOTH, expand=True, padx=10)
+            txt.insert("1.0", cur)
+            txt.focus_set()
+            install_text_shortcuts(txt)
+            getval = lambda: txt.get("1.0", tk.END).rstrip("\n")
+        else:
+            var = tk.StringVar(value=cur)
+            ent = ttk.Entry(top, textvariable=var)
+            ent.pack(fill=tk.X, padx=10)
+            ent.focus_set()
+            ent.select_range(0, tk.END)
+            ent.bind("<Return>", lambda e: ok())
+            getval = lambda: var.get()
+
+        bar = ttk.Frame(top)
+        bar.pack(fill=tk.X, padx=10, pady=8)
+        ttk.Button(bar, text="OK", command=ok).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="Cancel", command=top.destroy).pack(side=tk.RIGHT, padx=4)
+        make_modal(top, self)
 
     def on_clear(self):
         if not self.wf.nodes:

@@ -76,6 +76,23 @@ def test_two_selection_sources_are_independent_networks():
     assert {(c.molecule_filename, c.recipe_name) for c in only_b} == {("B", "oB")}
 
 
+def test_annotation_nodes_are_inert():
+    # Comment / Frame are annotations: no ports, ignored by validate + expand, so
+    # they can never break a pipeline.
+    w = wf.Workflow()
+    m = w.add_node("molecules")
+    o = w.add_node("optimize", config={"recipe": "opt"})
+    w.add_edge(m.id, "geometry", o.id, "geometry")
+    w.add_node("comment", config={"text": "a note"})
+    w.add_node("frame", config={"title": "grp"})
+    assert {"comment", "frame"} <= wf.ANNOTATION_NODE_TYPES
+    assert not (wf.ANNOTATION_NODE_TYPES & wf.CALC_NODE_TYPES)
+    assert not any("Comment" in i or "Frame" in i for i in w.validate())
+    calcs, warnings, _n = wf.expand_to_calcs(w, ["A"], _factory)
+    assert {(c.molecule_filename, c.recipe_name) for c in calcs} == {("A", "opt")}
+    assert not warnings
+
+
 def test_multiple_sources_validate_is_informational_not_false():
     w = wf.Workflow()
     w.add_node("molecules")

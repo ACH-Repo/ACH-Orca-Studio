@@ -98,10 +98,29 @@ NODE_TYPES = {
         "config": {"recipe": "", "property": "nmr_shielding", "target": "",
                    "dq": 1.0, "isotopologues": "", "manifests": []},
     },
+    # Annotations: free-floating boxes that are NOT part of the computation (no
+    # ports; ignored by expand_to_calcs/validate). 'comment' is a text note;
+    # 'frame' is a titled group box drawn behind the nodes and drags the nodes it
+    # contains. Both carry their own size (w/h in config) and are resizable.
+    "comment": {
+        "label": "Comment",
+        "inputs": [],
+        "outputs": [],
+        "kind": "annotation",
+        "config": {"text": "Comment", "w": 200.0, "h": 90.0},
+    },
+    "frame": {
+        "label": "Frame",
+        "inputs": [],
+        "outputs": [],
+        "kind": "annotation",
+        "config": {"title": "Group", "w": 260.0, "h": 180.0},
+    },
 }
 
 CALC_NODE_TYPES = {t for t, d in NODE_TYPES.items() if d["kind"] == "calc"}
 BUILDER_NODE_TYPES = {t for t, d in NODE_TYPES.items() if d["kind"] == "builder"}
+ANNOTATION_NODE_TYPES = {t for t, d in NODE_TYPES.items() if d["kind"] == "annotation"}
 
 
 # Condition predicates: evaluated at runtime on the .out of the calculation
