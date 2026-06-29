@@ -192,7 +192,7 @@ off the core path and gracefully degradable.
   x-range opens with a sensible minimum span (not zoomed to one peak); a
   **Maximize** button on both; on-hover sticks skipped in stacked IR.
 - **Post-hoc properties from converged calcs** (branch `posthoc-properties`, NOT yet
-  merged — gateway-test then merge) — "Q3": more out of a finished job. Three slices:
+  merged — gateway-test then merge) — "Q3": more out of a finished job. Four slices:
   (1) **Population charges** — `orca_parser.parse_population` (Mulliken + Löwdin atomic
   charges merged by atom index, + Mulliken spin for open-shell) → `reporting._x_population`
   (auto-appears as a Report-tab checkbox via the `EXTRACTORS` list) + CSV
@@ -204,11 +204,18 @@ off the core path and gracefully degradable.
   makes the build inject `! … MOREAD` + `%moinp "<abs parent.gbw>"` via pure
   `inputs.add_moread`; the Derive flow asks "Restart from orbitals? (MOREAD)". Reuses
   the existing geometry-parent `afterok` edge; the derived recipe MUST use the same
-  basis as the parent. Tests: `tests/test_population.py`, `tests/test_moread.py` (~182).
-  STILL TODO on this branch (pinned): density/MO **cube generation** (`orca_plot` is a
-  menu-driven integer wizard on gateway 6.0.1 — capture the sequence, drive via a tiny
-  sbatch, open cubes in the EXTERNAL viewer; OR the `%plots`/`MOREAD`/`NOITER` route),
-  and an optional Multiwfn hand-off (`orca_2mkl -molden`).
+  basis as the parent. (4) **Density/MO cubes** — `core/orca_plot.py` (pure: `plot_stdin`
+  builds the `orca_plot` wizard keystrokes — verified ORCA 6.0.1 menu integers;
+  `parse_output_cube` reads the result filename). Right-click a finished calc with a
+  `.gbw` → "Generate density/MO cube…" → density / spin / an MO → `orca_plot` writes a
+  Gaussian cube that opens in the external viewer (`open_xyz_3d`). orca_plot runs
+  **directly, no sbatch** — it's a light post-processor (confirmed running on the gateway;
+  the SCF-engine sanction doesn't apply); on the cluster it's launched in a login shell
+  that loads the SAME `module load` lines the SLURM template uses. Tests:
+  `tests/test_population.py`, `tests/test_moread.py`, `tests/test_orca_plot.py` (~192).
+  All four slices are BLIND builds — gateway-verify before merge (the three parser
+  formats vs a real ORCA 6 `.out`, a MOREAD OPT→NMR derive, an electron-density cube end
+  to end). STILL TODO on this branch (optional): a Multiwfn hand-off (`orca_2mkl -molden`).
 
 ## Open work / TODO
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
