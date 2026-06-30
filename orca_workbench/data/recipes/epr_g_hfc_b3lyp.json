@@ -1,0 +1,9 @@
+{
+  "name": "EPR g-tensor + hyperfine (B3LYP)",
+  "calctype": "EPR",
+  "method_label": "B3LYP_def2-TZVP",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# EPR: electronic g-tensor + per-nucleus hyperfine coupling (isotropic A_iso +\n# dipolar) for an OPEN-SHELL species. The molecule MUST be a radical -- set its\n# charge/multiplicity in the Molecules tab (e.g. a neutral doublet = charge 0,\n# mult 2). Run on an optimised geometry.\n#\n# NOTE: ORCA requires the coordinates to appear BEFORE the %eprnmr block when\n# 'Nuclei = all' is used -- the COORDS placeholder below is positioned accordingly.\n#\n# B3LYP is the EPR workhorse. For more accurate hyperfine, use a basis with a\n# flexible/decontracted core on the spin-bearing atom (EPR-II for H-F, or\n# aug-cc-pVTZ-J / pcSseg-2 / CP(PPP) on a metal). Add CPCM(solvent) for solution.\n\n! UKS B3LYP def2-TZVP TightSCF\n\n%maxcore 3000\n\n%pal nprocs 8\nend\n\n!!##COORDS_SEC##!!\n\n%eprnmr\n  gtensor 1\n  Nuclei = all { aiso, adip }\nend\n"
+}

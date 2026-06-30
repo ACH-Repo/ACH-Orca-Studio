@@ -355,6 +355,9 @@ class WorkflowTab(ttk.Frame):
             if ctype == "TDDFT" and done:
                 b = ttk.Button(btns, text="UV-Vis", width=7, command=lambda c=calc: ct._plot_uvvis([c]))
                 b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated UV-Vis absorption spectrum.")
+            if ctype == "EPR" and done:
+                b = ttk.Button(btns, text="EPR", width=5, command=lambda c=calc: ct._plot_epr([c]))
+                b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated EPR spectrum.")
             if calc.job_id:
                 b = ttk.Button(btns, text="Live", width=5, command=lambda c=calc: ct._open_live(c))
                 b.pack(side=tk.LEFT, padx=1)

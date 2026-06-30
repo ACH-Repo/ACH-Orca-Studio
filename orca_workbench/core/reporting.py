@@ -156,6 +156,13 @@ def _x_bond_orders(text, ctx):
     return {"mayer_bond_orders": bonds} if bonds else None
 
 
+def _x_epr(text, ctx):
+    """EPR g-tensor + per-nucleus hyperfine couplings from an open-shell `%eprnmr`
+    job. None when there's no EPR output."""
+    epr = P.parse_epr(text)
+    return {"epr": epr} if epr else None
+
+
 def _x_excited_states(text, ctx):
     """TD-DFT electronic absorption spectrum: the list of excited states (energy,
     wavelength, oscillator strength) plus the brightest transition (lambda_max).
@@ -192,6 +199,7 @@ EXTRACTORS = [
     Extractor("nmr", "NMR shieldings", _x_nmr, "NMR"),
     Extractor("population", "Population charges (Mulliken/Löwdin)", _x_population, "any"),
     Extractor("bond_orders", "Mayer bond orders", _x_bond_orders, "any"),
+    Extractor("epr", "EPR g-tensor + hyperfine", _x_epr, "EPR"),
     Extractor("excited_states", "Excited states (TD-DFT UV-Vis)", _x_excited_states, "TDDFT"),
     Extractor("dipole", "Dipole moment", _x_dipole, "any"),
     Extractor("homo_lumo", "HOMO–LUMO gap", _x_homo_lumo, "any"),
@@ -260,6 +268,8 @@ def _csv_row(entry):
     es = p.get("excited_states") or {}
     mull = [r.get("mulliken") for r in (p.get("population_charges") or [])
             if r.get("mulliken") is not None]
+    epr = p.get("epr") or {}
+    hfc = epr.get("hyperfine") or []
     row = {
         "id": entry.get("id"),
         "label": entry.get("label"),
@@ -281,6 +291,9 @@ def _csv_row(entry):
         "max_fosc": es.get("max_fosc"),
         "mulliken_min": (min(mull) if mull else None),
         "mulliken_max": (max(mull) if mull else None),
+        "g_iso": (epr.get("g_tensor") or {}).get("g_iso"),
+        "n_hyperfine_nuclei": (len(hfc) if hfc else None),
+        "max_abs_A_iso_MHz": (max(abs(h["A_iso"]) for h in hfc) if hfc else None),
     }
     return row
 
@@ -289,7 +302,8 @@ _CSV_FIELDS = ["id", "label", "molecule", "calctype", "method", "terminated_norm
                "final_energy_Eh", "gibbs_free_energy_Eh", "enthalpy_Eh", "zpe_Eh",
                "n_imaginary", "lowest_freq_cm", "dipole_debye", "homo_lumo_gap_eV",
                "n_nmr_nuclei", "n_excited_states", "lambda_max_nm", "max_fosc",
-               "mulliken_min", "mulliken_max"]
+               "mulliken_min", "mulliken_max",
+               "g_iso", "n_hyperfine_nuclei", "max_abs_A_iso_MHz"]
 
 
 def write_csv(report, path):

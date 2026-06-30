@@ -1,0 +1,9 @@
+{
+  "name": "DEBUG EPR (UHF/STO-3G, 1 core)",
+  "calctype": "EPR",
+  "method_label": "UHF_STO-3G",
+  "variant": "",
+  "favorite": false,
+  "created_at": null,
+  "template": "# DEBUG EPR -- tiny UHF/STO-3G g-tensor + hyperfine on 1 core, for testing the\n# pipeline mechanics for free (the numbers are meaningless). The molecule must be\n# an open-shell radical (set its multiplicity). Coords go before the eprnmr block.\n\n! UHF STO-3G TightSCF\n\n%maxcore 1000\n\n%pal nprocs 1\nend\n\n!!##COORDS_SEC##!!\n\n%eprnmr\n  gtensor 1\n  Nuclei = all { aiso, adip }\nend\n"
+}

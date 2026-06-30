@@ -21,6 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional
 
 from orca_workbench.core import spectra as S
+from orca_workbench.core import epr as EPR_sim
 from orca_workbench.ui.depict import render_smiles_png
 from orca_workbench.ui.modal import make_modal
 
@@ -1004,3 +1005,108 @@ def _save_figure(fig, parent):
         fig.savefig(path, dpi=200, bbox_inches="tight")
     except Exception as e:
         messagebox.showerror("Save failed", str(e), parent=parent)
+
+
+class EPRSpectrumWindow(tk.Toplevel):
+    """Simulated isotropic (solution) EPR spectrum from a finished %eprnmr calc: the
+    first-derivative lineshape swept in magnetic field at a fixed microwave
+    frequency, built from g_iso + the isotropic hyperfine couplings. Annotates the
+    g-value, centre field and equivalent-coupling groups; shows the structure panel.
+    (Isotropic / spin-1/2 / 100%-abundance model — see core.epr.)"""
+
+    def __init__(self, parent, title, epr, name=None, smiles=None):
+        # type: (tk.Misc, str, dict, Optional[str], Optional[str]) -> None
+        super().__init__(parent)
+        self.title("EPR spectrum - {}".format(title))
+        self.geometry("1100x700")
+        try:
+            Figure, FigureCanvasTkAgg = _load_mpl()
+        except Exception as e:
+            self.destroy()
+            _mpl_unavailable_window(parent, e)
+            return
+        self.epr = epr or {}
+        self.g_iso = (self.epr.get("g_tensor") or {}).get("g_iso")
+        self.hyperfine = self.epr.get("hyperfine") or []
+        self._name = name or title
+        self._smiles = smiles
+
+        if self.g_iso is None:
+            ttk.Label(self, text="No g-tensor found in the calculation.").pack(padx=20, pady=20)
+            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
+            make_modal(self, parent)
+            return
+
+        bar = ttk.Frame(self)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(bar, text="MW freq (GHz):").pack(side=tk.LEFT)
+        self.freq_var = tk.DoubleVar(value=9.5)
+        sp1 = ttk.Spinbox(bar, from_=1, to=400, increment=0.5, width=7,
+                          textvariable=self.freq_var, command=self._redraw)
+        sp1.pack(side=tk.LEFT, padx=6)
+        sp1.bind("<Return>", lambda e: self._redraw())
+        ttk.Label(bar, text="Linewidth (mT):").pack(side=tk.LEFT, padx=(10, 0))
+        self.lw_var = tk.DoubleVar(value=0.15)
+        sp2 = ttk.Spinbox(bar, from_=0.01, to=10, increment=0.05, width=7,
+                          textvariable=self.lw_var, command=self._redraw)
+        sp2.pack(side=tk.LEFT, padx=6)
+        sp2.bind("<Return>", lambda e: self._redraw())
+        self.sticks_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Line markers", variable=self.sticks_var,
+                        command=self._redraw).pack(side=tk.LEFT, padx=10)
+        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+
+        body = ttk.Frame(self)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.struct = _StructurePanel(body, width=300)
+        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
+        self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
+        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
+        pin_device_pixel_ratio(self.canvas)
+        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.after(0, self._first_draw)
+        make_modal(self, parent)
+
+    def _first_draw(self):
+        self.update_idletasks()
+        self.struct.show(0, self._name, self._smiles, _COLORS[0])
+        self._redraw()
+
+    def _redraw(self):
+        freq = max(0.1, float(self.freq_var.get()))
+        lw = max(0.001, float(self.lw_var.get()))
+        sim = EPR_sim.simulate(self.g_iso, self.hyperfine, freq_GHz=freq, linewidth_mT=lw)
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        ax.plot(sim["field_mT"], sim["derivative"], color=_COLORS[0], lw=1.0)
+        ax.axhline(0, color="#cccccc", lw=0.5)
+        if self.sticks_var.get() and sim["sticks"]:
+            peak = max((abs(d) for d in sim["derivative"]), default=1.0)
+            imax = max((i for _, i in sim["sticks"]), default=1.0) or 1.0
+            for bc, inten in sim["sticks"]:
+                ax.vlines(bc, 0.0, peak * (inten / imax), color="#888888",
+                          linewidth=0.6, alpha=0.6)
+        ax.set_xlabel("magnetic field (mT)")
+        ax.set_ylabel("first-derivative absorption (a.u.)")
+        ax.set_title("Simulated isotropic EPR spectrum")
+        groups = sim["groups"]
+        txt = "g_iso = {:.5f}\nB0 = {:.1f} mT @ {:.2f} GHz".format(
+            self.g_iso, sim["center_mT"], freq)
+        if groups:
+            txt += "\n" + "\n".join(
+                "a({}) = {:.1f} MHz  x{}".format(g["element"], abs(g["A"]), g["count"])
+                for g in groups[:8])
+        ax.text(0.01, 0.99, txt, transform=ax.transAxes, va="top", ha="left",
+                fontsize=8, family="monospace",
+                bbox=dict(boxstyle="round", fc="white", ec="#cccccc", alpha=0.85))
+        self.canvas.draw()
+
+    def _save_image(self):
+        _save_figure(self.fig, self)

@@ -2031,6 +2031,7 @@ class CalculationsTab(ttk.Frame):
         finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
         finished_nmr = [c for c in calcs if self._is_finished_type(c, "NMR")]
         finished_uvvis = [c for c in calcs if self._is_finished_type(c, "TDDFT")]
+        finished_epr = [c for c in calcs if self._is_finished_type(c, "EPR")]
 
         if finished_freq:
             menu.add_command(label="Plot IR spectrum ({} selected)".format(len(finished_freq)),
@@ -2048,6 +2049,12 @@ class CalculationsTab(ttk.Frame):
                              command=lambda cs=list(finished_uvvis): self._plot_uvvis(cs))
         else:
             menu.add_command(label="Plot UV-Vis spectrum  (select finished TD-DFT)",
+                             state=tk.DISABLED)
+        if finished_epr:
+            menu.add_command(label="Plot EPR spectrum ({} selected)".format(len(finished_epr)),
+                             command=lambda cs=list(finished_epr): self._plot_epr(cs))
+        else:
+            menu.add_command(label="Plot EPR spectrum  (select finished EPR)",
                              state=tk.DISABLED)
 
         if len(calcs) == 1 and calcs[0].job_id:
@@ -2498,6 +2505,23 @@ class CalculationsTab(ttk.Frame):
         title = (entries[0]["name"].split(" / ")[0] if len(entries) == 1
                  else "{} molecules".format(len(entries)))
         UVVisSpectrumWindow(self, title, entries)
+
+    def _plot_epr(self, calcs):
+        # EPR is a per-molecule property; plot the first selected finished EPR calc.
+        c = calcs[0]
+        text = self._read_out(c)
+        epr = orca_parser.parse_epr(text) if text else None
+        if not epr or not (epr.get("g_tensor") or {}).get("g_iso"):
+            messagebox.showinfo(
+                "No EPR data",
+                "No EPR g-tensor found in the selected calculation — is it a %eprnmr "
+                "run on an open-shell (radical) species?")
+            return
+        mol = self.app.project.molecule_by_filename(c.molecule_filename)
+        from orca_workbench.ui.spectra import EPRSpectrumWindow
+        EPRSpectrumWindow(self, c.molecule_filename, epr,
+                          name="{} / {}".format(c.molecule_filename, c.recipe_name),
+                          smiles=mol.smiles if mol else None)
 
     def _plot_nmr(self, calcs):
         from orca_workbench.ui.spectra import NMROptionsDialog, NMRSpectrumWindow

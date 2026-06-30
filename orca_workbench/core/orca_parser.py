@@ -283,6 +283,51 @@ def parse_homo_lumo(text):
     return {"homo_eV": homo, "lumo_eV": lumo, "gap_eV": lumo - homo}
 
 
+# EPR (%eprnmr) output (verified against real ORCA 6.0.1):
+#   g(tot)       2.0022279    2.0027987    2.0027987 iso=  2.0026085
+#   Nucleus   1H : A  : Isotope=    1 I=  0.5 ...
+#   A(Tot)        -19.6412     -61.7432    -100.7299    A(iso)=  -60.7047   (MHz)
+_G_TOT = re.compile(
+    r"g\(tot\)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+iso=\s+(-?\d+\.\d+)")
+_EPR_NUCLEUS = re.compile(r"^\s*Nucleus\s+(\d+)([A-Za-z]{1,2})\s*:")
+_A_TOT = re.compile(
+    r"A\(Tot\)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+A\(iso\)=\s+(-?\d+\.\d+)")
+
+
+def parse_epr(text):
+    # type: (str) -> Optional[dict]
+    """EPR properties from an ORCA `%eprnmr` job: the electronic g-tensor (3 principal
+    values + g_iso) and the per-nucleus hyperfine coupling (3 principal A + A_iso, in
+    MHz). Returns {"g_tensor": {...}, "hyperfine": [{index,element,A,A_iso}, ...]} or
+    None if there's no EPR output. Verified against real ORCA 6.0.1."""
+    g = None
+    mg = _G_TOT.search(text)
+    if mg:
+        g = {"g": [float(mg.group(i)) for i in (1, 2, 3)], "g_iso": float(mg.group(4))}
+    # Hyperfine: pair each "Nucleus N<El>" header with the next A(Tot) line below it.
+    hyperfine = []
+    pending = None
+    for line in text.splitlines():
+        mh = _EPR_NUCLEUS.match(line)
+        if mh:
+            pending = {"index": int(mh.group(1)), "element": mh.group(2)}
+            continue
+        ma = _A_TOT.search(line)
+        if ma and pending is not None:
+            pending["A"] = [float(ma.group(i)) for i in (1, 2, 3)]
+            pending["A_iso"] = float(ma.group(4))
+            hyperfine.append(pending)
+            pending = None
+    if g is None and not hyperfine:
+        return None
+    out = {}
+    if g is not None:
+        out["g_tensor"] = g
+    if hyperfine:
+        out["hyperfine"] = hyperfine
+    return out
+
+
 # An atomic-charge row: "   0 O :   -0.370272"  (+ an optional spin-population
 # column for open-shell jobs: "   0 O :   -0.370272    1.000000").
 _CHARGE_ROW = re.compile(
