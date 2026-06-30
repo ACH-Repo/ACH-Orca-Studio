@@ -2089,6 +2089,8 @@ class CalculationsTab(ttk.Frame):
             menu.add_separator()
             menu.add_command(label="Generate density/MO cube...",
                              command=lambda c=calcs[0]: self._generate_cube(c))
+            menu.add_command(label="Export Molden file (for Multiwfn)...",
+                             command=lambda c=calcs[0]: self._export_molden(c))
 
         # Manual dependency re-linking — e.g. after importing a project whose save
         # file was lost, point a flat NMR/FREQ calc at its OPT as the parent so it
@@ -2293,34 +2295,39 @@ class CalculationsTab(ttk.Frame):
             cube, err = None, "{}: {}".format(type(e).__name__, e)
         self.after(0, lambda: self._cube_done(rundir_abs, cube, err))
 
-    def _run_orca_plot(self, rundir_abs, gbw_name, stdin):
-        """Run orca_plot in `rundir_abs`, feeding `stdin` to its wizard. Returns
-        (cube_basename, error_text). On the cluster, wrap it in a login shell that
+    def _orca_aux_command(self, tool, tool_args, rundir_abs):
+        """Build (args, run_kwargs, error) to launch an ORCA aux tool (orca_plot /
+        orca_2mkl) in `rundir_abs`. On the cluster, wrap it in a login shell that
         loads the SAME `module load` lines the SLURM template uses, so the shared
-        ORCA libraries resolve exactly as in a real job. Locally, use the orca_plot
-        that sits beside the configured ORCA executable."""
+        ORCA libraries resolve exactly as in a real job. Locally, use the tool that
+        sits beside the configured ORCA executable. On failure, args/kwargs are None
+        and error is a message."""
         if self._local_mode:
             orca = config_mod.get("orca_path", "")
             if not orca:
-                return None, ("No local ORCA executable is configured, so orca_plot "
-                              "can't be located. Run a job locally once (it prompts "
-                              "for the ORCA path), then retry.")
-            exe = os.path.join(os.path.dirname(orca), "orca_plot")
+                return None, None, ("No local ORCA executable is configured, so {} "
+                                    "can't be located. Run a job locally once (it "
+                                    "prompts for the ORCA path), then retry.".format(tool))
+            exe = os.path.join(os.path.dirname(orca), tool)
             if os.name == "nt" and not exe.lower().endswith(".exe"):
                 exe += ".exe"
             if not os.path.isfile(exe):
-                return None, "orca_plot not found next to the ORCA executable:\n{}".format(exe)
-            args = [exe, gbw_name, "-i"]
-            kw = {"cwd": rundir_abs}
-        else:
-            import shlex
-            template = slurm_mod.load_template()
-            modules = "\n".join(ln for ln in template.splitlines()
-                                if ln.strip().startswith("module load"))
-            script = "{}\ncd {} && orca_plot {} -i".format(
-                modules, shlex.quote(rundir_abs), shlex.quote(gbw_name))
-            args = ["bash", "-lc", script]
-            kw = {}
+                return None, None, "{} not found next to the ORCA executable:\n{}".format(tool, exe)
+            return [exe] + list(tool_args), {"cwd": rundir_abs}, None
+        import shlex
+        template = slurm_mod.load_template()
+        modules = "\n".join(ln for ln in template.splitlines()
+                            if ln.strip().startswith("module load"))
+        inner = " ".join([tool] + [shlex.quote(a) for a in tool_args])
+        script = "{}\ncd {} && {}".format(modules, shlex.quote(rundir_abs), inner)
+        return ["bash", "-lc", script], {}, None
+
+    def _run_orca_plot(self, rundir_abs, gbw_name, stdin):
+        """Run orca_plot in `rundir_abs`, feeding `stdin` to its wizard. Returns
+        (cube_basename, error_text)."""
+        args, kw, err = self._orca_aux_command("orca_plot", [gbw_name, "-i"], rundir_abs)
+        if err:
+            return None, err
         # Bound the run: if the wizard ever desyncs (a future ORCA adds a prompt),
         # it loops forever on EOF printing "Invalid input" — the timeout kills it.
         try:
@@ -2338,6 +2345,53 @@ class CalculationsTab(ttk.Frame):
         tail = "\n".join(out.splitlines()[-10:]) or "(no output)"
         return None, "orca_plot exited {} and wrote no .cube. Last output:\n{}".format(
             proc.returncode, tail)
+
+    # ---- Molden / Multiwfn hand-off (orca_2mkl on a finished .gbw) ------------
+    def _export_molden(self, calc):
+        """Run orca_2mkl on a finished calc's .gbw to write a Molden-format file
+        (<mol>.molden.input) for hand-off to Multiwfn (ELF/LOL/NCI/Fukui/charges) or
+        molden. Like the cube path, orca_2mkl is a light converter — no sbatch."""
+        gbw = self._calc_file(calc, calc.molecule_filename + ".gbw")
+        if not gbw:
+            messagebox.showinfo(
+                "No wavefunction file",
+                "This calculation has no {}.gbw in its run dir, so there's nothing to "
+                "convert.".format(calc.molecule_filename))
+            return
+        rundir_abs = os.path.join(self.app.project.root(), calc.rundir)
+        base = calc.molecule_filename
+        self._log("orca_2mkl: writing {}.molden.input ...".format(base))
+        threading.Thread(target=self._run_molden_worker,
+                         args=(rundir_abs, base), daemon=True).start()
+
+    def _run_molden_worker(self, rundir_abs, base):
+        path, err = None, None
+        try:
+            args, kw, err = self._orca_aux_command("orca_2mkl", [base, "-molden"], rundir_abs)
+            if not err:
+                proc = subprocess.run(
+                    args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    universal_newlines=True, timeout=120, **kw)
+                molden = os.path.join(rundir_abs, base + ".molden.input")
+                if os.path.isfile(molden):
+                    path = molden
+                else:
+                    tail = "\n".join((proc.stdout or "").splitlines()[-10:])
+                    err = "orca_2mkl wrote no .molden.input. Last output:\n{}".format(tail)
+        except Exception as e:
+            err = "{}: {}".format(type(e).__name__, e)
+        self.after(0, lambda: self._molden_done(path, err))
+
+    def _molden_done(self, path, err):
+        if err:
+            self._log("orca_2mkl failed: {}".format(err.splitlines()[0]))
+            messagebox.showerror("orca_2mkl", err)
+            return
+        self._log("orca_2mkl wrote {}".format(os.path.basename(path)))
+        messagebox.showinfo(
+            "Molden file written",
+            "Wrote:\n{}\n\nLoad it into Multiwfn (ELF / LOL / NCI / Fukui / charges / "
+            "bond orders) or open it in molden.".format(path))
 
     def _cube_done(self, rundir_abs, cube, err):
         if err:
