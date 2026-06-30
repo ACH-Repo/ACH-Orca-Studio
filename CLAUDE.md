@@ -233,14 +233,19 @@ off the core path and gracefully degradable.
 - **EPR (g-tensor + hyperfine)** (branch `posthoc-properties`, stacked after Q3) — the
   open-shell counterpart to NMR. `orca_parser.parse_epr` (electronic g-tensor + per-
   nucleus hyperfine A, MHz) → `reporting._x_epr` (Report checkbox + CSV g_iso /
-  n_hyperfine_nuclei / max_abs_A_iso_MHz). `core/epr.py` simulates the **isotropic**
-  solution spectrum (equivalent-group binomial sticks → first-derivative lineshape vs
-  field at a chosen MW freq; spin-½/100%-abundance model). `ui/spectra.EPRSpectrumWindow`
-  + a Calc-tab right-click "Plot EPR spectrum", a workflow-node **EPR** button, and the
+  n_hyperfine_nuclei / max_abs_A_iso_MHz; parser also captures nuclear spin I).
+  `core/epr.py` simulates BOTH an **isotropic** solution spectrum (`simulate`) and an
+  **anisotropic powder** spectrum (`powder_spectrum`: orientation-averages the
+  principal g + A tensors over a θ/φ grid → first-derivative lineshape; assumes
+  coincident g/A frames + first-order resonance). Multiplet splitting is general-spin
+  (`_spin_multiplet`: binomial for ½, 1:1:1 for ¹⁴N, …). `ui/spectra.EPRSpectrumWindow`
+  has an **isotropic/powder mode toggle** + MW-freq/linewidth controls; wired to a
+  Calc-tab right-click "Plot EPR spectrum", a workflow-node **EPR** button, and the
   Property node (EPR is a Property, no new node type). Recipes `epr_g_hfc_b3lyp` +
-  `debug_epr_uhf_sto3g` (coords MUST precede `%eprnmr`). **Verified vs real local ORCA
-  6.0.1** (methyl radical: g_iso 2.0026, the 1:3:3:1 ¹H quartet + ¹³C). Tests
-  `tests/test_epr.py` (~203 total).
+  `debug_epr_uhf_sto3g` (coords MUST precede `%eprnmr`; `Nuclei = all { aiso, adip }`).
+  Gateway demo `examples/gateway_tests/epr_demo.json` (methyl radical doublet).
+  **Verified vs real local ORCA 6.0.1** (methyl: g_iso 2.0026, 1:3:3:1 ¹H quartet +
+  anisotropic ¹³C tensor [132,132,356] MHz). Tests `tests/test_epr.py` (~209 total).
 
 ## Open work / TODO
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
