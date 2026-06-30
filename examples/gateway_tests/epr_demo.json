@@ -1,0 +1,87 @@
+{
+  "molecules": [
+    {
+      "name": "methyl radical",
+      "filename": "methyl",
+      "smiles": "[CH3]",
+      "charge": 0,
+      "multiplicity": 2,
+      "comment": "gateway test: an open-shell doublet radical (Generate Pending to build the .xyz). EPR needs a radical.",
+      "generated": false,
+      "xyz_path": null,
+      "method": null,
+      "gen_smiles": null,
+      "gen_status": "pending",
+      "gen_error": null,
+      "coords_locked": false
+    }
+  ],
+  "planned_calcs": [],
+  "recipe_dir": null,
+  "recipe_dirs": [],
+  "workflow": {
+    "category": "wf",
+    "nodes": [
+      {
+        "id": "ep1moleculesa",
+        "type": "molecules",
+        "x": 40.0,
+        "y": 120.0,
+        "config": {
+          "mode": "all",
+          "filenames": []
+        }
+      },
+      {
+        "id": "ep2optimize0",
+        "type": "optimize",
+        "x": 240.0,
+        "y": 120.0,
+        "config": {
+          "recipe": "DEBUG OPT (HF/STO-3G, ~free)"
+        }
+      },
+      {
+        "id": "ep3property0",
+        "type": "property",
+        "x": 440.0,
+        "y": 120.0,
+        "config": {
+          "recipe": "DEBUG EPR (UHF/STO-3G, 1 core)"
+        }
+      },
+      {
+        "id": "ep4report000",
+        "type": "report",
+        "x": 660.0,
+        "y": 120.0,
+        "config": {
+          "name": "epr_summary"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "epe1",
+        "src_node": "ep1moleculesa",
+        "src_port": "geometry",
+        "dst_node": "ep2optimize0",
+        "dst_port": "geometry"
+      },
+      {
+        "id": "epe2",
+        "src_node": "ep2optimize0",
+        "src_port": "geometry",
+        "dst_node": "ep3property0",
+        "dst_port": "geometry"
+      },
+      {
+        "id": "epe3",
+        "src_node": "ep3property0",
+        "src_port": "results",
+        "dst_node": "ep4report000",
+        "dst_port": "results"
+      }
+    ]
+  }
+}

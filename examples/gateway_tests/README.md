@@ -37,3 +37,9 @@ self-contained — just copy the one `.json`.
   special one. Run it, then right-click the finished TD-DFT calc ▸ **Plot UV-Vis
   spectrum** (or the node's **UV-Vis** button). Uses the cheap DEBUG TD-DFT recipe
   (TD-HF/STO-3G).
+- **epr_demo.json** — methyl radical (an open-shell **doublet**, mult 2) → OPT →
+  **Property** (with the DEBUG EPR recipe) → Report. EPR is the open-shell analogue
+  of NMR, so again a Property node. Run it, then right-click the finished EPR calc ▸
+  **Plot EPR spectrum** (or the node's **EPR** button) to see the simulated
+  derivative spectrum (g-value + hyperfine). DEBUG numbers are meaningless (STO-3G);
+  swap in `EPR g-tensor + hyperfine (B3LYP)` for real values.
