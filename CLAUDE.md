@@ -225,10 +225,22 @@ off the core path and gracefully degradable.
   `add_moread` → ORCA `INITIAL GUESS: MOREAD` converging in 2 cycles. That testing
   caught a real bug — the orca_plot density/spin path needs a `y` ("Is this the one you
   want?") confirm the MO path lacks (now in `plot_stdin`; `_run_orca_plot` also has a
-  `timeout` since orca_plot loops forever on EOF). LEFT for the gateway (environment-
-  only): the cluster `bash -lc`+`module load` launch finds orca_plot, and the SLURM
-  `.gbw` copyback. STILL TODO on this branch (optional): a Multiwfn hand-off
-  (`orca_2mkl -molden`).
+  `timeout` since orca_plot loops forever on EOF). (5) **Multiwfn/molden hand-off** —
+  right-click ▸ "Export Molden file (for Multiwfn)…" runs `orca_2mkl <mol> -molden`
+  (shared `_orca_aux_command` launcher, no sbatch) → `<mol>.molden.input`; verified
+  locally. LEFT for the gateway (environment-only): the cluster `bash -lc`+`module load`
+  launch finds orca_plot/orca_2mkl, and the SLURM `.gbw` copyback.
+- **EPR (g-tensor + hyperfine)** (branch `posthoc-properties`, stacked after Q3) — the
+  open-shell counterpart to NMR. `orca_parser.parse_epr` (electronic g-tensor + per-
+  nucleus hyperfine A, MHz) → `reporting._x_epr` (Report checkbox + CSV g_iso /
+  n_hyperfine_nuclei / max_abs_A_iso_MHz). `core/epr.py` simulates the **isotropic**
+  solution spectrum (equivalent-group binomial sticks → first-derivative lineshape vs
+  field at a chosen MW freq; spin-½/100%-abundance model). `ui/spectra.EPRSpectrumWindow`
+  + a Calc-tab right-click "Plot EPR spectrum", a workflow-node **EPR** button, and the
+  Property node (EPR is a Property, no new node type). Recipes `epr_g_hfc_b3lyp` +
+  `debug_epr_uhf_sto3g` (coords MUST precede `%eprnmr`). **Verified vs real local ORCA
+  6.0.1** (methyl radical: g_iso 2.0026, the 1:3:3:1 ¹H quartet + ¹³C). Tests
+  `tests/test_epr.py` (~203 total).
 
 ## Open work / TODO
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
