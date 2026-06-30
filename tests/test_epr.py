@@ -124,3 +124,46 @@ def test_simulate_shapes_and_center():
     assert abs(sim["center_mT"] - EPR.center_field_mT(2.0026, 9.5)) < 1e-9
     # derivative crosses zero (it's a derivative lineshape, net ~0 area)
     assert min(sim["derivative"]) < 0 < max(sim["derivative"])
+
+
+# ---- general nuclear spin (I != 1/2) ----------------------------------------
+def test_spin_multiplet_binomial_and_triplet():
+    assert EPR._spin_multiplet(3, 1) == [1, 3, 3, 1]    # three spin-1/2 -> 1:3:3:1
+    assert EPR._spin_multiplet(1, 2) == [1, 1, 1]        # one spin-1 (14N) -> 1:1:1
+    assert EPR._spin_multiplet(2, 2) == [1, 2, 3, 2, 1]  # two spin-1 -> 1:2:3:2:1
+
+
+def test_one_spin1_nucleus_gives_equal_triplet():
+    sticks = EPR.stick_lines([{"element": "N", "A": 40.0, "count": 1, "twoI": 2}])
+    assert len(sticks) == 3
+    assert all(abs(i - 1 / 3.0) < 1e-9 for _, i in sticks)
+
+
+def test_parser_captures_nuclear_spin():
+    epr = P.parse_epr(EPR_OUT)
+    assert epr["hyperfine"][0]["I"] == 0.5
+
+
+# ---- anisotropic powder simulation ------------------------------------------
+def test_powder_shapes_and_mode():
+    sim = EPR.powder_spectrum([2.0090, 2.0061, 2.0022], _METHYL_HF,
+                              n_theta=20, n_phi=40, npoints=600)
+    assert sim["mode"] == "powder"
+    assert len(sim["field_mT"]) == 600 and len(sim["derivative"]) == 600
+    assert min(sim["derivative"]) < 0 < max(sim["derivative"])
+
+
+def test_powder_g_anisotropy_sets_field_span():
+    # No hyperfine: a rhombic g-tensor must span B(g_max)..B(g_min) at X-band.
+    g = [2.0090, 2.0061, 2.0022]
+    sim = EPR.powder_spectrum(g, [], n_theta=30, n_phi=60, npoints=800)
+    b_gmax = EPR.center_field_mT(max(g), 9.5)   # larger g -> smaller field
+    b_gmin = EPR.center_field_mT(min(g), 9.5)
+    field = sim["field_mT"]
+    assert field[0] <= b_gmax + 0.5 and field[-1] >= b_gmin - 0.5
+    assert field[0] < field[-1]
+
+
+def test_powder_no_data_is_safe():
+    sim = EPR.powder_spectrum([2.0, 2.0, 2.0], [], n_theta=4, n_phi=4, npoints=10)
+    assert sim["mode"] == "powder" and len(sim["field_mT"]) == len(sim["derivative"])

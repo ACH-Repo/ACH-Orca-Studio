@@ -1051,6 +1051,10 @@ class EPRSpectrumWindow(tk.Toplevel):
                           textvariable=self.lw_var, command=self._redraw)
         sp2.pack(side=tk.LEFT, padx=6)
         sp2.bind("<Return>", lambda e: self._redraw())
+        self.mode = "iso"
+        self.mode_btn = ttk.Button(bar, text="Mode: isotropic", width=22,
+                                   command=self._toggle_mode)
+        self.mode_btn.pack(side=tk.LEFT, padx=(10, 2))
         self.sticks_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Line markers", variable=self.sticks_var,
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
@@ -1079,15 +1083,35 @@ class EPRSpectrumWindow(tk.Toplevel):
         self.struct.show(0, self._name, self._smiles, _COLORS[0])
         self._redraw()
 
+    def _toggle_mode(self):
+        if self.mode == "iso":
+            self.mode = "powder"
+            self.mode_btn.configure(text="Mode: powder (anisotropic)")
+            self.lw_var.set(0.3)
+        else:
+            self.mode = "iso"
+            self.mode_btn.configure(text="Mode: isotropic")
+            self.lw_var.set(0.15)
+        self._redraw()
+
+    def _g_principal(self):
+        return (self.epr.get("g_tensor") or {}).get("g") or [self.g_iso] * 3
+
     def _redraw(self):
         freq = max(0.1, float(self.freq_var.get()))
         lw = max(0.001, float(self.lw_var.get()))
-        sim = EPR_sim.simulate(self.g_iso, self.hyperfine, freq_GHz=freq, linewidth_mT=lw)
+        powder = self.mode == "powder"
+        if powder:
+            sim = EPR_sim.powder_spectrum(self._g_principal(), self.hyperfine,
+                                          freq_GHz=freq, linewidth_mT=lw,
+                                          n_theta=40, n_phi=80, npoints=2500)
+        else:
+            sim = EPR_sim.simulate(self.g_iso, self.hyperfine, freq_GHz=freq, linewidth_mT=lw)
         self.fig.clear()
         ax = self.fig.add_subplot(111)
         ax.plot(sim["field_mT"], sim["derivative"], color=_COLORS[0], lw=1.0)
         ax.axhline(0, color="#cccccc", lw=0.5)
-        if self.sticks_var.get() and sim["sticks"]:
+        if self.sticks_var.get() and sim.get("sticks"):
             peak = max((abs(d) for d in sim["derivative"]), default=1.0)
             imax = max((i for _, i in sim["sticks"]), default=1.0) or 1.0
             for bc, inten in sim["sticks"]:
@@ -1095,13 +1119,24 @@ class EPRSpectrumWindow(tk.Toplevel):
                           linewidth=0.6, alpha=0.6)
         ax.set_xlabel("magnetic field (mT)")
         ax.set_ylabel("first-derivative absorption (a.u.)")
-        ax.set_title("Simulated isotropic EPR spectrum")
+        ax.set_title("Simulated {} EPR spectrum".format(
+            "powder (anisotropic)" if powder else "isotropic"))
+
+        def _coupling_mhz(g):
+            a = g["A"]
+            return abs(sum(a) / 3.0) if isinstance(a, (list, tuple)) else abs(a)
+
+        if powder:
+            gp = self._g_principal()
+            txt = "g = [{:.5f}, {:.5f}, {:.5f}]\nB0(g_iso) = {:.1f} mT @ {:.2f} GHz".format(
+                gp[0], gp[1], gp[2], sim["center_mT"], freq)
+        else:
+            txt = "g_iso = {:.5f}\nB0 = {:.1f} mT @ {:.2f} GHz".format(
+                self.g_iso, sim["center_mT"], freq)
         groups = sim["groups"]
-        txt = "g_iso = {:.5f}\nB0 = {:.1f} mT @ {:.2f} GHz".format(
-            self.g_iso, sim["center_mT"], freq)
         if groups:
             txt += "\n" + "\n".join(
-                "a({}) = {:.1f} MHz  x{}".format(g["element"], abs(g["A"]), g["count"])
+                "a({}) = {:.1f} MHz  x{}".format(g["element"], _coupling_mhz(g), g["count"])
                 for g in groups[:8])
         ax.text(0.01, 0.99, txt, transform=ax.transAxes, va="top", ha="left",
                 fontsize=8, family="monospace",

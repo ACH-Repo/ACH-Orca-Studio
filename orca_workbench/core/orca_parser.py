@@ -290,6 +290,7 @@ def parse_homo_lumo(text):
 _G_TOT = re.compile(
     r"g\(tot\)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+iso=\s+(-?\d+\.\d+)")
 _EPR_NUCLEUS = re.compile(r"^\s*Nucleus\s+(\d+)([A-Za-z]{1,2})\s*:")
+_NUC_SPIN = re.compile(r"\bI=\s*([0-9.]+)")     # nuclear spin from the Nucleus header
 _A_TOT = re.compile(
     r"A\(Tot\)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+A\(iso\)=\s+(-?\d+\.\d+)")
 
@@ -311,6 +312,9 @@ def parse_epr(text):
         mh = _EPR_NUCLEUS.match(line)
         if mh:
             pending = {"index": int(mh.group(1)), "element": mh.group(2)}
+            ms = _NUC_SPIN.search(line)
+            if ms:
+                pending["I"] = float(ms.group(1))
             continue
         ma = _A_TOT.search(line)
         if ma and pending is not None:

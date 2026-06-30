@@ -1,18 +1,22 @@
-"""Simulate an isotropic (solution) EPR spectrum from computed EPR parameters.
+"""Simulate EPR spectra from computed EPR parameters (g-tensor + hyperfine).
 
-Pure / numpy-free, so it's unit-testable. Given the g-tensor's isotropic value and
-the per-nucleus isotropic hyperfine couplings (from `orca_parser.parse_epr`), build
-the first-derivative lineshape an EPR spectrometer records, swept in magnetic field
-at a fixed microwave frequency (X-band ~9.5 GHz by default).
+Pure / numpy-free, so it's unit-testable. Two models, both returning a first-
+derivative lineshape swept in magnetic field at a fixed microwave frequency
+(X-band ~9.5 GHz by default):
+  * `simulate(...)`        — ISOTROPIC (solution): g_iso + A_iso, exact multiplet
+    splitting; the everyday "first look".
+  * `powder_spectrum(...)` — ANISOTROPIC (powder / frozen solution): orientation-
+    averages the g PRINCIPAL values + per-nucleus hyperfine PRINCIPAL tensors.
 
-Scope / assumptions (documented on purpose — this is the common-case "first look",
-not a full powder simulation):
-  * ISOTROPIC only: uses g_iso + A_iso (no g/A anisotropy, no orientation average).
-  * spin-1/2 nuclei: equivalent groups split binomially (exact for 1H, 13C, 19F,
-    31P; approximate for I>1/2 like 14N).
+Shared assumptions:
+  * general nuclear spin via `twoI` (= 2I): equivalent groups split as the
+    multinomial (1+x+...+x^{2I})^n — binomial for spin-1/2 (1H/13C/19F/31P), the
+    1:1:1 triplet for 14N, etc.
   * 100% isotopic abundance: every computed coupling is drawn at full weight, so a
     low-abundance coupling (e.g. 13C, ~1.1%) shows as a full satellite, not scaled.
-A full anisotropic/powder simulation would be a separate, heavier routine.
+The powder model additionally assumes the g and A principal frames are COINCIDENT
+and a first-order (field-swept) resonance condition — the standard first
+approximation; relative Euler angles / exact diagonalisation would be a refinement.
 """
 
 import math
@@ -48,41 +52,59 @@ def equivalent_groups(hyperfine, tol_MHz=1.0):
         if a is None or abs(a) < tol_MHz:
             continue
         el = h.get("element")
+        two_I = int(round(2 * h.get("I", 0.5)))
         for grp in groups:
-            if grp["element"] == el and abs(grp["A"] - a) <= tol_MHz:
+            if (grp["element"] == el and grp.get("twoI", 1) == two_I
+                    and abs(grp["A"] - a) <= tol_MHz):
                 grp["count"] += 1
                 break
         else:
-            groups.append({"element": el, "A": a, "count": 1})
+            groups.append({"element": el, "A": a, "count": 1, "twoI": two_I})
     groups.sort(key=lambda g: abs(g["A"]), reverse=True)
     return groups
 
 
-def _binomial_row(n):
-    # type: (int) -> List[int]
-    """Row n of Pascal's triangle: the (n+1) relative intensities for n equivalent
-    spin-1/2 nuclei."""
-    row = [1]
-    for _ in range(n):
-        row = [a + b for a, b in zip([0] + row, row + [0])]
-    return row
+def _poly_mul(a, b):
+    # type: (List[int], List[int]) -> List[int]
+    out = [0] * (len(a) + len(b) - 1)
+    for i, ai in enumerate(a):
+        if ai:
+            for j, bj in enumerate(b):
+                out[i + j] += ai * bj
+    return out
+
+
+def _spin_multiplet(n, two_I):
+    # type: (int, int) -> List[int]
+    """Relative line intensities for n equivalent nuclei each of spin I (`two_I` =
+    2I): coefficients of (1 + x + ... + x^{2I})^n, length n*two_I + 1. two_I=1
+    (spin-1/2) reproduces Pascal's triangle row n (the binomial multiplet)."""
+    base = [1] * (two_I + 1)
+    poly = [1]
+    for _ in range(max(0, n)):
+        poly = _poly_mul(poly, base)
+    return poly
 
 
 def stick_lines(groups):
     # type: (List[dict]) -> List[Tuple[float, float]]
-    """Isotropic stick spectrum from equivalent groups: (offset_MHz, intensity)
-    about the centre, normalised to total intensity 1. Successive binomial
-    splitting (spin-1/2)."""
+    """Stick spectrum from equivalent groups: (offset_MHz, intensity) about the
+    centre, normalised to total intensity 1. Successive multiplet splitting; each
+    group's nuclear spin is grp['twoI'] (= 2I, default 1 = spin-1/2)."""
     lines = [(0.0, 1.0)]
     for grp in groups:
         n, a = grp["count"], grp["A"]
-        weights = _binomial_row(n)
-        total = float(sum(weights))
+        two_I = grp.get("twoI", 1)
+        coeffs = _spin_multiplet(n, two_I)
+        total = float(sum(coeffs)) or 1.0
+        nI = n * two_I / 2.0
         new = []
         for off, inten in lines:
-            for k, w in enumerate(weights):
-                shift = (k - n / 2.0) * a            # m_I from -n/2 .. +n/2
-                new.append((off + shift, inten * w / total))
+            for k, c in enumerate(coeffs):
+                if not c:
+                    continue
+                shift = (k - nI) * a                 # m_total from -nI .. +nI
+                new.append((off + shift, inten * c / total))
         lines = new
     return lines
 
@@ -120,3 +142,113 @@ def simulate(g_iso, hyperfine, freq_GHz=9.5, linewidth_mT=0.15, npoints=4000,
         deriv.append(d)
     return {"field_mT": field, "derivative": deriv, "sticks": sticks,
             "center_mT": B0, "groups": groups}
+
+
+def _aniso_groups(hyperfine, tol_MHz=1.0):
+    # type: (List[dict], float) -> List[dict]
+    """Like equivalent_groups but keyed on the full PRINCIPAL hyperfine tensor
+    [Ax,Ay,Az] (MHz), for the powder simulation. Nuclei equivalent when same element
+    + spin and all three principal A within tol. Drops nuclei whose largest |A| is
+    below tol. Falls back to an isotropic [A_iso]*3 if principal values are absent."""
+    groups = []  # type: List[dict]
+    for h in hyperfine:
+        A = h.get("A")
+        if not A:
+            a_iso = h.get("A_iso")
+            if a_iso is None:
+                continue
+            A = [a_iso, a_iso, a_iso]
+        if max(abs(x) for x in A) < tol_MHz:
+            continue
+        el = h.get("element")
+        two_I = int(round(2 * h.get("I", 0.5)))
+        for grp in groups:
+            if (grp["element"] == el and grp["twoI"] == two_I
+                    and all(abs(g0 - a0) <= tol_MHz for g0, a0 in zip(grp["A"], A))):
+                grp["count"] += 1
+                break
+        else:
+            groups.append({"element": el, "A": list(A), "count": 1, "twoI": two_I})
+    return groups
+
+
+def powder_spectrum(g, hyperfine, freq_GHz=9.5, linewidth_mT=0.3, n_theta=50,
+                    n_phi=100, npoints=3000, tol_MHz=1.0):
+    # type: (List[float], List[dict], float, float, int, int, int, float) -> dict
+    """Anisotropic (powder / frozen-solution) EPR: the orientation-averaged
+    first-derivative spectrum from the g PRINCIPAL values and per-nucleus hyperfine
+    PRINCIPAL tensors. For each orientation of the field in the (shared) principal
+    frame it computes g_eff and the projected A_eff, builds the multiplet, and bins
+    the lines (weighted by sin(theta)); the histogram is Gaussian-broadened and
+    differentiated.
+
+    ASSUMES the g and A principal frames are COINCIDENT (the standard first
+    approximation; ORCA can report relative Euler angles for a refined model) and
+    uses a first-order (field-swept) resonance condition. Returns the same dict
+    shape as simulate(), plus mode='powder'."""
+    gx, gy, gz = g[0], g[1], g[2]
+    groups = _aniso_groups(hyperfine, tol_MHz=tol_MHz)
+    nu = freq_GHz * 1000.0                    # MHz
+    K = MHZ_PER_MT
+
+    lines = []  # (field_mT, weight)
+    for it in range(max(1, n_theta)):
+        theta = math.pi * (it + 0.5) / n_theta
+        st, ct = math.sin(theta), math.cos(theta)
+        w_theta = st                          # solid-angle weight
+        for ip in range(max(1, n_phi)):
+            phi = 2.0 * math.pi * (ip + 0.5) / n_phi
+            nx, ny, nz = st * math.cos(phi), st * math.sin(phi), ct
+            geff = math.sqrt((gx * nx) ** 2 + (gy * ny) ** 2 + (gz * nz) ** 2)
+            if geff <= 0:
+                continue
+            B0 = nu / (geff * K)
+            f2mT = 1.0 / (geff * K)
+            ori = []
+            for grp in groups:
+                ax, ay, az = grp["A"]
+                aeff = math.sqrt((ax * nx) ** 2 + (ay * ny) ** 2 + (az * nz) ** 2)
+                ori.append({"count": grp["count"], "A": aeff, "twoI": grp["twoI"]})
+            for off, inten in stick_lines(ori):
+                lines.append((B0 + off * f2mT, inten * w_theta))
+
+    n = max(2, int(npoints))
+    if not lines:
+        B0 = center_field_mT(sum(g) / 3.0, freq_GHz)
+        return {"field_mT": [B0], "derivative": [0.0], "absorption": [0.0],
+                "center_mT": B0, "groups": groups, "mode": "powder"}
+
+    lo = min(f for f, _ in lines)
+    hi = max(f for f, _ in lines)
+    pad = max((hi - lo) * 0.04, 6.0 * linewidth_mT)
+    lo -= pad
+    hi += pad
+    dB = (hi - lo) / (n - 1)
+    absorp = [0.0] * n
+    for f, w in lines:
+        b = int(round((f - lo) / dB))
+        if 0 <= b < n:
+            absorp[b] += w
+
+    # Gaussian broaden the binned absorption, then take the field derivative.
+    sb = max(1e-6, linewidth_mT / dB)
+    half = min(int(4.0 * sb) + 1, n)
+    kernel = [math.exp(-0.5 * (k / sb) ** 2) for k in range(-half, half + 1)]
+    ksum = sum(kernel) or 1.0
+    kernel = [k / ksum for k in kernel]
+    smooth = [0.0] * n
+    for i in range(n):
+        ai = absorp[i]
+        if ai == 0.0:
+            continue
+        for kk in range(-half, half + 1):
+            j = i + kk
+            if 0 <= j < n:
+                smooth[j] += ai * kernel[kk + half]
+    deriv = [0.0] * n
+    for i in range(1, n - 1):
+        deriv[i] = (smooth[i + 1] - smooth[i - 1]) / (2.0 * dB)
+    field = [lo + i * dB for i in range(n)]
+    return {"field_mT": field, "derivative": deriv, "absorption": smooth,
+            "center_mT": center_field_mT(sum(g) / 3.0, freq_GHz),
+            "groups": groups, "mode": "powder"}
