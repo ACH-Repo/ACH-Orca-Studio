@@ -63,6 +63,27 @@ def submit(slurm_rel_path, project_root, dependency=None):
     return None, "Could not parse job id from sbatch output:\n" + (result.stdout or "").strip()
 
 
+def cancel_jobs(job_ids):
+    # type: (List[str]) -> Tuple[int, List[str]]
+    """scancel the given SLURM job ids in one call. Returns (n_requested, errors):
+    n_requested is how many ids we asked to cancel, errors is a list of message
+    strings (empty on success). No-op — (0, []) — for an empty list."""
+    ids = [str(j) for j in job_ids if j]
+    if not ids:
+        return 0, []
+    try:
+        result = subprocess.run(["scancel"] + ids, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        return 0, ["scancel not found — are you on the cluster login node?"]
+    except subprocess.TimeoutExpired:
+        return 0, ["scancel timed out"]
+    except Exception as e:
+        return 0, ["scancel error: {}".format(e)]
+    if result.returncode != 0:
+        return 0, [(result.stderr or result.stdout or "scancel failed").strip()]
+    return len(ids), []
+
+
 def query_states(user=None):
     # type: (Optional[str]) -> Optional[Dict[str, str]]
     """Return {job_id: state} for the user's queued/running jobs via squeue.

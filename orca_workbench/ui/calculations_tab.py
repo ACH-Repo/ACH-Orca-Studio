@@ -84,6 +84,11 @@ class CalculationsTab(ttk.Frame):
         self._pipeline_ids = set()     # type: set
         self._pipeline_poll_id = None
         self._pipeline_reports = []    # type: list
+        # Interrupt button (cluster mode): whether we've queried squeue since the
+        # last submit/open. False => the button is "disarmed" and a press refreshes
+        # status first; True => it reflects real active-job state.
+        self._status_known = False
+        self._btn_interrupt = None     # type: Optional[tk.Button]
         self._build()
 
     def reconcile_after_load(self):
@@ -191,6 +196,20 @@ class CalculationsTab(ttk.Frame):
                       "submit_all.sh): recover each job's SLURM id from its output files "
                       "and from squeue, so status and result-harvest work again. Safe to "
                       "run repeatedly.")
+
+        # Interrupt (cluster only; local mode already has its own Stop button). A
+        # two-stage cancel that appears once calcs have been submitted and floats in
+        # the gap between Build and the right-hand cluster. _update_interrupt_button()
+        # shows/hides, colours and arms it.
+        if not self._local_mode:
+            self._btn_interrupt = tk.Button(bar, text="Interrupt", command=self.on_interrupt,
+                                            font=("TkDefaultFont", 10, "bold"))
+            tip(self._btn_interrupt,
+                "Stop running/queued calculations — e.g. if you spotted a setup mistake. "
+                "First press refreshes status; if jobs are still active the button turns "
+                "red, and a second press cancels them (scancel) after a confirmation. "
+                "Only appears once calcs have been submitted.")
+            self._update_interrupt_button()
 
         tip(b_all, "Bulk: pick one recipe and queue a root calculation for every molecule. The "
                    "usual starting point — most projects begin by OPT-ing the whole set.")
@@ -402,6 +421,7 @@ class CalculationsTab(ttk.Frame):
                 self.tree.selection_set(self._selected_id)
             else:
                 self._clear_editor()
+        self._update_interrupt_button()
 
     # -------------------------------------------------------------- sorting
 
@@ -1294,6 +1314,7 @@ class CalculationsTab(ttk.Frame):
         return max(0, ms) / 1000.0
 
     def on_submit(self):
+        self._status_known = False   # new jobs go out; state is unknown until re-queried
         root = self.app.project.root()
         targets = self._selected_or_all()
         candidates = [c for c in targets if c.exported and c.slurm_path and not c.job_id
@@ -1347,9 +1368,85 @@ class CalculationsTab(ttk.Frame):
     def on_refresh_status(self):
         states = slurm_runtime.query_states()
         self._squeue_states = states
+        self._status_known = True   # we've now queried the queue this session
         if states is None and not self._local_mode:
             self._log("squeue not available — using .out files for status.")
         self.refresh()
+
+    # ---- Interrupt: two-stage cancel of running/queued cluster jobs -----------
+    def _active_submitted_calcs(self):
+        """Cluster calcs currently queued/running, per our latest status query."""
+        return [c for c in self.app.project.planned_calcs
+                if c.job_id and c.job_id != LOCAL_JOB and self._own_state(c)[3]]
+
+    def _update_interrupt_button(self):
+        """Show/hide, colour and arm the Interrupt button. Hidden until calcs are
+        submitted; 'disarmed' (muted) until we've queried the queue this session;
+        'armed' (red) when jobs are actually active. Floats centred in the gap
+        between Build and the right-hand cluster."""
+        btn = self._btn_interrupt
+        if btn is None:
+            return
+        started = [c for c in self.app.project.planned_calcs
+                   if c.job_id and c.job_id != LOCAL_JOB]
+        if not started:
+            self._interrupt_state = "hidden"
+            btn.pack_forget()
+            return
+        if not self._status_known:
+            self._interrupt_state = "disarmed"
+            btn.configure(text="Interrupt (refresh first)",
+                          bg="#ece7c9", activebackground="#e2dcb8", fg="#7a7a55")
+        else:
+            active = self._active_submitted_calcs()
+            if not active:
+                self._interrupt_state = "hidden"
+                btn.pack_forget()
+                return
+            self._interrupt_state = "armed"
+            btn.configure(text="INTERRUPT ({} running)".format(len(active)),
+                          bg="#d9534f", activebackground="#c9302c", fg="white")
+        if btn.winfo_manager() != "pack":
+            btn.pack(side=tk.LEFT, expand=True)
+
+    def on_interrupt(self):
+        state = getattr(self, "_interrupt_state", "hidden")
+        if state == "disarmed":
+            self._log("Interrupt: refreshing status before arming...")
+            self.on_refresh_status()   # sets _status_known + re-runs _update_interrupt_button
+            if getattr(self, "_interrupt_state", "hidden") == "armed":
+                self.app.set_status("Active jobs found — press INTERRUPT again to cancel them.")
+            else:
+                self.app.set_status("No active jobs found — nothing to interrupt.")
+            return
+        if state == "armed":
+            self._do_interrupt()
+
+    def _do_interrupt(self):
+        active = self._active_submitted_calcs()
+        if not active:
+            self._update_interrupt_button()
+            messagebox.showinfo("Interrupt", "No active jobs to interrupt.")
+            return
+        job_ids = sorted({c.job_id for c in active})
+        listing = "\n".join("  {}  [job {}]".format(self._short(c), c.job_id)
+                            for c in active[:20])
+        if len(active) > 20:
+            listing += "\n  ... and {} more".format(len(active) - 20)
+        if not messagebox.askyesno(
+                "Interrupt calculations",
+                "Cancel {} running/queued calculation(s)?\n\nThis kills the SLURM job(s) "
+                "with scancel — it CANNOT be undone (partial output is kept). You can "
+                "rebuild and resubmit afterwards.\n\n{}".format(len(active), listing)):
+            return
+        self._stop_pipeline()   # stop any live pipeline driver from resubmitting them
+        n, errs = slurm_runtime.cancel_jobs(job_ids)
+        self.on_refresh_status()
+        msg = "Interrupted {} job(s) (scancel).".format(n)
+        if errs:
+            msg += "\n\nscancel reported:\n" + "\n".join(errs[:6])
+        self._log(msg.replace("\n", " "))
+        messagebox.showinfo("Interrupt", msg)
 
     def on_detect_jobs(self):
         """Reconnect calcs submitted outside the app by recovering their job ids
@@ -1503,6 +1600,7 @@ class CalculationsTab(ttk.Frame):
         then drives the whole pipeline with no GUI running — submit and
         disconnect. `calc_ids` must be in topological order (parents/sources
         first), as produced by the workflow expansion."""
+        self._status_known = False   # dependency chain goes out; state now unknown
         root = self.app.project.root()
         if not slurm_runtime.sbatch_available():
             messagebox.showerror("sbatch not found",
