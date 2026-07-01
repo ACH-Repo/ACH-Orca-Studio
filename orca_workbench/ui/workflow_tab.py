@@ -299,16 +299,13 @@ class WorkflowTab(ttk.Frame):
         def on_key(e):
             if e.keysym in ("Up", "Down", "Return", "Escape", "Tab", "Left", "Right"):
                 return
+            # Narrow the dropdown list to what's been typed. We deliberately do NOT
+            # re-post the dropdown here: posting it on every keystroke grabs keyboard
+            # focus to the listbox (the async grab beats a synchronous focus_set),
+            # which is what made typing lose focus letter-by-letter. The filtered
+            # matches show when the user opens the list (Down / the arrow).
             typed = var.get().strip().lower()
-            matches = [n for n in names if typed in n.lower()] if typed else names
-            cb["values"] = matches
-            if typed and matches:
-                try:
-                    cb.tk.call("ttk::combobox::Post", cb)   # show the filtered dropdown
-                    cb.focus_set()                          # keep typing in the entry
-                    cb.icursor("end")
-                except tk.TclError:
-                    pass
+            cb["values"] = [n for n in names if typed in n.lower()] if typed else names
 
         cb.bind("<KeyRelease>", on_key, add="+")
         cb.bind("<<ComboboxSelected>>", commit, add="+")
