@@ -246,6 +246,25 @@ off the core path and gracefully degradable.
   Gateway demo `examples/gateway_tests/epr_demo.json` (methyl radical doublet).
   **Verified vs real local ORCA 6.0.1** (methyl: g_iso 2.0026, 1:3:3:1 ¹H quartet +
   anisotropic ¹³C tensor [132,132,356] MHz). Tests `tests/test_epr.py` (~209 total).
+- **Text-box UX + Interrupt button** (branch `posthoc-properties`) — (a) the node
+  editor's recipe search combo no longer loses focus per keystroke (it stopped
+  re-posting the dropdown, whose async focus grab beat `focus_set`; now it just
+  narrows `cb["values"]`). (b) **Undo/redo app-wide**: `shortcuts.py` binds Ctrl+Z/Y
+  via Tk *class* bindings — `tk.Text` uses native `edit_undo`; `ttk.Entry`/Spinbox
+  (which have none) get a small per-widget undo stack that coalesces a typed word
+  into one step. (c) **Word motion/selection**: Ctrl+←/→ and Ctrl+Shift+←/→ stop at
+  word↔delimiter boundaries (word = `[A-Za-z0-9_]`; the rest are stops); pure
+  `next/prev_word_boundary` helpers are unit-tested. `install_text_shortcuts` slimmed
+  to just enabling undo (keys are class-wide) to avoid double-fire. (d) **Interrupt
+  button** (`calculations_tab`, cluster only — local keeps its Stop): a red two-stage
+  cancel that appears once calcs are submitted and floats centred between Build and
+  the right cluster. Disarmed (muted) until the queue's been queried this session; a
+  first press runs Refresh status and, if jobs are active, arms (red); an armed press
+  confirms + `slurm_runtime.cancel_jobs` (one `scancel`). `_status_known` gates
+  arm/disarm (False on submit/open, True after a status query). Chose Stop/Cancel over
+  Pause/Resume: a normal user can't suspend a running SLURM job, only kill it, and
+  cancel isn't reversible. Tests `tests/test_shortcuts.py`, `tests/test_cancel_jobs.py`
+  (~219 total).
 
 ## Open work / TODO
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
