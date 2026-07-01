@@ -186,7 +186,7 @@ class CalculationsTab(ttk.Frame):
                          "the app and MobaXterm. Same engine as the Workflow tab's Submit "
                          "unattended; needs no Workflow graph.")
         # Monitoring: distinct, bigger/bolder, light shade, just left of the launch action.
-        b_status = tk.Button(bar, text="Refresh status (F5)", command=self.on_refresh_status,
+        b_status = tk.Button(bar, text="Refresh (F5)", command=self.on_refresh_status,
                              font=("TkDefaultFont", 11, "bold"),
                              bg="#d3e6f5", activebackground="#c3dcf0")
         b_status.pack(side=tk.RIGHT, padx=2)

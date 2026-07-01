@@ -107,10 +107,9 @@ class WorkflowTab(ttk.Frame):
                             bg="#cdebc5", activebackground="#bfe2b6")
         b_unatt.pack(side=tk.RIGHT, padx=2)
         b_gen = tk.Button(bar, text="Generate only", command=self.on_generate,
-                          bg="#cfe0f5", activebackground="#bcd6f0")
+                          bg="#e2e2e2", activebackground="#d5d5d5")
         b_gen.pack(side=tk.RIGHT, padx=2)
-        ttk.Button(bar, text="Clear", command=self.on_clear).pack(side=tk.RIGHT, padx=2)
-        b_refresh = tk.Button(bar, text="Refresh status", command=self.on_refresh_status,
+        b_refresh = tk.Button(bar, text="Refresh", command=self.on_refresh_status,
                               bg="#d3e6f5", activebackground="#c3dcf0")
         b_refresh.pack(side=tk.RIGHT, padx=(12, 2))
         tip(b_refresh, "Re-query job status and rebuild each node's results, so finished nodes "
@@ -305,6 +304,11 @@ class WorkflowTab(ttk.Frame):
         names = [r.name for r in self.app.recipes]
         var = tk.StringVar(value=node.config.get(key, ""))
         cb = ttk.Combobox(self.cfg_frame, textvariable=var, values=names, width=28)
+        # Once a node has launched calcs, its recipe is locked — changing it would
+        # silently desync the node from the calcs it already spawned.
+        if self._node_is_locked(node.id):
+            cb.configure(state="disabled")
+            return cb
 
         def commit(*_a):
             v = var.get().strip()
@@ -370,6 +374,13 @@ class WorkflowTab(ttk.Frame):
             if ctype == "EPR" and done:
                 b = ttk.Button(btns, text="EPR", width=5, command=lambda c=calc: ct._plot_epr([c]))
                 b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated EPR spectrum.")
+            if ctype == "OPT" and done:
+                trj = ct._calc_file(calc, calc.molecule_filename + "_trj.xyz")
+                if trj:
+                    b = ttk.Button(btns, text="Traj", width=5,
+                                   command=lambda p=trj: ct._open_3d(p))
+                    b.pack(side=tk.LEFT, padx=1)
+                    tip(b, "Open the optimisation trajectory as a movie in the 3D viewer.")
             if calc.job_id:
                 b = ttk.Button(btns, text="Live", width=5, command=lambda c=calc: ct._open_live(c))
                 b.pack(side=tk.LEFT, padx=1)
@@ -1166,6 +1177,21 @@ class WorkflowTab(ttk.Frame):
                 return (src_id, sp, dst_id, dp)
         return None
 
+    def _node_launched_calcs(self, node_id):
+        """Calcs this node spawned that have been submitted/run (have a job id).
+        Sourced from the project (by origin_node), so it's correct after a reopen."""
+        return [c for c in self.app.project.planned_calcs
+                if getattr(c, "origin_node", None) == node_id and c.job_id]
+
+    def _node_is_locked(self, node_id):
+        """A node is locked — recipe uneditable, protected from deletion — once it has
+        launched calc(s). Report nodes are exempt: they only aggregate results, so
+        they stay editable and re-runnable."""
+        node = self.wf.node(node_id)
+        if node is not None and node.type == "report":
+            return False
+        return bool(self._node_launched_calcs(node_id))
+
     def _delete_selected(self):
         if self._sel_edge is not None:
             self.wf.remove_edge(self._sel_edge)
@@ -1174,15 +1200,33 @@ class WorkflowTab(ttk.Frame):
             self._redraw()
             self._build_config_panel()
             return
-        if self._sel_nodes:
-            for nid in list(self._sel_nodes):
-                self.wf.remove_node(nid)
-            self._sel_nodes = []
-            self._commit()
-            self._redraw()
-            self._build_config_panel()
+        if not self._sel_nodes:
+            return
+        locked = [nid for nid in self._sel_nodes if self._node_is_locked(nid)]
+        deletable = [nid for nid in self._sel_nodes if nid not in locked]
+        if locked:
+            messagebox.showinfo(
+                "Protected node(s)",
+                "{} of the selected node(s) have already launched calculation(s), so "
+                "they're kept to protect your run record. To remove one, first delete its "
+                "calculations on the Calculations tab (Deconstruct).{}".format(
+                    len(locked),
+                    "" if not deletable else
+                    "\n\nThe other {} node(s) will be deleted.".format(len(deletable))))
+        for nid in deletable:
+            self.wf.remove_node(nid)
+        self._sel_nodes = list(locked)   # keep the protected ones selected
+        self._commit()
+        self._redraw()
+        self._build_config_panel()
 
     def _delete_node(self, node_id):
+        if self._node_is_locked(node_id):
+            messagebox.showinfo(
+                "Protected node",
+                "This node has already launched calculation(s), so it's kept to protect "
+                "your run record. Delete its calculations on the Calculations tab first.")
+            return
         self.wf.remove_node(node_id)
         if node_id in self._sel_nodes:
             self._sel_nodes.remove(node_id)
