@@ -265,6 +265,15 @@ off the core path and gracefully degradable.
   Pause/Resume: a normal user can't suspend a running SLURM job, only kill it, and
   cancel isn't reversible. Tests `tests/test_shortcuts.py`, `tests/test_cancel_jobs.py`
   (~219 total).
+- **Workflow tab: Refresh + node alignment** (branch `posthoc-properties`) — (a) a
+  **Refresh status** button re-queries SLURM (via the Calc tab) and rebuilds the
+  node→calc map from each calc's `origin_node` (`_remap_node_calcs`), then redraws +
+  rebuilds the config panel — so after jobs finish, node colours update and the
+  per-node plot/viewer buttons appear (works after a reopen too, no re-expand needed).
+  (b) **Blueprint-style tidy hotkeys** (canvas-scoped): **Q** straightens the selection
+  (aligns vertical centres onto one line), **Shift+W/S/A/D** align top/bottom/left/right
+  edges (`_align_selected`/`_straighten_selected`). Bound to uppercase keysyms (= Shift
+  held) so Ctrl+A still selects all.
 
 ## Open work / TODO
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
