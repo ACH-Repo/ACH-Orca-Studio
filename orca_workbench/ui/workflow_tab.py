@@ -110,6 +110,12 @@ class WorkflowTab(ttk.Frame):
                           bg="#cfe0f5", activebackground="#bcd6f0")
         b_gen.pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Clear", command=self.on_clear).pack(side=tk.RIGHT, padx=2)
+        b_refresh = tk.Button(bar, text="Refresh status", command=self.on_refresh_status,
+                              bg="#d3e6f5", activebackground="#c3dcf0")
+        b_refresh.pack(side=tk.RIGHT, padx=(12, 2))
+        tip(b_refresh, "Re-query job status and rebuild each node's results, so finished nodes "
+                       "light up and their plot/viewer buttons appear. Also works after reopening "
+                       "a project (rebuilds the node->calc map from the calcs themselves).")
         tip(b_run, "Expand this pipeline into calculations and run them automatically: each step "
                    "builds and launches as its input geometry becomes ready, and a Condition node "
                    "decides live whether its downstream branch runs (e.g. only do NMR if the "
@@ -130,7 +136,8 @@ class WorkflowTab(ttk.Frame):
                   "on empty space to pick a new node) · drag empty space to box-select · Ctrl+click "
                   "to multi-select · Ctrl+A all · J connects two selected nodes · F3 adds a node · "
                   "C frames the selection · T adds a comment (double-click to edit, drag its corner "
-                  "to resize) · scroll to zoom · middle/right-drag to pan · Delete removes. "
+                  "to resize) · Q straightens the selection, Shift+WASD aligns its edges · "
+                  "scroll to zoom · middle/right-drag to pan · Delete removes. "
                   "Select a node then Run pipeline to run just that network.",
                   foreground="#666", wraplength=1100, justify=tk.LEFT).pack(
                       side=tk.TOP, anchor=tk.W, padx=8, pady=2)
@@ -190,6 +197,14 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<C>", lambda e: self._frame_selection())
         self.canvas.bind("<t>", lambda e: self._add_comment())
         self.canvas.bind("<T>", lambda e: self._add_comment())
+        # Blueprint-style tidy-up of the selection (canvas-scoped, like c/t/j):
+        # Q straightens a connected chain onto one line; Shift+WASD aligns edges.
+        self.canvas.bind("<q>", lambda e: self._straighten_selected())
+        self.canvas.bind("<Q>", lambda e: self._straighten_selected())
+        self.canvas.bind("<W>", lambda e: self._align_selected("top"))
+        self.canvas.bind("<S>", lambda e: self._align_selected("bottom"))
+        self.canvas.bind("<A>", lambda e: self._align_selected("left"))
+        self.canvas.bind("<D>", lambda e: self._align_selected("right"))
         self.canvas.bind("<Double-Button-1>", self._on_double_click)
 
         self.cfg_frame = ttk.LabelFrame(paned, text="Node settings")
@@ -941,6 +956,52 @@ class WorkflowTab(ttk.Frame):
         self._sel_edge = None
         self._redraw()
         self._build_config_panel()
+        return "break"
+
+    def _selected_node_objs(self):
+        objs = [self.wf.node(nid) for nid in self._sel_nodes]
+        return [n for n in objs if n is not None]
+
+    def _align_selected(self, edge):
+        """Blueprint-style Shift+WASD: align the selected nodes' edges. top/bottom
+        (W/S) share a horizontal edge; left/right (A/D) a vertical edge."""
+        nodes = self._selected_node_objs()
+        if len(nodes) < 2:
+            return "break"
+        w = self._node_width
+        h = self._node_height
+        if edge == "left":
+            x = min(n.x for n in nodes)
+            for n in nodes:
+                n.x = x
+        elif edge == "right":
+            r = max(n.x + w(n) for n in nodes)
+            for n in nodes:
+                n.x = r - w(n)
+        elif edge == "top":
+            y = min(n.y for n in nodes)
+            for n in nodes:
+                n.y = y
+        elif edge == "bottom":
+            b = max(n.y + h(n) for n in nodes)
+            for n in nodes:
+                n.y = b - h(n)
+        self.app.mark_dirty()
+        self._redraw()
+        return "break"
+
+    def _straighten_selected(self):
+        """Blueprint-style Q: straighten a connected chain by putting the selected
+        nodes' vertical centres on one line, so wires between them run straight
+        across (the common left-to-right pipeline case)."""
+        nodes = self._selected_node_objs()
+        if len(nodes) < 2:
+            return "break"
+        cy = sum(n.y + self._node_height(n) / 2.0 for n in nodes) / len(nodes)
+        for n in nodes:
+            n.y = cy - self._node_height(n) / 2.0
+        self.app.mark_dirty()
+        self._redraw()
         return "break"
 
     def _clear_selection(self):
@@ -1773,6 +1834,30 @@ class WorkflowTab(ttk.Frame):
         if not srcs or srcs == all_srcs:
             return None
         return srcs
+
+    def _remap_node_calcs(self):
+        """Rebuild the node id -> [calc ids] map from the project by each calc's
+        origin_node. This makes node status / result buttons work even after
+        reopening a project (when no _expand ran this session). Keeps the existing
+        map if the project has no workflow-tagged calcs."""
+        m = {}
+        for c in self.app.project.planned_calcs:
+            nid = getattr(c, "origin_node", None)
+            if nid:
+                m.setdefault(nid, []).append(c.id)
+        if m:
+            self._node_calcs = m
+
+    def on_refresh_status(self):
+        """Re-query job status and rebuild the graph view so finished nodes light up
+        and their per-node plot/viewer buttons appear."""
+        ct = getattr(self.app, "calculations_tab", None)
+        if ct is not None:
+            ct.on_refresh_status()   # queries squeue -> ct._squeue_states (+ refreshes calc tab)
+        self._remap_node_calcs()
+        self._redraw()
+        self._build_config_panel()
+        self.app.set_status("Workflow status refreshed.")
 
     def on_generate(self):
         res = self._expand("Create", source_ids=self._selected_sources())
