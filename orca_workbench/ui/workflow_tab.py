@@ -115,7 +115,7 @@ class WorkflowTab(ttk.Frame):
         b_gen = tk.Button(bar, text="Generate only", command=self.on_generate,
                           bg="#e2e2e2", activebackground="#d5d5d5")
         b_gen.pack(side=tk.RIGHT, padx=2)
-        b_refresh = tk.Button(bar, text="Refresh", command=self.on_refresh_status,
+        b_refresh = tk.Button(bar, text="Refresh (F5)", command=self.on_refresh_status,
                               bg="#d3e6f5", activebackground="#c3dcf0")
         b_refresh.pack(side=tk.RIGHT, padx=(12, 2))
         tip(b_refresh, "Re-query job status and rebuild each node's results, so finished nodes "
@@ -213,11 +213,42 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<Control-Y>", self._redo_graph)
         self.canvas.bind("<Double-Button-1>", self._on_double_click)
 
-        self.cfg_frame = ttk.LabelFrame(paned, text="Node settings")
-        paned.add(self.cfg_frame, weight=1)
+        cfg_outer = ttk.LabelFrame(paned, text="Node settings")
+        paned.add(cfg_outer, weight=1)
+        self._cfg_canvas = tk.Canvas(cfg_outer, highlightthickness=0)
+        cfg_sb = ttk.Scrollbar(cfg_outer, orient=tk.VERTICAL, command=self._cfg_canvas.yview)
+        self._cfg_canvas.configure(yscrollcommand=cfg_sb.set)
+        cfg_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._cfg_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.cfg_frame = ttk.Frame(self._cfg_canvas)
+        self._cfg_win = self._cfg_canvas.create_window((0, 0), window=self.cfg_frame, anchor="nw")
+        self.cfg_frame.bind("<Configure>", lambda e: self._cfg_canvas.configure(
+            scrollregion=self._cfg_canvas.bbox("all")))
+        self._cfg_canvas.bind("<Configure>", lambda e: self._cfg_canvas.itemconfigure(
+            self._cfg_win, width=e.width))
         self._build_config_panel()
 
+    def _cfg_wheel(self, e):
+        self._cfg_canvas.yview_scroll(int(-e.delta / 120), "units")
+        return "break"
+
+    def _bind_cfg_wheel(self, widget):
+        """Bind the mouse wheel on the panel AND every child, so scrolling works
+        anywhere over the settings — not only when the pointer is on the scrollbar."""
+        widget.bind("<MouseWheel>", self._cfg_wheel)
+        for ch in widget.winfo_children():
+            self._bind_cfg_wheel(ch)
+
     def _build_config_panel(self):
+        self._populate_config_panel()
+        self._bind_cfg_wheel(self.cfg_frame)
+        self._cfg_canvas.bind("<MouseWheel>", self._cfg_wheel)
+        try:
+            self._cfg_canvas.yview_moveto(0.0)   # show the top of the new node's settings
+        except Exception:
+            pass
+
+    def _populate_config_panel(self):
         for w in self.cfg_frame.winfo_children():
             w.destroy()
         if len(self._sel_nodes) > 1:
@@ -309,14 +340,16 @@ class WorkflowTab(ttk.Frame):
         recipe library can be long. Only a real recipe name is committed (on pick /
         Return / focus-out); partial text just narrows the dropdown. Returns the
         widget so the caller packs it."""
+        # Once a node has launched calcs its recipe is locked (changing it would
+        # silently desync the node from the calcs it spawned). Show the recipe name
+        # read-only so it's still clear which one ran.
+        if self._node_is_locked(node.id):
+            current = node.config.get(key, "") or "(none set)"
+            return ttk.Label(self.cfg_frame, text="{}  (locked - node has run)".format(current),
+                             foreground="#555", wraplength=210, justify=tk.LEFT)
         names = [r.name for r in self.app.recipes]
         var = tk.StringVar(value=node.config.get(key, ""))
         cb = ttk.Combobox(self.cfg_frame, textvariable=var, values=names, width=28)
-        # Once a node has launched calcs, its recipe is locked — changing it would
-        # silently desync the node from the calcs it already spawned.
-        if self._node_is_locked(node.id):
-            cb.configure(state="disabled")
-            return cb
 
         def commit(*_a):
             v = var.get().strip()
@@ -388,7 +421,9 @@ class WorkflowTab(ttk.Frame):
                     b = ttk.Button(btns, text="Traj", width=5,
                                    command=lambda p=trj: ct._open_3d(p))
                     b.pack(side=tk.LEFT, padx=1)
-                    tip(b, "Open the optimisation trajectory as a movie in the 3D viewer.")
+                    tip(b, "Open the optimisation trajectory (<mol>_trj.xyz), a multi-frame .xyz. "
+                           "molden and Avogadro animate it as a movie; you can also load it into "
+                           "PyMOL or VMD as a trajectory.")
             if calc.job_id:
                 b = ttk.Button(btns, text="Live", width=5, command=lambda c=calc: ct._open_live(c))
                 b.pack(side=tk.LEFT, padx=1)
@@ -456,20 +491,6 @@ class WorkflowTab(ttk.Frame):
         ttk.Label(self.cfg_frame, text="Properties to extract:",
                   font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=8)
         chosen = node.config.get("extractors")   # None => all
-        wrap = ttk.Frame(self.cfg_frame)
-        wrap.pack(fill=tk.X, padx=8, pady=2)
-        canvas = tk.Canvas(wrap, height=160, highlightthickness=0)
-        sb = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        inner = ttk.Frame(canvas)
-        wid = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(wid, width=e.width))
-        canvas.bind("<Enter>", lambda e: canvas.bind_all(
-            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
         allkeys = [ex.key for ex in reporting.EXTRACTORS]
         cvars = {}
 
@@ -478,11 +499,13 @@ class WorkflowTab(ttk.Frame):
             # store None when everything is ticked, so future extractors are included
             self._set_cfg(node, "extractors", None if keys == allkeys else keys)
 
+        # Checkboxes go straight into the (scrollable) settings panel — no inner
+        # scroll of their own, so one wheel scrolls the whole panel.
         for ex in reporting.EXTRACTORS:
             v = tk.BooleanVar(value=(chosen is None or ex.key in chosen))
             cvars[ex.key] = v
-            ttk.Checkbutton(inner, text="{}  ({})".format(ex.label, ex.applies_hint),
-                            variable=v, command=on_toggle).pack(anchor=tk.W, padx=4, pady=1)
+            ttk.Checkbutton(self.cfg_frame, text="{}  ({})".format(ex.label, ex.applies_hint),
+                            variable=v, command=on_toggle).pack(anchor=tk.W, padx=12, pady=1)
 
     # ----------------------------------------------------- workflow <-> project
 
@@ -2005,10 +2028,14 @@ class WorkflowTab(ttk.Frame):
 
     def on_refresh_status(self):
         """Re-query job status and rebuild the graph view so finished nodes light up
-        and their per-node plot/viewer buttons appear."""
+        and their per-node plot/viewer buttons appear. Queries SLURM directly and
+        updates the Calc tab's status cache WITHOUT refreshing/switching to it (the
+        node status reads that cache via ct._own_state)."""
+        from orca_workbench.core import slurm_runtime
         ct = getattr(self.app, "calculations_tab", None)
         if ct is not None:
-            ct.on_refresh_status()   # queries squeue -> ct._squeue_states (+ refreshes calc tab)
+            ct._squeue_states = slurm_runtime.query_states()
+            ct._status_known = True
         self._remap_node_calcs()
         self._redraw()
         self._build_config_panel()

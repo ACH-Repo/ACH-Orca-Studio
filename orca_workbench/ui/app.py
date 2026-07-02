@@ -189,6 +189,11 @@ class App(object):
                                 "Program to open a recipe's JSON when you double-click it. A GUI "
                                 "editor (Notepad++, Sublime, gedit, …); terminal editors won't work."))
         setmenu.add_command(label="molden module name...", command=self._set_molden_module)
+        setmenu.add_separator()
+        setmenu.add_command(label="Default cores per job...", command=self._set_default_cores)
+        setmenu.add_command(label="Default memory per core (MB)...",
+                            command=self._set_default_maxcore)
+        setmenu.add_separator()
         setmenu.add_command(label="SLURM submission delay...", command=self._set_submit_delay)
         setmenu.add_command(label="SLURM submit script (template)...",
                             command=self.on_edit_slurm_template)
@@ -425,8 +430,17 @@ class App(object):
             config_mod.set_value("usermail", val)
 
     def _on_f5(self):
-        # F5 = refresh job status (the monitoring action). _select_tab builds the
-        # Calculations tab first if it's still a lazy placeholder (simple mode).
+        # F5 = refresh status of the current tab. On the Workflow tab, refresh the
+        # graph in place (no tab switch); otherwise refresh (and show) the
+        # Calculations tab. _select_tab builds it if it's still a lazy placeholder.
+        wt = getattr(self, "workflow_tab", None)
+        try:
+            on_workflow = wt is not None and str(wt) == self.notebook.select()
+        except Exception:
+            on_workflow = False
+        if on_workflow and hasattr(wt, "on_refresh_status"):
+            wt.on_refresh_status()
+            return
         self._select_tab("calculations_tab")
         ct = getattr(self, "calculations_tab", None)
         if ct is not None and hasattr(ct, "on_refresh_status"):
@@ -675,36 +689,30 @@ class App(object):
                        "chronologically from left to right: each node's output geometry / results "
                        "feed the node(s) it connects to.").pack(anchor=tk.W, padx=4, pady=(4, 2))
         section("Adding & wiring")
-        bullet("Add a node from the palette buttons up top, or press F3 (or drag from a pin onto "
-               "empty space) for a search popup listing every node type.")
-        bullet("Wire by dragging an output pin onto a compatible input pin; drop on empty space to "
-               "pick a new node to connect.")
-        bullet("J connects two selected nodes.")
+        bullet("Palette buttons / F3: add a node (F3 searches every type).")
+        bullet("Drag output pin -> input pin: wire them.")
+        bullet("Drop a wire on empty space: pick a new node to connect.")
+        bullet('"J": connect the two selected nodes.')
         section("Selecting & moving")
-        bullet("Click to select, Ctrl+click to multi-select, drag empty space to box-select, "
-               "Ctrl+A selects all.")
-        bullet("Drag a node to move it. Scroll to zoom; middle- or right-drag to pan; press 0 to "
-               "reset the view.")
-        section("Tidying the layout (Blueprint-style)")
-        bullet("Q straightens the selection so connected nodes line up and their wires run "
-               "straight across.")
-        bullet("Shift+W / Shift+S align top / bottom edges; Shift+A / Shift+D align left / right "
-               "edges.")
-        bullet("C frames the selection in a titled box; T drops a comment note (double-click to "
-               "edit it, drag its corner to resize).")
+        bullet("Click / Ctrl+click: select / multi-select.")
+        bullet("Drag empty space: box-select.   Ctrl+A: select all.")
+        bullet("Drag a node: move it.")
+        bullet('Scroll: zoom.   Middle/right-drag: pan.   "0": reset view.')
+        section("Tidying (Blueprint-style)")
+        bullet('"Q": straighten the selection (wires run straight).')
+        bullet("Shift+W / Shift+S: align top / bottom edges.")
+        bullet("Shift+A / Shift+D: align left / right edges.")
+        bullet('"C": frame the selection.   "T": add a comment note.')
         section("Running")
-        bullet("Generate only (grey): expand into calculations without launching, to review them "
-               "on the Calculations tab first.")
-        bullet("Run pipeline (amber): build and launch automatically as each input becomes ready "
-               "— keep the app open.")
-        bullet("Submit unattended (green): hand the whole pipeline to SLURM as a dependency chain, "
-               "then you can close the app.")
-        bullet("Select a node first to run only that network. Refresh (blue) re-queries status so "
-               "finished nodes light up and expose their plot / viewer buttons.")
+        bullet("Generate only (grey): expand to calcs, don't launch.")
+        bullet("Run pipeline (amber): launch automatically; keep app open.")
+        bullet("Submit unattended (green): hand to SLURM; app can close.")
+        bullet("Refresh (blue, F5): update status + show result buttons.")
+        bullet("Select a node first: run only that network.")
         section("Good to know")
-        bullet("Once a node has launched calculations, its recipe locks and it can't be deleted "
-               "(remove its calcs on the Calculations tab first) — this protects your run record. "
-               "Report nodes are exempt: they only aggregate, so they stay editable and re-runnable.")
+        bullet("Ctrl+Z / Ctrl+Y: undo / redo graph edits.")
+        bullet("A node that has run locks its recipe and can't be deleted "
+               "(delete its calcs first). Report nodes stay editable.")
         section("Feel familiar?")
         ttk.Label(inner, wraplength=580, justify=tk.LEFT, foreground="#555",
                   text="This editor is largely inspired by Unreal Engine 5's Blueprint system and "
@@ -712,6 +720,36 @@ class App(object):
                        "hotkeys — if you've used either, you should feel right at home.").pack(
                            anchor=tk.W, padx=4, pady=(2, 10))
         ttk.Button(win, text="Close", command=win.destroy).pack(side=tk.BOTTOM, pady=8)
+
+    def _set_default_cores(self):
+        from tkinter import simpledialog
+        cur = int(config_mod.get("default_cores", 0) or 0)
+        n = simpledialog.askinteger(
+            "Default cores per job",
+            "CPU cores for every built job — overrides each recipe's %pal nprocs, and the "
+            "SLURM core count follows it. Set it once here instead of editing every recipe."
+            "\n\n0 = leave each recipe's own value.",
+            parent=self.root, initialvalue=cur, minvalue=0, maxvalue=1024)
+        if n is None:
+            return
+        config_mod.set_value("default_cores", int(n))
+        self.set_status("Default cores per job: {}.".format(n if n else "use recipe's own"))
+
+    def _set_default_maxcore(self):
+        from tkinter import simpledialog
+        cur = int(config_mod.get("default_maxcore_mb", 0) or 0)
+        n = simpledialog.askinteger(
+            "Default memory per core (MB)",
+            "ORCA %maxcore (memory per core, in MB) for every built job — overrides each "
+            "recipe. Set your RAM budget once here.\n\n0 = leave each recipe's own value.\n\n"
+            "Note: this is ORCA's memory. The SLURM --mem line lives in the submit script "
+            "(Settings > SLURM submit script).",
+            parent=self.root, initialvalue=cur, minvalue=0, maxvalue=1024000)
+        if n is None:
+            return
+        config_mod.set_value("default_maxcore_mb", int(n))
+        self.set_status("Default memory per core: {}.".format(
+            "{} MB".format(n) if n else "use recipe's own"))
 
     def on_save(self):
         if not self.project.path:

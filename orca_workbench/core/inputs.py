@@ -284,6 +284,29 @@ def set_cores(inp_text, n):
     return CORES_RE.sub("%pal nprocs {}".format(n), inp_text, count=1)
 
 
+MAXCORE_RE = re.compile(r"%maxcore\s+(\d+)", re.IGNORECASE)
+
+
+def set_maxcore(inp_text, mb):
+    # type: (str, int) -> str
+    """Set ORCA's `%maxcore` (memory per core, MB). Replaces an existing %maxcore,
+    otherwise inserts one right after the first keyword (`!`) line so the setting
+    actually takes effect. mb <= 0 leaves the text unchanged."""
+    mb = int(mb)
+    if mb <= 0:
+        return inp_text
+    if MAXCORE_RE.search(inp_text):
+        return MAXCORE_RE.sub("%maxcore {}".format(mb), inp_text, count=1)
+    out = []
+    inserted = False
+    for ln in inp_text.split("\n"):
+        out.append(ln)
+        if not inserted and ln.lstrip().startswith("!"):
+            out.append("%maxcore {}".format(mb))
+            inserted = True
+    return "\n".join(out) if inserted else inp_text
+
+
 XYZ_BLOCK_RE = re.compile(
     r"\*\s*xyz\s*([+-]?\d+)\s+(\d+)\s+([\s\S]*?)\*",
     re.IGNORECASE,

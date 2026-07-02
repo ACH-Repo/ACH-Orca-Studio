@@ -1209,6 +1209,16 @@ class CalculationsTab(ttk.Frame):
             else:
                 self._log("MOREAD skipped for {}: orbital parent not built yet (no rundir)."
                           .format(self._short(calc)))
+        # Global hardware defaults (Settings > Default cores / memory per job): if set,
+        # override the recipe's %pal nprocs / %maxcore so a user changes their PC specs
+        # in ONE place instead of editing every recipe. 0 = leave the recipe's own. The
+        # SLURM core count is derived from the input below, so it stays in sync.
+        gcores = int(config_mod.get("default_cores", 0) or 0)
+        if gcores > 0:
+            inp_text = inputs_mod.set_cores(inp_text, gcores)
+        gmax = int(config_mod.get("default_maxcore_mb", 0) or 0)
+        if gmax > 0:
+            inp_text = inputs_mod.set_maxcore(inp_text, gmax)
         # When running on this machine (not a cluster), don't let a recipe ask for
         # more cores than the CPU has — otherwise a first local job over-subscribes
         # and crawls. Clamp %pal nprocs to the detected core count.
