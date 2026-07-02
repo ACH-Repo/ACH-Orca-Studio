@@ -1219,6 +1219,12 @@ class CalculationsTab(ttk.Frame):
         gmax = int(config_mod.get("default_maxcore_mb", 0) or 0)
         if gmax > 0:
             inp_text = inputs_mod.set_maxcore(inp_text, gmax)
+        if gcores > 0 or gmax > 0:
+            # Log the override so the global default isn't a silent, hidden change.
+            self._log("Global default applied to {}:{}{}.".format(
+                self._short(calc),
+                " {} cores".format(gcores) if gcores > 0 else "",
+                " {} MB/core".format(gmax) if gmax > 0 else ""))
         # When running on this machine (not a cluster), don't let a recipe ask for
         # more cores than the CPU has — otherwise a first local job over-subscribes
         # and crawls. Clamp %pal nprocs to the detected core count.
