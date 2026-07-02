@@ -8,7 +8,7 @@ One mechanism behind the three ideas we want for ORCA Workbench:
   * (future) an add-on tab             -> **OPTIONAL**.
 
 A tab/plotter/calc-type is tagged with a tier; the launch mode sets how far down
-the list to load. Today this gates the heavy Benchmark/Workflow "tools" tabs and
+the list to load. Today this gates the heavy Workflow "tools" tab and
 defers the non-active pipeline tabs in simple mode — and it's the seed of the
 planned add-on system, so promoting a feature between tiers is just a tag change.
 """

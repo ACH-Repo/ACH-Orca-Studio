@@ -258,7 +258,6 @@ class App(object):
         self.recipes_tab = None       # type: Optional[ttk.Frame]
         self.calculations_tab = None  # type: Optional[ttk.Frame]
         self.report_tab = None        # type: Optional[ttk.Frame]
-        self.benchmark_tab = None     # type: Optional[ttk.Frame]
         self.workflow_tab = None      # type: Optional[ttk.Frame]
         # placeholder -> spec to materialise the real tab on first selection.
         self._lazy_tabs = {}  # type: dict
@@ -270,7 +269,7 @@ class App(object):
 
         if features.is_simple():
             # Gateway/--simple mode: defer the rest of the pipeline tabs (built on
-            # first click) and skip the heavy Benchmark/Workflow tools entirely.
+            # first click) and skip the heavy Workflow tool entirely.
             # Over a high-latency X link this cuts the cold start to one tab's
             # worth of widgets. The default (full) path below is unchanged.
             self._add_lazy_tab("recipes_tab", "Recipes", None,
@@ -296,12 +295,8 @@ class App(object):
             # normal chronology), built lazily on first selection. ttk tabs can't
             # take a background colour directly, so a small colour-block image is
             # the reliable cross-theme way to mark them.
-            self._bench_swatch = tk.PhotoImage(width=13, height=13)
-            self._bench_swatch.put("#7aa8d6", to=(0, 0, 13, 13))
             self._wf_swatch = tk.PhotoImage(width=13, height=13)
             self._wf_swatch.put("#9b7ad6", to=(0, 0, 13, 13))
-            self._add_lazy_tab("benchmark_tab", " Benchmark", self._bench_swatch,
-                               "orca_workbench.ui.benchmark_tab", "BenchmarkTab")
             self._add_lazy_tab("workflow_tab", " Workflow", self._wf_swatch,
                                "orca_workbench.ui.workflow_tab", "WorkflowTab")
 
@@ -538,7 +533,7 @@ class App(object):
         self.status_var.set(msg)
 
     def refresh_all_tabs(self):
-        for tab_name in ("molecules_tab", "recipes_tab", "benchmark_tab", "workflow_tab",
+        for tab_name in ("molecules_tab", "recipes_tab", "workflow_tab",
                          "calculations_tab", "report_tab"):
             tab = getattr(self, tab_name, None)
             if tab is not None and hasattr(tab, "refresh"):

@@ -45,7 +45,7 @@ def _print_usage():
     print("  --simple, --gateway_mode")
     print("                      Lightweight mode: load only the core pipeline tabs")
     print("                      (Molecules/Recipes/Calculations/Report), build them")
-    print("                      on first click, skip Benchmark/Workflow, and disable")
+    print("                      on first click, skip Workflow, and disable")
     print("                      tooltips. For slow/high-latency X-forwarded sessions")
     print("                      (e.g. over a VPN). (Equivalent: ORCA_WORKBENCH_SIMPLE=1.)")
     print("  --help, -h          Show this message.")

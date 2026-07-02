@@ -12,7 +12,7 @@ A **Tkinter desktop GUI** for building, submitting, monitoring, and analysing
 **ORCA** quantum-chemistry calculations on a **SLURM** cluster (TU Dortmund's
 LiDO3). The user runs the GUI *on the cluster gateway* over a remote desktop, so
 the app calls `sbatch`/`squeue` directly. Tabs: Molecules · Recipes ·
-Calculations · Report · Benchmark · Workflow.
+Calculations · Report · Workflow.
 
 ## The golden architectural rule
 **Core logic lives in `orca_workbench/core/` and is UI-free, with I/O injected;
