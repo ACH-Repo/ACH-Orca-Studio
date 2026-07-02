@@ -245,7 +245,14 @@ off the core path and gracefully degradable.
   `debug_epr_uhf_sto3g` (coords MUST precede `%eprnmr`; `Nuclei = all { aiso, adip }`).
   Gateway demo `examples/gateway_tests/epr_demo.json` (methyl radical doublet).
   **Verified vs real local ORCA 6.0.1** (methyl: g_iso 2.0026, 1:3:3:1 ¹H quartet +
-  anisotropic ¹³C tensor [132,132,356] MHz). Tests `tests/test_epr.py` (~209 total).
+  anisotropic ¹³C tensor [132,132,356] MHz). Tests `tests/test_epr.py`.
+  The EPR window is now MULTI-molecule (stacked colour-matched traces + on-hover
+  g-value, like IR), with a MW-band dropdown (L/S/C/X/K/Q/W — no "Z"), an
+  absorption/1st/2nd-derivative selector, and shared `_AxisLimitControls` (x0/x1/y0/y1
+  on every plotter). **ENDOR** (`ENDORSpectrumWindow` + `core/epr.endor_lines/
+  endor_spectrum`) reuses the SAME hyperfine data — lines at |ν_n ± A/2|, no new calc —
+  via a Calc-tab right-click / node ENDOR button; gated on resolvable A (STO-3G≈0 →
+  prompts for the B3LYP recipe). (~227 tests.)
 - **Text-box UX + Interrupt button** (branch `posthoc-properties`) — (a) the node
   editor's recipe search combo no longer loses focus per keystroke (it stopped
   re-posting the dropdown, whose async focus grab beat `focus_set`; now it just
