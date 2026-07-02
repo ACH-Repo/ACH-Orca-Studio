@@ -274,8 +274,32 @@ off the core path and gracefully degradable.
   (aligns vertical centres onto one line), **Shift+W/S/A/D** align top/bottom/left/right
   edges (`_align_selected`/`_straighten_selected`). Bound to uppercase keysyms (= Shift
   held) so Ctrl+A still selects all.
+- **Workflow/Report polish + node locking + benchmark removal** (branch
+  `posthoc-properties`) — a large UX batch: (a) **node-graph undo/redo** (Ctrl+Z/Y,
+  canvas-scoped) via whole-graph snapshots at the single `_commit()` chokepoint (a drag
+  commits once at release = one step; `refresh()` only wipes history on a real graph
+  reload). (b) **Q now truly straightens** — moves each downstream node so its input pin
+  aligns to the upstream output pin's height (`_port_xy`), left-to-right, so wires run
+  straight. (c) **Node locking**: once a node has launched calcs (`_node_is_locked` via
+  `origin_node`), its recipe combo disables and it can't be deleted (Delete keeps
+  protected nodes + removes the rest); Report nodes are exempt (aggregate-only, stay
+  editable/re-runnable). (d) **Report node** gets the Report tab's property checkboxes
+  (`node.config['extractors']`, None=all) → `_report_specs` → `_generate_pipeline_reports`.
+  (e) **Report tab**: the extractor list is now a fixed-height scrollable box so the
+  Generate button can't be pushed off-screen. (f) toolbar consistency: removed **Clear**,
+  greyed **Generate only**, renamed **Refresh** (both tabs); OPT nodes get a **Traj**
+  button (`_trj.xyz`). (g) on-canvas help trimmed to a one-liner → **Help ▸ Node graphs**
+  scrollable popup (bulleted guide + UE5-Blueprint/KNIME trivia). (h) **auto-refresh** the
+  Workflow view on project open. (i) **removed the Benchmark tab** (redundant with
+  Workflow + Calc-derive; was flagged experimental). ORCA-restart check (local): a
+  cancelled OPT can resume from the last `_trj.xyz` geometry + MOREAD in ~half the cycles —
+  a "Resume from last geometry" feature is viable (not built; Interrupt stays cancel-only).
 
 ## Open work / TODO
+- Possible: a "Resume from last geometry" action (rebuild an OPT from `_trj.xyz` last
+  frame + MOREAD) — verified locally it converges in ~half the cycles vs from scratch.
+- Possible: an "add for all molecules × selected recipes" button on the Calc tab if the
+  removed Benchmark tab's matrix convenience is ever missed.
 - Optional: PyMOL support for a *local* (Windows) machine (gateway has molden only).
 - The plotter overhaul (below) was a blind refactor (no GUI here) — worth a visual
   pass on the gateway: stacked IR, the shared hover structure panel, NMR margins,
