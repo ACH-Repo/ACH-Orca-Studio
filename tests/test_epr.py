@@ -167,3 +167,36 @@ def test_powder_g_anisotropy_sets_field_span():
 def test_powder_no_data_is_safe():
     sim = EPR.powder_spectrum([2.0, 2.0, 2.0], [], n_theta=4, n_phi=4, npoints=10)
     assert sim["mode"] == "powder" and len(sim["field_mT"]) == len(sim["derivative"])
+
+
+# ----------------------------------------------- ENDOR (same hyperfine, no new calc)
+def test_nuclear_larmor():
+    assert abs(EPR.nuclear_larmor_MHz("H", 340.0) - 14.48) < 0.05   # ~14.5 MHz at X-band
+    assert EPR.nuclear_larmor_MHz("Xx", 340.0) is None              # untabulated element
+
+
+def test_endor_lines_weak_and_strong_coupling():
+    # H, weak coupling (A/2 < nu_n): the two lines straddle the proton Larmor freq
+    lines = EPR.endor_lines(2.0026, [{"element": "H", "A_iso": 10.0, "I": 0.5}])
+    L = lines[0]
+    lo, hi = L["lines"]
+    assert L["element"] == "H" and lo < L["nu_n"] < hi
+    assert abs((hi - lo) - 10.0) < 1e-6              # split by A
+    # C, strong coupling (A/2 > nu_n): lines centred on A/2
+    lines = EPR.endor_lines(2.0026, [{"element": "C", "A_iso": 120.0, "I": 0.5}])
+    lo, hi = lines[0]["lines"]
+    assert abs((lo + hi) / 2.0 - 60.0) < 1e-6
+
+
+def test_endor_spectrum_shape():
+    hf = [{"element": "H", "A_iso": 40.0, "I": 0.5}] * 3 + \
+         [{"element": "C", "A_iso": 120.0, "I": 0.5}]
+    sp = EPR.endor_spectrum(2.0026, hf, npoints=400)
+    assert len(sp["freq_MHz"]) == 400 and len(sp["absorption"]) == 400
+    assert len(sp["sticks"]) == 4                    # 2 groups x 2 lines each
+    assert max(sp["absorption"]) > 0
+
+
+def test_endor_empty_when_no_coupling():
+    sp = EPR.endor_spectrum(2.0026, [{"element": "H", "A_iso": 0.0, "I": 0.5}])
+    assert sp["sticks"] == []                        # A below tol -> no lines

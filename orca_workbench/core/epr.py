@@ -260,3 +260,85 @@ def powder_spectrum(g, hyperfine, freq_GHz=9.5, linewidth_mT=0.3, n_theta=50,
     return {"field_mT": field, "derivative": deriv, "absorption": smooth,
             "center_mT": center_field_mT(sum(g) / 3.0, freq_GHz),
             "groups": groups, "mode": "powder"}
+
+
+# Nuclear gyromagnetic ratio gamma/2pi in MHz/T for the most common NMR-active
+# isotope of each element — used for ENDOR (the nuclear Larmor frequency at the
+# resonance field, nu_n = gamma * B). Signs dropped (only |nu_n| matters for line
+# positions). Extend as needed.
+_NUCLEAR_GAMMA_MHZ_PER_T = {
+    "H": 42.5774, "D": 6.53566, "C": 10.7084, "N": 3.0777, "O": 5.7742,
+    "F": 40.0776, "P": 17.2515, "S": 3.2717, "B": 13.6626, "Si": 8.4655,
+    "Cl": 4.1765, "Na": 11.2686, "Al": 11.1031, "Li": 16.5471, "Se": 8.157,
+    "Cu": 11.319, "Mn": 10.5763, "Co": 10.077, "V": 11.2133, "Fe": 1.3758,
+}
+
+
+def nuclear_larmor_MHz(element, field_mT):
+    # type: (str, float) -> Optional[float]
+    """Nuclear Larmor frequency (MHz) for `element` at `field_mT`, or None if the
+    element's gyromagnetic ratio isn't tabulated."""
+    g = _NUCLEAR_GAMMA_MHZ_PER_T.get(element)
+    if g is None:
+        return None
+    return abs(g) * field_mT / 1000.0
+
+
+def endor_lines(g_iso, hyperfine, freq_GHz=9.5, tol_MHz=1.0):
+    # type: (float, List[dict], float, float) -> List[dict]
+    """ENDOR line positions (RF frequency, MHz) straight from the hyperfine data —
+    NO new calculation. For each coupled nucleus at the resonance field B0, the two
+    ENDOR lines sit at |nu_n +/- A/2| (nu_n = nuclear Larmor freq, A = isotropic
+    hyperfine). Returns [{element, A_iso, nu_n, lines:[f_lo,f_hi], count}], one per
+    magnetically-equivalent group, skipping elements with no tabulated gamma."""
+    B0 = center_field_mT(g_iso, freq_GHz)
+    out = []
+    for grp in equivalent_groups(hyperfine, tol_MHz=tol_MHz):
+        nu_n = nuclear_larmor_MHz(grp["element"], B0)
+        if nu_n is None:
+            continue
+        a2 = grp["A"] / 2.0
+        out.append({"element": grp["element"], "A_iso": grp["A"], "nu_n": nu_n,
+                    "lines": sorted([abs(nu_n + a2), abs(nu_n - a2)]),
+                    "count": grp["count"]})
+    return out
+
+
+def endor_spectrum(g_iso, hyperfine, freq_GHz=9.5, linewidth_MHz=0.2, npoints=4000,
+                   tol_MHz=1.0):
+    # type: (float, List[dict], float, float, int, float) -> dict
+    """Isotropic ENDOR spectrum: intensity vs RF frequency (MHz). Gaussian-broadened
+    sticks at |nu_n +/- A/2| for each coupled nucleus. Returns freq_MHz, absorption,
+    derivative, sticks [(freq,intensity)], lines (from endor_lines), B0_mT."""
+    lines = endor_lines(g_iso, hyperfine, freq_GHz=freq_GHz, tol_MHz=tol_MHz)
+    B0 = center_field_mT(g_iso, freq_GHz)
+    sticks = []
+    for L in lines:
+        for f in L["lines"]:
+            sticks.append((f, float(L["count"])))
+    n = max(2, int(npoints))
+    if not sticks:
+        return {"freq_MHz": [0.0, 1.0], "absorption": [0.0, 0.0],
+                "derivative": [0.0, 0.0], "sticks": [], "lines": lines, "B0_mT": B0}
+    lo = min(f for f, _ in sticks)
+    hi = max(f for f, _ in sticks)
+    pad = max((hi - lo) * 0.20, 10.0 * linewidth_MHz, 1.0)
+    lo = max(0.0, lo - pad)
+    hi += pad
+    sigma = float(linewidth_MHz)
+    freq = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+    absorp = []
+    deriv = []
+    for x in freq:
+        a = 0.0
+        d = 0.0
+        for fc, inten in sticks:
+            t = (x - fc) / sigma
+            if abs(t) < 12.0:
+                gg = inten * math.exp(-0.5 * t * t)
+                a += gg
+                d += gg * (-t / sigma)
+        absorp.append(a)
+        deriv.append(d)
+    return {"freq_MHz": freq, "absorption": absorp, "derivative": deriv,
+            "sticks": sticks, "lines": lines, "B0_mT": B0}

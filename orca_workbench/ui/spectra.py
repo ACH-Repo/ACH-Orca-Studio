@@ -1335,3 +1335,216 @@ class EPRSpectrumWindow(tk.Toplevel):
 
     def _save_image(self):
         _save_figure(self.fig, self)
+
+
+class ENDORSpectrumWindow(tk.Toplevel):
+    """Simulated ENDOR spectra from one or more finished %eprnmr calcs — intensity vs
+    RF frequency (MHz), stacked as colour-matched traces. Built from the SAME
+    hyperfine data as EPR (no new calculation): each coupled nucleus gives lines at
+    |nu_n +/- A/2|. Hover a trace to read its structure; the annotation lists each
+    coupling's Larmor + line positions. (isotropic model — see core.epr.)"""
+
+    def __init__(self, parent, title, entries):
+        # type: (tk.Misc, str, List[dict]) -> None
+        super().__init__(parent)
+        self.title("ENDOR spectrum - {}".format(title))
+        self.geometry("1150x700")
+        try:
+            Figure, FigureCanvasTkAgg = _load_mpl()
+        except Exception as e:
+            self.destroy()
+            _mpl_unavailable_window(parent, e)
+            return
+        self.mols = []
+        for idx, e in enumerate(entries):
+            epr = e.get("epr") or {}
+            g_iso = (epr.get("g_tensor") or {}).get("g_iso")
+            hf = epr.get("hyperfine") or []
+            if g_iso is None or not hf:
+                continue
+            self.mols.append({
+                "name": e.get("name") or title,
+                "short": (e.get("name") or title).split(" / ")[0][:18],
+                "color": _COLORS[idx % len(_COLORS)],
+                "g_iso": g_iso, "hyperfine": hf, "smiles": e.get("smiles"),
+            })
+        self._stacked = len(self.mols) > 1
+        self._active = None
+        self._hover_artists = []
+
+        if not self.mols:
+            ttk.Label(self, text="No hyperfine couplings found in the selected "
+                      "calculation(s) - ENDOR needs computed A-tensors.").pack(padx=20, pady=20)
+            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
+            make_modal(self, parent)
+            return
+
+        bar = ttk.Frame(self)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(bar, text="MW freq (GHz):").pack(side=tk.LEFT)
+        self.freq_var = tk.DoubleVar(value=9.5)
+        sp1 = ttk.Spinbox(bar, from_=1, to=400, increment=0.5, width=7,
+                          textvariable=self.freq_var, command=self._redraw)
+        sp1.pack(side=tk.LEFT, padx=6)
+        sp1.bind("<Return>", lambda e: self._redraw())
+        self.band_var = tk.StringVar(value="X (9.5 GHz)")
+        band_cb = ttk.Combobox(bar, textvariable=self.band_var, width=12, state="readonly",
+                               values=["{} ({:g} GHz)".format(nm, gh) for nm, gh in _EPR_BANDS])
+        band_cb.pack(side=tk.LEFT, padx=(2, 0))
+        band_cb.bind("<<ComboboxSelected>>", self._on_band)
+        ttk.Label(bar, text="Linewidth (MHz):").pack(side=tk.LEFT, padx=(10, 0))
+        self.lw_var = tk.DoubleVar(value=0.3)
+        sp2 = ttk.Spinbox(bar, from_=0.02, to=20, increment=0.1, width=7,
+                          textvariable=self.lw_var, command=self._redraw)
+        sp2.pack(side=tk.LEFT, padx=6)
+        sp2.bind("<Return>", lambda e: self._redraw())
+        ttk.Label(bar, text="Show:").pack(side=tk.LEFT, padx=(10, 0))
+        self.disp_var = tk.StringVar(value="Absorption")
+        disp_cb = ttk.Combobox(bar, textvariable=self.disp_var, width=13, state="readonly",
+                               values=["Absorption", "1st derivative"])
+        disp_cb.pack(side=tk.LEFT, padx=(2, 0))
+        disp_cb.bind("<<ComboboxSelected>>", lambda e: self._redraw())
+        self.sticks_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Line markers", variable=self.sticks_var,
+                        command=self._redraw).pack(side=tk.LEFT, padx=10)
+        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
+        self._axlim = _AxisLimitControls(bar, self._redraw)
+        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+
+        body = ttk.Frame(self)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.struct = _StructurePanel(body, width=300)
+        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
+        self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
+        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
+        pin_device_pixel_ratio(self.canvas)
+        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.after(0, self._first_draw)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        make_modal(self, parent)
+
+    def _first_draw(self):
+        self.update_idletasks()
+        self._redraw()
+
+    def _on_band(self, _event=None):
+        s = self.band_var.get()
+        for nm, gh in _EPR_BANDS:
+            if s.startswith(nm + " "):
+                self.freq_var.set(gh)
+                break
+        self._redraw()
+
+    def _redraw(self):
+        freq = max(0.1, float(self.freq_var.get()))
+        lw = max(0.001, float(self.lw_var.get()))
+        deriv = self.disp_var.get() == "1st derivative"
+        self.fig.clear()
+        self._hover_artists = []
+        ax = self.fig.add_subplot(111)
+        self.ax = ax
+        ax.axhline(0, color="#cccccc", lw=0.5)
+        for m in self.mols:
+            sim = EPR_sim.endor_spectrum(m["g_iso"], m["hyperfine"],
+                                         freq_GHz=freq, linewidth_MHz=lw)
+            xs = sim["freq_MHz"]
+            ys = sim["derivative"] if deriv else sim["absorption"]
+            m["_freq"], m["_trace"], m["_sim"] = xs, ys, sim
+            ax.plot(xs, ys, color=m["color"], lw=1.0, label=m["short"])
+        if self.sticks_var.get() and not self._stacked:
+            trace = self.mols[0]["_trace"]
+            sticks = self.mols[0]["_sim"].get("sticks") or []
+            peak = max((abs(v) for v in trace), default=1.0) or 1.0
+            smax = max((i for _, i in sticks), default=1.0) or 1.0
+            for fc, inten in sticks:
+                ax.vlines(fc, 0.0, peak * (inten / smax), color="#888888",
+                          linewidth=0.6, alpha=0.6)
+        ax.set_xlabel("RF frequency (MHz)")
+        ax.set_ylabel("first-derivative (a.u.)" if deriv else "ENDOR intensity (a.u.)")
+        ax.set_title("Simulated ENDOR spectrum")
+        if self._stacked:
+            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+        else:
+            self._single_annotation(ax, self.mols[0])
+            m0 = self.mols[0]
+            self.struct.show(0, m0["name"], m0.get("smiles"), m0["color"])
+        if getattr(self, "_axlim", None):
+            self._axlim.apply(self.fig.gca())
+        self.canvas.draw()
+
+    def _single_annotation(self, ax, m):
+        lines = m["_sim"].get("lines") or []
+        nuh = EPR_sim.nuclear_larmor_MHz("H", m["_sim"]["B0_mT"]) or 0.0
+        rows = ["nu(1H) = {:.2f} MHz @ B0 = {:.0f} mT".format(nuh, m["_sim"]["B0_mT"])]
+        for L in lines[:8]:
+            rows.append("{}: A={:.1f}  ->  {:.2f}, {:.2f} MHz  x{}".format(
+                L["element"], L["A_iso"], L["lines"][0], L["lines"][1], L["count"]))
+        ax.text(0.01, 0.99, "\n".join(rows), transform=ax.transAxes, va="top", ha="left",
+                fontsize=8, family="monospace",
+                bbox=dict(boxstyle="round", fc="white", ec="#cccccc", alpha=0.85))
+
+    def _trace_val(self, m, x):
+        f = m.get("_freq")
+        if not f or x is None or x < f[0] or x > f[-1] or f[-1] == f[0]:
+            return None
+        idx = int(round((x - f[0]) / (f[-1] - f[0]) * (len(f) - 1)))
+        return m["_trace"][min(len(f) - 1, max(0, idx))]
+
+    def _clear_hover(self):
+        for a in self._hover_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._hover_artists = []
+
+    def _on_motion(self, event):
+        ax = getattr(self, "ax", None)
+        if ax is None:
+            return
+        if event.inaxes is not ax or event.xdata is None:
+            if self._hover_artists:
+                self._clear_hover()
+                self.canvas.draw_idle()
+            self._set_active(None)
+            return
+        y = event.ydata if event.ydata is not None else 0.0
+        best, best_d = None, 1e9
+        for mi, m in enumerate(self.mols):
+            v = self._trace_val(m, event.xdata)
+            if v is not None and abs(v - y) < best_d:
+                best_d, best = abs(v - y), mi
+        self._clear_hover()
+        if best is None:
+            self._set_active(None)
+            self.canvas.draw_idle()
+            return
+        m = self.mols[best]
+        self._hover_artists.append(ax.annotate(
+            "{}\nRF = {:.2f} MHz".format(m["short"], event.xdata),
+            xy=(0.99, 0.02), xycoords="axes fraction", va="bottom", ha="right",
+            fontsize=9, family="monospace",
+            bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
+        if self._stacked:
+            self._set_active(best)
+        self.canvas.draw_idle()
+
+    def _set_active(self, mi):
+        if mi == self._active:
+            return
+        self._active = mi
+        if mi is None:
+            if self._stacked:
+                self.struct.clear()
+        else:
+            m = self.mols[mi]
+            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
+
+    def _save_image(self):
+        _save_figure(self.fig, self)

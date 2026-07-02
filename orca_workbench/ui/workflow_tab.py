@@ -444,6 +444,9 @@ class WorkflowTab(ttk.Frame):
             if ctype == "EPR" and done:
                 b = ttk.Button(btns, text="EPR", width=5, command=lambda c=calc: ct._plot_epr([c]))
                 b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated EPR spectrum.")
+                b = ttk.Button(btns, text="ENDOR", width=6, command=lambda c=calc: ct._plot_endor([c]))
+                b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated ENDOR spectrum "
+                                                     "(RF transitions of the coupled nuclei).")
             if ctype == "OPT" and done:
                 trj = ct._calc_file(calc, calc.molecule_filename + "_trj.xyz")
                 if trj:

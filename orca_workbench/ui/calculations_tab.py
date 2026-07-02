@@ -2168,6 +2168,8 @@ class CalculationsTab(ttk.Frame):
         if finished_epr:
             menu.add_command(label="Plot EPR spectrum ({} selected)".format(len(finished_epr)),
                              command=lambda cs=list(finished_epr): self._plot_epr(cs))
+            menu.add_command(label="Plot ENDOR spectrum ({} selected)".format(len(finished_epr)),
+                             command=lambda cs=list(finished_epr): self._plot_endor(cs))
         else:
             menu.add_command(label="Plot EPR spectrum  (select finished EPR)",
                              state=tk.DISABLED)
@@ -2621,8 +2623,8 @@ class CalculationsTab(ttk.Frame):
                  else "{} molecules".format(len(entries)))
         UVVisSpectrumWindow(self, title, entries)
 
-    def _plot_epr(self, calcs):
-        # One or more finished EPR calcs, stacked as colour-matched traces.
+    def _epr_entries(self, calcs):
+        """[{name, smiles, epr}] for the finished EPR calcs that parsed a g-tensor."""
         entries = []
         for c in calcs:
             text = self._read_out(c)
@@ -2635,6 +2637,11 @@ class CalculationsTab(ttk.Frame):
                 "smiles": mol.smiles if mol else None,
                 "epr": epr,
             })
+        return entries
+
+    def _plot_epr(self, calcs):
+        # One or more finished EPR calcs, stacked as colour-matched traces.
+        entries = self._epr_entries(calcs)
         if not entries:
             messagebox.showinfo(
                 "No EPR data",
@@ -2645,6 +2652,23 @@ class CalculationsTab(ttk.Frame):
         title = (entries[0]["name"].split(" / ")[0] if len(entries) == 1
                  else "{} molecules".format(len(entries)))
         EPRSpectrumWindow(self, title, entries)
+
+    def _plot_endor(self, calcs):
+        # ENDOR from the SAME hyperfine data (no new calc); needs resolvable couplings.
+        entries = [e for e in self._epr_entries(calcs)
+                   if any(abs(h.get("A_iso") or 0.0) > 1.0
+                          for h in (e["epr"].get("hyperfine") or []))]
+        if not entries:
+            messagebox.showinfo(
+                "No ENDOR data",
+                "No resolvable hyperfine couplings in the selected calculation(s). ENDOR "
+                "needs computed A-tensors — use the B3LYP EPR recipe (a minimal basis like "
+                "STO-3G gives ~0 hyperfine).")
+            return
+        from orca_workbench.ui.spectra import ENDORSpectrumWindow
+        title = (entries[0]["name"].split(" / ")[0] if len(entries) == 1
+                 else "{} molecules".format(len(entries)))
+        ENDORSpectrumWindow(self, title, entries)
 
     def _plot_nmr(self, calcs):
         from orca_workbench.ui.spectra import NMROptionsDialog, NMRSpectrumWindow
