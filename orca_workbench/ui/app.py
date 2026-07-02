@@ -22,7 +22,7 @@ from orca_workbench.core.project import Project, load_project, save_project
 from orca_workbench.ui import extprog
 from orca_workbench.ui import tooltip as tooltip_mod
 from orca_workbench.ui.modal import make_modal
-from orca_workbench.ui.shortcuts import install_global_text_shortcuts
+from orca_workbench.ui.shortcuts import bind_mousewheel, install_global_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
 
@@ -672,9 +672,6 @@ class App(object):
         wid = canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(wid, width=e.width))
-        canvas.bind("<Enter>", lambda e: canvas.bind_all(
-            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         def section(t):
             ttk.Label(inner, text=t, font=("TkDefaultFont", 10, "bold")).pack(
@@ -719,6 +716,7 @@ class App(object):
                        "by KNIME, so it deliberately shares their feel and several of their "
                        "hotkeys — if you've used either, you should feel right at home.").pack(
                            anchor=tk.W, padx=4, pady=(2, 10))
+        bind_mousewheel(canvas, canvas)   # wheel scrolls anywhere over the popup
         ttk.Button(win, text="Close", command=win.destroy).pack(side=tk.BOTTOM, pady=8)
 
     def _set_default_cores(self):

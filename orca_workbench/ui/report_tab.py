@@ -16,7 +16,7 @@ from orca_workbench.core import orca_parser
 from orca_workbench.core import reporting
 from orca_workbench.core import slurm_runtime
 from orca_workbench.ui.progress import ProgressDialog
-from orca_workbench.ui.shortcuts import install_tree_shift_select
+from orca_workbench.ui.shortcuts import bind_mousewheel, install_tree_shift_select
 from orca_workbench.ui.tooltip import tip
 
 
@@ -93,9 +93,6 @@ class ReportTab(ttk.Frame):
                        lambda e: box_canvas.configure(scrollregion=box_canvas.bbox("all")))
         box_canvas.bind("<Configure>",
                         lambda e: box_canvas.itemconfigure(box_win, width=e.width))
-        box_canvas.bind("<Enter>", lambda e: box_canvas.bind_all(
-            "<MouseWheel>", lambda ev: box_canvas.yview_scroll(int(-ev.delta / 120), "units")))
-        box_canvas.bind("<Leave>", lambda e: box_canvas.unbind_all("<MouseWheel>"))
         # Blender-style drag-paint: press on a box and drag across others to set
         # them all to the value the first one took. _paint_vars maps each box
         # widget to its var so motion can find which box is under the cursor.
@@ -114,6 +111,7 @@ class ReportTab(ttk.Frame):
             cb.bind("<ButtonRelease-1>", self._paint_release)
             tip(cb, "Applies to calc type: {}. Skipped automatically for calcs that don't "
                     "contain it.".format(ex.applies_hint))
+        bind_mousewheel(box_canvas, box_canvas)   # wheel scrolls anywhere over the list
 
         out_frame = ttk.LabelFrame(right, text="Output")
         out_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=6)

@@ -86,9 +86,24 @@ class WorkflowTab(ttk.Frame):
     def _s2w(self, sx, sy):
         return (sx - self._ox) / self._zoom, (sy - self._oy) / self._zoom
 
+    def _set_initial_sash(self, _e=None):
+        """Once the tab is mapped and has a real width, put the sash at ~72% so the
+        Node settings panel is a narrow ~28% side panel (not ~half the tab)."""
+        try:
+            total = self._wf_paned.winfo_width()
+            if total > 100:
+                self._wf_paned.sashpos(0, int(total * 0.72))
+                self._wf_paned.unbind("<Map>")
+        except Exception:
+            pass
+
     def _fs(self, pt):
-        """Scale a font point size by the current zoom (min 5 to stay legible)."""
-        return max(5, int(round(pt * self._zoom)))
+        """Scale a font point size by the current zoom. Node widths are computed for
+        the unscaled font, so the text must scale in proportion at every zoom or it
+        overflows the (shrinking) box — hence min 1pt, not a larger floor. When zoomed
+        far out the text is tiny (you're reading layout, not labels); it's crisp again
+        as you zoom in."""
+        return max(1, int(round(pt * self._zoom)))
 
     # ------------------------------------------------------------------ UI
 
@@ -145,6 +160,9 @@ class WorkflowTab(ttk.Frame):
 
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         paned.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._wf_paned = paned
+        # Give the canvas ~72% and the settings panel ~28% (it was too wide).
+        paned.bind("<Map>", self._set_initial_sash, add="+")
 
         cframe = ttk.Frame(paned)
         paned.add(cframe, weight=4)
@@ -229,20 +247,31 @@ class WorkflowTab(ttk.Frame):
         self._build_config_panel()
 
     def _cfg_wheel(self, e):
-        self._cfg_canvas.yview_scroll(int(-e.delta / 120), "units")
+        # Windows/macOS deliver <MouseWheel> with e.delta; X11 (ThinLinc gateway)
+        # delivers <Button-4>/<Button-5> instead — handle both.
+        num = getattr(e, "num", 0)
+        if num == 4:
+            step = -1
+        elif num == 5:
+            step = 1
+        else:
+            step = -1 if getattr(e, "delta", 0) > 0 else 1
+        self._cfg_canvas.yview_scroll(step, "units")
         return "break"
 
     def _bind_cfg_wheel(self, widget):
         """Bind the mouse wheel on the panel AND every child, so scrolling works
         anywhere over the settings — not only when the pointer is on the scrollbar."""
-        widget.bind("<MouseWheel>", self._cfg_wheel)
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(seq, self._cfg_wheel)
         for ch in widget.winfo_children():
             self._bind_cfg_wheel(ch)
 
     def _build_config_panel(self):
         self._populate_config_panel()
         self._bind_cfg_wheel(self.cfg_frame)
-        self._cfg_canvas.bind("<MouseWheel>", self._cfg_wheel)
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._cfg_canvas.bind(seq, self._cfg_wheel)
         try:
             self._cfg_canvas.yview_moveto(0.0)   # show the top of the new node's settings
         except Exception:

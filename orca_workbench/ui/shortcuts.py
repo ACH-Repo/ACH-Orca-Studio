@@ -302,6 +302,32 @@ def _text_word_select(event, direction):
 
 # ------------------------------------------------------------- tree shift-select
 
+def bind_mousewheel(widget, canvas):
+    # type: (tk.Widget, tk.Canvas) -> None
+    """Make the mouse wheel scroll `canvas` when the pointer is over `widget` or any
+    descendant. Binds the whole subtree because Tk wheel events don't bubble to
+    parents, and handles both <MouseWheel> (Windows/macOS) and <Button-4>/<Button-5>
+    (X11 / the ThinLinc gateway) — so scrolling works over the entire area, not just
+    on the scrollbar."""
+    def _on(ev):
+        num = getattr(ev, "num", 0)
+        if num == 4:
+            step = -1
+        elif num == 5:
+            step = 1
+        else:
+            step = -1 if getattr(ev, "delta", 0) > 0 else 1
+        canvas.yview_scroll(step, "units")
+        return "break"
+
+    def _apply(w):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            w.bind(seq, _on)
+        for ch in w.winfo_children():
+            _apply(ch)
+    _apply(widget)
+
+
 def install_tree_shift_select(tree):
     # type: (tk.Widget) -> None
     """Bind Shift+Up / Shift+Down on a ttk.Treeview to grow OR shrink a
