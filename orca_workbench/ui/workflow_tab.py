@@ -281,6 +281,7 @@ class WorkflowTab(ttk.Frame):
             ent = ttk.Entry(self.cfg_frame, textvariable=var, width=26)
             ent.pack(anchor=tk.W, padx=8, pady=2)
             var.trace_add("write", lambda *_a, n=node, v=var: self._set_cfg(n, "name", v.get()))
+            self._build_report_extractors(node)
         elif node.type == "zpva":
             self._build_zpva_panel(node)
         elif node.type == "filter":
@@ -444,6 +445,44 @@ class WorkflowTab(ttk.Frame):
         node.config[key] = value
         self._commit()
         self._redraw()
+
+    def _build_report_extractors(self, node):
+        """Property checkboxes for a Report node — the same selection the Report tab
+        offers, so you choose what goes into this node's JSON/CSV. Stored as
+        node.config['extractors'] (list of keys; absent/None = everything, so newly
+        added extractors are included automatically)."""
+        from orca_workbench.core import reporting
+        ttk.Separator(self.cfg_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=(8, 2))
+        ttk.Label(self.cfg_frame, text="Properties to extract:",
+                  font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=8)
+        chosen = node.config.get("extractors")   # None => all
+        wrap = ttk.Frame(self.cfg_frame)
+        wrap.pack(fill=tk.X, padx=8, pady=2)
+        canvas = tk.Canvas(wrap, height=160, highlightthickness=0)
+        sb = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = ttk.Frame(canvas)
+        wid = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(wid, width=e.width))
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        allkeys = [ex.key for ex in reporting.EXTRACTORS]
+        cvars = {}
+
+        def on_toggle(*_a):
+            keys = [k for k in allkeys if cvars[k].get()]
+            # store None when everything is ticked, so future extractors are included
+            self._set_cfg(node, "extractors", None if keys == allkeys else keys)
+
+        for ex in reporting.EXTRACTORS:
+            v = tk.BooleanVar(value=(chosen is None or ex.key in chosen))
+            cvars[ex.key] = v
+            ttk.Checkbutton(inner, text="{}  ({})".format(ex.label, ex.applies_hint),
+                            variable=v, command=on_toggle).pack(anchor=tk.W, padx=4, pady=1)
 
     # ----------------------------------------------------- workflow <-> project
 
@@ -1935,7 +1974,8 @@ class WorkflowTab(ttk.Frame):
                 src = self.wf.node(e.src_node)
                 if src is not None and src.type in wf_mod.CALC_NODE_TYPES and src.id not in feeders:
                     feeders.append(src.id)
-            specs.append({"name": n.config.get("name", "report"), "node_ids": feeders})
+            specs.append({"name": n.config.get("name", "report"), "node_ids": feeders,
+                          "extractors": n.config.get("extractors")})
         return specs
 
     def _selected_sources(self):

@@ -2046,7 +2046,8 @@ class CalculationsTab(ttk.Frame):
                     out_path=self._out_path(c),
                     rundir_abs=rundir_abs,
                 ))
-            keys = [e.key for e in reporting.EXTRACTORS]
+            ekeys = spec.get("extractors")   # None => all (Report node's selection)
+            keys = ekeys if ekeys is not None else [e.key for e in reporting.EXTRACTORS]
             report = reporting.assemble_report(contexts, keys)
             name = re.sub(r"[^A-Za-z0-9_.-]+", "_", (spec.get("name") or "report").strip()) or "report"
             json_path = os.path.join(root, name + ".json")
