@@ -98,6 +98,12 @@ def install_global_text_shortcuts(root):
         root.bind_class(cls, "<Control-Right>", lambda e: _entry_word_move(e, +1), add="+")
         root.bind_class(cls, "<Control-Shift-Left>", lambda e: _entry_word_select(e, -1), add="+")
         root.bind_class(cls, "<Control-Shift-Right>", lambda e: _entry_word_select(e, +1), add="+")
+        # Shift+arrow/Home/End extend the selection; some Tk builds only re-scroll
+        # the entry after a plain cursor move, so an extending highlight can run off
+        # the visible edge. Re-assert cursor visibility on idle (after the default
+        # binding has adjusted selection + cursor). See task: highlight must follow.
+        for _seq in ("<Shift-Left>", "<Shift-Right>", "<Shift-Home>", "<Shift-End>"):
+            root.bind_class(cls, _seq, _entry_see_after, add="+")
 
     root.bind_class("Text", "<Control-a>", _text_select_all, add="+")
     root.bind_class("Text", "<Control-A>", _text_select_all, add="+")
@@ -200,6 +206,42 @@ def _entry_redo(event):
     return "break"
 
 
+# --------------------------------------------------- Entry cursor visibility
+
+def _entry_see_insert(w):
+    # type: (tk.Widget) -> None
+    """Scroll a ttk/classic Entry so the insertion cursor is visible — Tk's
+    EntrySeeInsert, but computed in ONE xview call (O(1)). The stock/loop version is
+    fine locally but does one xview + redraw per character of travel, which lags out
+    badly over a remote X11 framebuffer (ThinLinc), so the highlight never appears to
+    follow the cursor. Called after every selection-extending move."""
+    try:
+        w.update_idletasks()
+        width = max(1, w.winfo_width())
+        cur = w.index("insert")
+        left = w.index("@0")
+        right = w.index("@%d" % (width - 1))
+    except tk.TclError:
+        return
+    try:
+        if cur < left:
+            w.xview(cur)                       # off the left edge — pin cur to left
+        elif cur >= right:
+            span = max(1, right - left)        # ~chars currently visible
+            w.xview(max(0, cur - span + 1))    # pin cur to the right edge, one jump
+    except tk.TclError:
+        pass
+
+
+def _entry_see_after(event):
+    """Re-assert cursor visibility right after the default Shift+arrow binding has
+    updated the selection and cursor (native runs first — it was bound earlier on the
+    same class tag). Synchronous, not after_idle: over ThinLinc a deferred callback
+    was landing too late/not at all. Returns None so the default still runs."""
+    _entry_see_insert(event.widget)
+    return None
+
+
 # ------------------------------------------------------- Entry word navigation
 
 def _entry_word_move(event, direction):
@@ -215,6 +257,7 @@ def _entry_word_move(event, direction):
         pass
     w._sel_anchor = None
     w.icursor(new)
+    _entry_see_insert(w)
     return "break"
 
 
@@ -240,6 +283,7 @@ def _entry_word_select(event, direction):
     except tk.TclError:
         pass
     w.icursor(new)
+    _entry_see_insert(w)
     return "break"
 
 

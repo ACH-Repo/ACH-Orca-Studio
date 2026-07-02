@@ -5,6 +5,7 @@ import platform
 import re
 import subprocess
 import threading
+import uuid
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
@@ -48,6 +49,14 @@ class MoleculesTab(ttk.Frame):
         # auto-overwriting them from the SMILES on subsequent SMILES edits.
         self._user_touched_charge = False
         self._user_touched_mult = False
+        # Filename of a freshly-added row that still auto-fills charge/mult from its
+        # SMILES (like a draft does), until the user navigates away. Lets "Add" make
+        # a real, selected row while keeping the draft-mode SMILES auto-fill.
+        self._autofill_row = None  # type: Optional[str]
+        # Drag-to-reorder state (see _drag_start/_drag_motion/_drag_release).
+        self._drag_item = None  # type: Optional[str]
+        self._drag_moved = False
+        self._drag_y0 = 0
         # Depiction cache {smiles: PhotoImage} so switching rows is instant.
         self._depict_cache = {}
         self._depict_image = None  # current displayed image (kept from GC)
@@ -80,9 +89,11 @@ class MoleculesTab(ttk.Frame):
                      "Accepts: dot-separated single line (ChemDraw multi-mol copy), one SMILES "
                      "per line, or two-column SMILES + name. Auto-detects which column is "
                      "which via RDKit. Charge & multiplicity auto-filled per molecule.")
-        tip(b_add, "If nothing is selected: commits the current form values as a new molecule, "
-                   "then starts a fresh draft for the next one. If anything IS selected (one or "
-                   "many): clears the selection and starts a fresh draft (no duplicate added).")
+        tip(b_add, "Create a new molecule row immediately and select it for editing (the Name "
+                   "field is focused so you can type straight away). Each press adds one row. If "
+                   "you'd already typed into the form without a row selected, that becomes the "
+                   "new row; otherwise a blank one is added. Edit its fields on the right, then "
+                   "Generate XYZ (or press Add again for the next molecule).")
         tip(b_remove, "Remove the selected molecule(s) from the project — works on a single row "
                       "or a bulk selection. Also removes any planned calculations that referenced "
                       "them. Doesn't delete the .xyz files from disk.\n\n"
@@ -178,6 +189,14 @@ class MoleculesTab(ttk.Frame):
         self.tree.bind("<Button-1>", self._lock_press, add="+")
         self.tree.bind("<B1-Motion>", self._lock_motion, add="+")
         self.tree.bind("<ButtonRelease-1>", self._lock_release, add="+")
+        # Drag a row up/down to reorder; on drop the filenames renumber 000.. top to
+        # bottom (unless calcs are already built against them — see _renumber_molecules).
+        # Alt+Up/Down do the same by keyboard (reliable everywhere, incl. remote/ThinLinc).
+        self.tree.bind("<Button-1>", self._drag_start, add="+")
+        self.tree.bind("<B1-Motion>", self._drag_motion, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._drag_release, add="+")
+        self.tree.bind("<Alt-Up>", lambda e: self._move_focused(-1), add="+")
+        self.tree.bind("<Alt-Down>", lambda e: self._move_focused(+1), add="+")
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
         tip(self.tree, "Molecules in this project.\n\n"
@@ -193,9 +212,14 @@ class MoleculesTab(ttk.Frame):
                        "Keyboard (hover to focus the list, then):\n"
                        "  Delete — remove selected rows\n"
                        "  Ctrl+Enter — generate XYZ for selected rows\n"
-                       "  Ctrl+V — paste SMILES list from clipboard\n"
+                       "  Ctrl+V — paste SMILES list (or an XYZ file string) from clipboard\n"
                        "  Double-click — view the molecule (opens local Avogadro if available,\n"
                        "                 else shows the .xyz path to open via MobaXterm)\n\n"
+                       "Reorder rows (renumbers filenames 000, 001, ... top to bottom, the\n"
+                       "fixed naming convention):\n"
+                       "  drag a row up or down, or\n"
+                       "  Alt+Up / Alt+Down to move the selected row (reliable over ThinLinc).\n"
+                       "Clear any column sort first — reordering only applies to insertion order.\n\n"
                        "With multiple rows selected, the edit form locks and Remove / "
                        "Generate XYZ act on the whole group. Click a single row again to "
                        "return to editing.")
@@ -216,6 +240,7 @@ class MoleculesTab(ttk.Frame):
         self.comment_var = tk.StringVar()
 
         lab, ent = self._field_row(edit, 0, "Name:", self.name_var)
+        self._name_entry = ent
         _nt = "Human-readable name. Shown in the table and stored in the .xyz metadata."
         tip(lab, _nt); tip(ent, _nt)
         lab, ent = self._field_row(edit, 1, "Filename (no .xyz):", self.filename_var)
@@ -406,6 +431,8 @@ class MoleculesTab(ttk.Frame):
             new_focus = sel[0]
             if self._focus_filename == new_focus and self._draft is None:
                 return  # no change
+            if new_focus != self._autofill_row:
+                self._autofill_row = None   # left the freshly-added row
             self._focus_filename = new_focus
             self._draft = None
             mol = self.app.project.molecule_by_filename(new_focus)
@@ -426,6 +453,7 @@ class MoleculesTab(ttk.Frame):
     def _enter_drafting_mode(self):
         """Discard any current draft and start a fresh blank one bound to the form."""
         self._focus_filename = None
+        self._autofill_row = None
         self._draft = Molecule(name="", filename=self._next_numeric_filename())
         self._user_touched_charge = False
         self._user_touched_mult = False
@@ -531,6 +559,8 @@ class MoleculesTab(ttk.Frame):
             # Editing a real molecule — handle filename rename and refresh the row.
             if new_fname and new_fname != target.filename:
                 if self.app.project.molecule_by_filename(new_fname) is None:
+                    if self._autofill_row == target.filename:
+                        self._autofill_row = new_fname   # keep SMILES auto-fill alive
                     target.filename = new_fname
                     self._focus_filename = new_fname
             # SMILES change on a real molecule invalidates the existing geometry —
@@ -547,9 +577,14 @@ class MoleculesTab(ttk.Frame):
             # Editing a draft — just store the filename literally; uniqueness check on commit.
             target.filename = new_fname
 
-        # Auto-fill charge/mult from SMILES on draft-mode SMILES edits.
-        if field == "smiles" and self._focus_filename is None:
+        # Auto-fill charge/mult from SMILES in draft mode, or on a freshly-added
+        # row that hasn't been navigated away from yet (so "Add" then typing a
+        # SMILES still auto-fills, even though the row is already committed).
+        if field == "smiles" and (self._focus_filename is None
+                                  or self._focus_filename == self._autofill_row):
             self._maybe_auto_charge_mult(target)
+            if self._focus_filename is not None:
+                self._refresh_row(target)   # reflect the new charge/mult in the table
 
         # Live-update the 2D depiction when the SMILES changes.
         if field == "smiles":
@@ -665,32 +700,227 @@ class MoleculesTab(ttk.Frame):
             return "break"
         return None
 
+    # --------------------------------------------------------- drag-to-reorder
+
+    def _drag_start(self, event):
+        """Arm a potential row drag. Returns None so the normal click-selection still
+        happens; the drag only 'takes' once the pointer moves past a small threshold."""
+        self._drag_item = None
+        self._drag_moved = False
+        self._drag_y0 = event.y
+        # Reordering only makes sense in insertion order — a column sort imposes its
+        # own order, so don't reorder then (the tooltip tells the user to clear it).
+        if self._sort_col is not None:
+            return None
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return None
+        row = self.tree.identify_row(event.y)
+        if not row or row.startswith("__"):
+            return None
+        self._drag_item = row
+        return None
+
+    def _drag_motion(self, event):
+        """Note that a drag is in progress. We deliberately do NOT reposition rows
+        per motion event — that redraw-per-event storm lags out over a remote X11
+        framebuffer (ThinLinc). The actual reorder happens once, on release, from the
+        drop position. Returns 'break' while armed to suppress the Treeview's native
+        band-selection (which would otherwise multi-select as the pointer moves)."""
+        if not self._drag_item or self._lock_painting:
+            return None
+        if abs(event.y - getattr(self, "_drag_y0", event.y)) > 4:
+            if not self._drag_moved:
+                self._drag_moved = True
+                try:
+                    self.tree.configure(cursor="hand2")   # visual "dragging" cue
+                except tk.TclError:
+                    pass
+        return "break"
+
+    def _drag_release(self, event):
+        """On drop, move the grabbed row to the drop position and renumber. Uses the
+        release Y (not accumulated motion) so it survives coalesced/dropped motion
+        events over the remote link; a move past the press point counts as a drag even
+        if no intermediate <B1-Motion> arrived."""
+        item = self._drag_item
+        moved = self._drag_moved or abs(event.y - getattr(self, "_drag_y0", event.y)) > 4
+        self._drag_item = None
+        self._drag_moved = False
+        try:
+            self.tree.configure(cursor="")
+        except tk.TclError:
+            pass
+        if not (item and moved):
+            return None
+        order = [i for i in self.tree.get_children("") if not i.startswith("__")]
+        if item not in order:
+            return None
+        order.remove(item)
+        target = self.tree.identify_row(event.y)
+        if target and target in order:
+            insert_at = order.index(target)
+            try:                       # dropped on the lower half of a row → after it
+                bx = self.tree.bbox(target)
+                if bx and event.y > bx[1] + bx[3] / 2:
+                    insert_at += 1
+            except (tk.TclError, TypeError):
+                pass
+            order.insert(insert_at, item)
+        else:
+            order.append(item)         # dropped past the last row → end
+        self._apply_new_order(order, keep_focus=item)
+        return "break"
+
+    def _move_focused(self, delta):
+        """Alt+Up / Alt+Down: move the focused (or selected) row one step and renumber.
+        A keyboard alternative to drag that's fully reliable over remote/ThinLinc, where
+        drag events can be finicky."""
+        if self._sort_col is not None:
+            self.app.set_status("Clear the column sort before reordering molecules.")
+            return "break"
+        order = [i for i in self.tree.get_children("") if not i.startswith("__")]
+        cur = self._focus_filename if self._focus_filename in order else None
+        if cur is None:
+            sel = [i for i in self.tree.selection() if i in order]
+            cur = sel[0] if sel else None
+        if cur is None:
+            return "break"
+        i = order.index(cur)
+        j = i + delta
+        if j < 0 or j >= len(order):
+            return "break"
+        order.insert(j, order.pop(i))
+        self._apply_new_order(order, keep_focus=cur)
+        return "break"
+
+    def _apply_new_order(self, ordered_filenames, keep_focus=None):
+        """Reorder project.molecules to the given filename order, then renumber the
+        filenames 000.. top to bottom (when safe). Refreshes this + dependent tabs."""
+        by_fn = {m.filename: m for m in self.app.project.molecules}
+        new_list = [by_fn[f] for f in ordered_filenames if f in by_fn]
+        for m in self.app.project.molecules:      # keep any stragglers (defensive)
+            if m not in new_list:
+                new_list.append(m)
+        self.app.project.molecules = new_list
+        remap = self._renumber_molecules()
+        self.app.mark_dirty()
+        if keep_focus is not None:
+            self._focus_filename = remap.get(keep_focus, keep_focus)
+        self.refresh()
+        self.app.refresh_all_tabs()   # calcs reference molecules by filename
+        n = len(new_list)
+        if remap:
+            self.app.set_status("Reordered and renumbered {} molecule(s) (000..).".format(n))
+        else:
+            self.app.set_status("Reordered {} molecule(s).".format(n))
+
+    def _renumber_molecules(self):
+        # type: () -> dict
+        """Reassign molecule filenames to sequential zero-padded numerics (000, 001,
+        ...) top to bottom — the fixed %03d convention — renaming the XYZ_INI .xyz
+        files on disk and updating planned-calc references. Returns {old: new} for the
+        names that changed (empty dict when nothing changed or it was skipped).
+
+        Skipped entirely if any planned calculation is already exported or submitted:
+        those are keyed to the current filename on disk (rundir, .inp/.slurm/.gbw), so
+        renaming would orphan them. In that case only the row order changes."""
+        mols = self.app.project.molecules
+        for c in self.app.project.planned_calcs:
+            if c.exported or c.job_id or c.rundir:
+                return {}
+        desired = ["{:03d}".format(i) for i in range(len(mols))]
+        remap = {m.filename: new for m, new in zip(mols, desired) if m.filename != new}
+        if not remap:
+            return {}
+        root = self.app.project.root()
+        tag = ".reorder-{}.tmp".format(uuid.uuid4().hex[:8])
+        # Phase 1: stage each changing molecule's .xyz to a unique temp path, so a
+        # permutation (e.g. swapping 000<->001) can't clobber a name in flight.
+        plan = []  # (mol, new_name, tmp_abs_or_None, final_abs, final_rel)
+        for m, new in zip(mols, desired):
+            if m.filename == new:
+                continue
+            final_abs = os.path.join(root, "XYZ_INI", new + ".xyz")
+            final_rel = os.path.relpath(final_abs, root).replace("\\", "/")
+            tmp_abs = None
+            if m.xyz_path:
+                old_abs = (m.xyz_path if os.path.isabs(m.xyz_path)
+                           else os.path.join(root, m.xyz_path))
+                if os.path.isfile(old_abs):
+                    tmp_abs = old_abs + tag
+                    try:
+                        os.replace(old_abs, tmp_abs)
+                    except OSError:
+                        tmp_abs = None
+            plan.append((m, new, tmp_abs, final_abs, final_rel))
+        # Phase 2: assign the new names and move the staged files into place.
+        for m, new, tmp_abs, final_abs, final_rel in plan:
+            m.filename = new
+            if tmp_abs is not None:
+                try:
+                    os.makedirs(os.path.dirname(final_abs) or ".", exist_ok=True)
+                    os.replace(tmp_abs, final_abs)
+                    m.xyz_path = final_rel
+                except OSError:
+                    # Keep the reference valid even if the final move failed.
+                    m.xyz_path = os.path.relpath(tmp_abs, root).replace("\\", "/")
+        # Repoint planned-calc references (safe: none are exported — guarded above).
+        for c in self.app.project.planned_calcs:
+            if c.molecule_filename in remap:
+                c.molecule_filename = remap[c.molecule_filename]
+            gs = c.geometry_source or ""
+            if gs.startswith("file:"):
+                for old, new in remap.items():
+                    token = "XYZ_INI/{}.xyz".format(old)
+                    if token in gs:
+                        c.geometry_source = gs.replace(
+                            token, "XYZ_INI/{}.xyz".format(new))
+                        break
+        return remap
+
     def on_add(self):
-        if len(self.tree.selection()) > 0:
-            # Any rows selected (single or multi) — switch to fresh draft for next entry.
-            self._enter_drafting_mode()
-            return
-        # Drafting mode — commit the current draft as a new molecule.
-        if self._draft is None:
-            self._enter_drafting_mode()
-            return
+        """Create a new molecule row immediately, select it, and focus the Name
+        field so it can be edited right away — one press yields one real, editable
+        row. If the user had typed into the form without a row selected (an
+        uncommitted draft), that draft becomes the new row; otherwise a fresh blank
+        row is created, with the filename doubling as the initial name."""
         draft = self._draft
-        # Pre-filled with auto-numeric; user may have overridden. Defensive
-        # fallback if they cleared the field entirely.
-        fname = (draft.filename or "").strip()
-        if not fname:
+        has_content = draft is not None and any([
+            (draft.name or "").strip(),
+            (draft.smiles or "").strip(),
+            (draft.gen_smiles or "").strip(),
+            (draft.comment or "").strip(),
+        ])
+        if has_content:
+            mol = draft
+            fname = (mol.filename or "").strip() or self._next_numeric_filename()
+        else:
             fname = self._next_numeric_filename()
-        fname = self._unique_filename(fname)
-        draft.filename = fname
-        if not draft.name:
-            draft.name = fname
-        self.app.project.molecules.append(draft)
+            # Name defaults to the filename so the row isn't blank; the focused Name
+            # field is select-all'd, so the first keystroke replaces it.
+            mol = Molecule(name=fname, filename=fname)
+        mol.filename = self._unique_filename(fname)
+        self.app.project.molecules.append(mol)
         self.app.mark_dirty()
         self._draft = None
-        # Refresh, then start a new draft for follow-up entries.
-        self.refresh()
-        self._enter_drafting_mode()
-        self.app.set_status("Added molecule '{}'.".format(fname))
+        self._focus_filename = mol.filename
+        self._autofill_row = mol.filename
+        self._user_touched_charge = False
+        self._user_touched_mult = False
+        self.refresh()   # inserts the row and selects it (focus_filename is set)
+        self._focus_name_field()
+        self.app.set_status("Added molecule '{}'. Edit its details on the right.".format(mol.filename))
+
+    def _focus_name_field(self):
+        """Put keyboard focus in the Name entry with its text selected, so the user
+        can type the new molecule's name immediately (first keystroke replaces the
+        default filename-name)."""
+        try:
+            self._name_entry.focus_set()
+            self._name_entry.select_range(0, tk.END)
+            self._name_entry.icursor(tk.END)
+        except (tk.TclError, AttributeError):
+            pass
 
     def _unique_filename(self, base):
         # type: (str) -> str
@@ -785,7 +1015,7 @@ class MoleculesTab(ttk.Frame):
             if self._draft is None or not (self._draft.smiles or "").strip():
                 messagebox.showinfo("No molecule", "Type a SMILES into the form first, or select an existing molecule.")
                 return
-            self.on_add()  # commits the draft and starts a new one
+            self.on_add()  # commits the draft as a real row and selects it
             if not self.app.project.molecules:
                 return
             mol = self.app.project.molecules[-1]
@@ -1261,12 +1491,74 @@ class MoleculesTab(ttk.Frame):
         self.app.set_status("Added {} (resolved from '{}').".format(fname, res.query))
 
     def on_paste_smiles(self):
-        """Open the paste-SMILES dialog pre-filled from the clipboard."""
+        """Add molecules from the clipboard. If it holds an XYZ file string (a bare
+        atom-count line then coordinates), add it directly as an imported, coords-
+        locked structure — SMILES autodetection would otherwise mistake the atom
+        lines for one-atom SMILES. Otherwise open the paste-SMILES dialog."""
         try:
             clip = self.clipboard_get()
         except tk.TclError:
             clip = ""
+        frames = coords_mod.parse_xyz_frames_text(clip)
+        usable = [(atoms, meta) for atoms, meta in frames if atoms]
+        if usable:
+            self._add_xyz_structures(usable)
+            return
         PasteSmilesDialog(self, self.app, initial_text=clip, on_commit=self._add_pasted_molecules)
+
+    def _add_xyz_structures(self, frames):
+        # type: (list) -> None
+        """Add XYZ frames (from a pasted file string) as imported, coords-locked
+        molecules — same treatment as Import files, but the source is the clipboard.
+        A single geometry adds one molecule; a multi-frame paste adds one per frame."""
+        root = self.app.project.root()
+        multi = len(frames) > 1
+        added = []
+        for idx, (atoms, meta) in enumerate(frames):
+            if not atoms:
+                continue
+            meta = dict(meta or {})
+            if not meta.get("comment"):
+                meta["comment"] = "pasted from clipboard" + (
+                    " (frame {})".format(idx) if multi else "")
+            fname = self._unique_filename(self._next_numeric_filename())
+            target = os.path.join(root, "XYZ_INI", fname + ".xyz")
+            try:
+                coords_mod.write_xyz(target, atoms, meta or None)
+            except Exception as e:
+                messagebox.showerror("Paste XYZ", "Could not write '{}': {}".format(fname, e))
+                continue
+            mname = meta.get("name")
+            if mname and mname == meta.get("smiles"):
+                mname = None
+            self.app.project.molecules.append(Molecule(
+                name=mname or fname,
+                filename=fname,
+                smiles=meta.get("smiles"),
+                gen_smiles=meta.get("gen_smiles"),
+                charge=int(meta.get("charge", 0) or 0),
+                multiplicity=int(meta.get("multiplicity", 1) or 1),
+                comment=meta.get("comment", "") or "",
+                generated=True,
+                gen_status="ok",
+                method="imported",
+                coords_locked=True,
+                xyz_path=os.path.relpath(target, root).replace("\\", "/"),
+            ))
+            added.append(fname)
+        if added:
+            self.app.mark_dirty()
+            self.refresh()
+            try:
+                self.tree.selection_set(added[0])
+                self.tree.see(added[0])
+            except tk.TclError:
+                pass
+            self.app.set_status(
+                "Added {} structure(s) from clipboard XYZ ({} atoms).".format(
+                    len(added), len(frames[0][0])))
+        else:
+            self.app.set_status("Clipboard XYZ had no usable atoms.")
 
     def _add_smiles_entries(self, entries):
         # type: (list) -> list

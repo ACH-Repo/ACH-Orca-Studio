@@ -574,14 +574,18 @@ def import_dialog_filetypes():
     return types
 
 
-def _read_xyz_frames(path):
+def parse_xyz_frames_text(text):
     # type: (str) -> List[Tuple[List[Atom], Optional[dict]]]
-    """Read every frame of an .xyz file. A plain single-geometry .xyz yields one
-    frame; a trajectory/multi-conformer .xyz yields several. Each frame's comment
-    line is parsed as JSON metadata when it looks like an object (our own
-    convention from write_xyz)."""
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.read().split("\n")
+    """Parse every frame of XYZ-format *text* (a string, not a path) into a list of
+    (atoms, metadata). A plain single-geometry block yields one frame; a
+    trajectory/multi-conformer block yields several. Each frame's comment line is
+    decoded as JSON metadata when it looks like an object (our write_xyz convention).
+
+    A leading integer atom-count line is required, so this returns [] for text that
+    isn't XYZ — which lets callers use it to *detect* pasted coordinates. (A pasted
+    SMILES list is rejected: its first line is an element/label token, not a bare
+    count.)"""
+    lines = (text or "").split("\n")
     frames = []
     n_lines = len(lines)
     i = 0
@@ -613,6 +617,14 @@ def _read_xyz_frames(path):
         frames.append((atoms, metadata))
         i = i + 2 + n
     return frames
+
+
+def _read_xyz_frames(path):
+    # type: (str) -> List[Tuple[List[Atom], Optional[dict]]]
+    """Read every frame of an .xyz file (see parse_xyz_frames_text for the format
+    handling — this just supplies the file's text)."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return parse_xyz_frames_text(f.read())
 
 
 def _read_with_openbabel(path, fmt, timeout=IMPORT_READ_TIMEOUT_S):

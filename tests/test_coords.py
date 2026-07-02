@@ -81,6 +81,50 @@ def test_empty_xyz_raises(tmp_path):
         coords.read_structures(_write(tmp_path / "empty.xyz", ""))
 
 
+# --------------------------------------- parse xyz from text (clipboard paste)
+def test_parse_xyz_frames_text_single():
+    frames = coords.parse_xyz_frames_text(SINGLE_XYZ)
+    assert len(frames) == 1
+    atoms, _meta = frames[0]
+    assert [a[0] for a in atoms] == ["H", "O"]
+
+
+def test_parse_xyz_frames_text_multiframe():
+    frames = coords.parse_xyz_frames_text(MULTI_XYZ)
+    assert len(frames) == 3
+    assert [f[0][0][3] for f in frames] == [0.0, 1.0, 2.0]
+
+
+def test_parse_xyz_frames_text_metadata():
+    text = '1\n{"name": "H atom", "charge": 0}\nH 0.0 0.0 0.0\n'
+    frames = coords.parse_xyz_frames_text(text)
+    assert len(frames) == 1
+    _atoms, meta = frames[0]
+    assert meta is not None and meta["name"] == "H atom"
+
+
+def test_parse_xyz_frames_text_rejects_smiles_list():
+    # A pasted SMILES list must NOT be mistaken for XYZ: its first line isn't a
+    # bare atom count, so parsing yields no usable (atom-bearing) frames.
+    for smiles_blob in ("CCO\nc1ccccc1\nCC(=O)O",
+                        "O ethanol\nCCO water",
+                        "single-name-line"):
+        frames = coords.parse_xyz_frames_text(smiles_blob)
+        assert not any(atoms for atoms, _m in frames), smiles_blob
+
+
+def test_parse_xyz_frames_text_numeric_first_line_but_no_coords():
+    # First line is an int, but the following lines aren't coordinates (a name
+    # column that happens to be a number) -> a frame with zero atoms, rejected.
+    frames = coords.parse_xyz_frames_text("123\nethanol foo\nbenzene bar")
+    assert not any(atoms for atoms, _m in frames)
+
+
+def test_parse_xyz_frames_text_empty():
+    assert coords.parse_xyz_frames_text("") == []
+    assert coords.parse_xyz_frames_text("   \n  \n") == []
+
+
 # --------------------------------------------------------------- format helpers
 def test_supported_ext():
     assert coords.is_supported_import_file("foo.sdf")

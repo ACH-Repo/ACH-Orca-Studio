@@ -334,6 +334,42 @@ off the core path and gracefully degradable.
   earlier), NOT `!!##DEFAULT_RAM##!!`-style placeholders — explicit recipes stay self-
   documenting/portable; the override is the one-place knob.
 
+- **Molecules-tab UX batch** (branch `posthoc-properties`) — four hand-entry fixes.
+  (a) **Add is now row-first**: `on_add` creates one real, selected, editable row per
+  press and focuses the Name field (select-all'd, so the first keystroke replaces the
+  default filename-name) — no more "first press just deselects, second press adds". A
+  freshly-added row keeps the draft-mode SMILES→charge/mult auto-fill via a
+  `_autofill_row` tracker (cleared when you navigate away; follows a filename rename),
+  so committing early doesn't lose the auto-fill. The blank-form draft still exists for
+  the empty state (type-then-Add commits it). (b) **Shift+arrow selection follows the
+  cursor**: some Tk builds only re-scroll a ttk/classic Entry after a plain cursor move,
+  not after `Extend`, so an extending highlight ran off-screen. `shortcuts._entry_see_insert`
+  (a Python EntrySeeInsert) is called after `Ctrl(+Shift)+arrow` word moves and, via a
+  **synchronous** `_entry_see_after` bound to `<Shift-Left/Right/Home/End>`, after native
+  selection too. **ThinLinc note**: the first cut scrolled one char per loop iteration
+  (O(distance)) — fine locally, but hundreds of `xview`+redraws per keypress lagged out
+  over the remote framebuffer so the highlight never appeared to follow; now it's ONE
+  `xview` jump (pin cursor to the near edge). (c) **Paste an XYZ file string to add a
+  molecule**: `on_paste_smiles`
+  first tries `coords.parse_xyz_frames_text` (refactored out of `_read_xyz_frames`, needs
+  a leading atom-count line so a SMILES list is correctly rejected) — if it's XYZ it adds
+  imported, `coords_locked` molecules straight from the clipboard (`_add_xyz_structures`),
+  else the SMILES dialog opens as before. This avoids the old failure where XYZ atom lines
+  were mistaken for one-atom SMILES. (d) **Reorder rows**: press-drag a row, OR **Alt+Up/
+  Down** on the selection (`_move_focused`). Both gated to `_sort_col is None`; drag
+  suppresses the Treeview's native band-select and coexists with the lock-cell click. On
+  drop `_renumber_molecules` reassigns filenames 000.. top-to-bottom (the fixed %03d
+  convention — clobbers custom/imported names by design; user re-edits after), two-phase
+  renaming the `XYZ_INI/*.xyz` on disk and repointing planned-calc FKs. **Guarded**: if
+  any calc is already exported/submitted (`exported`/`job_id`/`rundir`), renumber is
+  skipped (those are keyed to the on-disk filename) and only the row ORDER changes.
+  **ThinLinc note**: the first cut re-`move`d + `see`d the row on every `<B1-Motion>` (a
+  redraw storm the remote framebuffer choked on, and remote X coalesces/drops motion), so
+  drag "didn't work" over ThinLinc; now the reorder happens ONCE on release from the drop
+  Y (needs only press+release, no motion stream), and Alt+Up/Down is the keyboard fallback
+  that's reliable regardless. Tests: `parse_xyz_frames_text` in `tests/test_coords.py`
+  (233 total).
+
 ## Open work / TODO
 - The SLURM `--mem` line isn't driven by the global "memory per core" default (it lives
   in the submit-script template); if per-job `--mem` should scale with cores×maxcore,
