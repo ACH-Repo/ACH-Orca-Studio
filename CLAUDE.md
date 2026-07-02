@@ -311,6 +311,22 @@ off the core path and gracefully degradable.
   count is derived, so you set PC specs once instead of per recipe. `inputs.set_maxcore`
   added; tests in `tests/test_hardware_defaults.py`.
 
+- **Zoom fonts, X11 wheel scroll, Lock column** (branch `posthoc-properties`) —
+  (a) node text scales with zoom (`_fs` floor 1pt not 5; node widths are sized for the
+  unscaled font, so a 5pt floor overflowed the box on zoom-out). (b) `shortcuts.
+  bind_mousewheel(widget, canvas)` — binds the whole subtree for BOTH `<MouseWheel>`
+  (Win/Mac) and `<Button-4/5>` (X11/ThinLinc), fixing "wheel only scrolls over the
+  scrollbar" in the node settings panel, Report tab list, and Node-graphs popup (Tk
+  wheel events don't bubble, and X11 doesn't use `<MouseWheel>`). (c) node settings
+  panel sash set to ~72% on `<Map>` so it's a narrow side panel. (d) **Molecules Lock
+  column** — `Molecule.locked` (+migration); a "Lock" column ([x]/[ ]) after Q/M,
+  **Ctrl+L** toggles the selection, locked rows grey (tag "locked") and are removal-
+  protected; click/drag the Lock cells to flip (drag-paint). (e) the Report node's
+  property checkboxes get the same press-and-drag flip. Decision (with the maintainer):
+  keep hardware settings **explicit in the recipe + a global manual override** (built
+  earlier), NOT `!!##DEFAULT_RAM##!!`-style placeholders — explicit recipes stay self-
+  documenting/portable; the override is the one-place knob.
+
 ## Open work / TODO
 - The SLURM `--mem` line isn't driven by the global "memory per core" default (it lives
   in the submit-script template); if per-job `--mem` should scale with cores×maxcore,
