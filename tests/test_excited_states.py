@@ -79,4 +79,6 @@ def test_excited_states_folded_into_property():
     # button + report extractor key off the recipe's calctype, not a node type).
     assert "excited_states" not in wf.NODE_TYPES
     assert "property" in wf.NODE_TYPES
-    assert "UV-Vis" in wf.NODE_TYPES["property"]["label"]
+    # The Property node covers SP/NMR/UV-Vis/EPR/... — its label is just "Property"
+    # (the recipe line under the node title says which kind), not per-type.
+    assert wf.NODE_TYPES["property"]["label"] == "Property"

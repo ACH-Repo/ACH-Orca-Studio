@@ -415,6 +415,8 @@ class MoleculesTab(ttk.Frame):
             self._populate_form_from(mol)
             self._edit_frame.configure(text="Edit selected molecule")
             self._update_preview(mol)
+            # A locked molecule's fields are read-only until it's unlocked.
+            self._refresh_lock_form_state()
             return
         # Multi-select mode.
         self._focus_filename = None
@@ -462,6 +464,20 @@ class MoleculesTab(ttk.Frame):
         for child in self._edit_frame.winfo_children():
             if isinstance(child, ttk.Entry):
                 child.configure(state=state)
+
+    def _refresh_lock_form_state(self):
+        """When a single (locked) molecule is selected, grey out its edit fields so
+        they can't be changed until it's unlocked (Ctrl+L). Called on selection and
+        whenever a lock is toggled."""
+        if len(self.tree.selection()) != 1 or self._draft is not None:
+            return
+        mol = self.app.project.molecule_by_filename(self._focus_filename)
+        if mol is None:
+            return
+        locked = getattr(mol, "locked", False)
+        self._set_form_state("disabled" if locked else "normal")
+        self._edit_frame.configure(text="Edit selected molecule"
+                                   + (" (locked - Ctrl+L to unlock)" if locked else ""))
 
     def _select_all(self, _event=None):
         all_items = self.tree.get_children("")
@@ -610,6 +626,7 @@ class MoleculesTab(ttk.Frame):
             m.locked = target
             self._update_row(m)
         self.app.mark_dirty()
+        self._refresh_lock_form_state()
         self.app.set_status("{} {} molecule(s).".format(
             "Locked" if target else "Unlocked", len(mols)))
         return "break"
@@ -629,6 +646,7 @@ class MoleculesTab(ttk.Frame):
         mol.locked = self._lock_paint
         self._update_row(mol)
         self.app.mark_dirty()
+        self._refresh_lock_form_state()
         return "break"
 
     def _lock_motion(self, event):

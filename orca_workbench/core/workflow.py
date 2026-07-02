@@ -53,7 +53,7 @@ NODE_TYPES = {
     # fluorescence/0-0) is NOT a property — use an Optimize node with a TD-DFT opt
     # recipe, which outputs the relaxed geometry.
     "property": {
-        "label": "Property (SP/NMR/UV-Vis/EPR/…)",
+        "label": "Property",
         "inputs": [("geometry", "geometry")],
         "outputs": [("results", "results")],
         "kind": "calc",

@@ -28,7 +28,7 @@ from orca_workbench.ui.shortcuts import install_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
 
-NODE_W = 176
+NODE_W = 200
 TITLE_H = 22
 SUMMARY_H = 20   # band under the title for the config summary (recipe / mode / …)
 PORT_H = 20
@@ -654,7 +654,7 @@ class WorkflowTab(ttk.Frame):
             measured = f.measure(node.label) if f else int(len(node.label) * 7.2)
         except Exception:
             measured = int(len(node.label) * 7.2)
-        return float(max(NODE_W, measured + 28))
+        return float(max(NODE_W, measured + 36))   # +margin so titles never touch the edge
 
     def _is_annotation(self, node):
         return node is not None and node.kind == "annotation"
