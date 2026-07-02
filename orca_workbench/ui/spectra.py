@@ -1061,31 +1061,47 @@ _EPR_BANDS = [("L", 1.0), ("S", 3.5), ("C", 6.0), ("X", 9.5),
 
 
 class EPRSpectrumWindow(tk.Toplevel):
-    """Simulated isotropic (solution) EPR spectrum from a finished %eprnmr calc: the
-    first-derivative lineshape swept in magnetic field at a fixed microwave
-    frequency, built from g_iso + the isotropic hyperfine couplings. Annotates the
-    g-value, centre field and equivalent-coupling groups; shows the structure panel.
-    (Isotropic / spin-1/2 / 100%-abundance model — see core.epr.)"""
+    """Simulated EPR spectra from one or more finished %eprnmr calcs, stacked as
+    colour-matched traces. Isotropic (g_iso + A_iso) or anisotropic powder (principal
+    g + A) via the mode toggle; the field-swept lineshape shown as 1st derivative
+    (CW-EPR), absorption, or 2nd derivative; MW frequency by band or number. Hover a
+    trace to read its g-value and see its structure. (spin-1/2 / 100%-abundance
+    model — see core.epr.)"""
 
-    def __init__(self, parent, title, epr, name=None, smiles=None):
-        # type: (tk.Misc, str, dict, Optional[str], Optional[str]) -> None
+    def __init__(self, parent, title, entries):
+        # type: (tk.Misc, str, List[dict]) -> None
+        # entries: [{name, smiles, epr}] (epr = a parse_epr() dict) — one or more,
+        # stacked as colour-matched traces with a hover g-value readout.
         super().__init__(parent)
         self.title("EPR spectrum - {}".format(title))
-        self.geometry("1100x700")
+        self.geometry("1150x700")
         try:
             Figure, FigureCanvasTkAgg = _load_mpl()
         except Exception as e:
             self.destroy()
             _mpl_unavailable_window(parent, e)
             return
-        self.epr = epr or {}
-        self.g_iso = (self.epr.get("g_tensor") or {}).get("g_iso")
-        self.hyperfine = self.epr.get("hyperfine") or []
-        self._name = name or title
-        self._smiles = smiles
+        self.mols = []
+        for idx, e in enumerate(entries):
+            epr = e.get("epr") or {}
+            g_iso = (epr.get("g_tensor") or {}).get("g_iso")
+            if g_iso is None:
+                continue
+            gp = (epr.get("g_tensor") or {}).get("g") or [g_iso] * 3
+            self.mols.append({
+                "name": e.get("name") or title,
+                "short": (e.get("name") or title).split(" / ")[0][:18],
+                "color": _COLORS[idx % len(_COLORS)],
+                "g_iso": g_iso, "g_principal": gp,
+                "hyperfine": epr.get("hyperfine") or [], "smiles": e.get("smiles"),
+            })
+        self._stacked = len(self.mols) > 1
+        self._active = None
+        self._hover_artists = []
 
-        if self.g_iso is None:
-            ttk.Label(self, text="No g-tensor found in the calculation.").pack(padx=20, pady=20)
+        if not self.mols:
+            ttk.Label(self, text="No g-tensor found in the selected calculation(s).").pack(
+                padx=20, pady=20)
             ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
             make_modal(self, parent)
             return
@@ -1141,11 +1157,11 @@ class EPRSpectrumWindow(tk.Toplevel):
         pin_device_pixel_ratio(self.canvas)
         self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.after(0, self._first_draw)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         make_modal(self, parent)
 
     def _first_draw(self):
         self.update_idletasks()
-        self.struct.show(0, self._name, self._smiles, _COLORS[0])
         self._redraw()
 
     def _toggle_mode(self):
@@ -1176,58 +1192,78 @@ class EPRSpectrumWindow(tk.Toplevel):
             d[i] = (y[i + 1] - y[i - 1]) / dx if dx else 0.0
         return d
 
-    def _g_principal(self):
-        return (self.epr.get("g_tensor") or {}).get("g") or [self.g_iso] * 3
+    def _sim_for(self, m, freq, lw):
+        if self.mode == "powder":
+            return EPR_sim.powder_spectrum(m["g_principal"], m["hyperfine"],
+                                           freq_GHz=freq, linewidth_mT=lw,
+                                           n_theta=40, n_phi=80, npoints=2500)
+        return EPR_sim.simulate(m["g_iso"], m["hyperfine"], freq_GHz=freq, linewidth_mT=lw)
+
+    def _trace_of(self, sim):
+        field = sim["field_mT"]
+        disp = self.disp_var.get()
+        if disp == "Absorption":
+            return field, (sim.get("absorption") or sim["derivative"]), "absorption (a.u.)"
+        if disp == "2nd derivative":
+            return field, self._derivative(sim["derivative"], field), "2nd derivative (a.u.)"
+        return field, sim["derivative"], "first-derivative absorption (a.u.)"
 
     def _redraw(self):
         freq = max(0.1, float(self.freq_var.get()))
         lw = max(0.001, float(self.lw_var.get()))
         powder = self.mode == "powder"
-        if powder:
-            sim = EPR_sim.powder_spectrum(self._g_principal(), self.hyperfine,
-                                          freq_GHz=freq, linewidth_mT=lw,
-                                          n_theta=40, n_phi=80, npoints=2500)
-        else:
-            sim = EPR_sim.simulate(self.g_iso, self.hyperfine, freq_GHz=freq, linewidth_mT=lw)
-        field = sim["field_mT"]
-        disp = self.disp_var.get()
-        if disp == "Absorption":
-            trace = sim.get("absorption") or sim["derivative"]
-            ylabel = "absorption (a.u.)"
-        elif disp == "2nd derivative":
-            trace = self._derivative(sim["derivative"], field)
-            ylabel = "2nd derivative (a.u.)"
-        else:
-            trace = sim["derivative"]
-            ylabel = "first-derivative absorption (a.u.)"
         self.fig.clear()
+        self._hover_artists = []
         ax = self.fig.add_subplot(111)
-        ax.plot(field, trace, color=_COLORS[0], lw=1.0)
+        self.ax = ax
         ax.axhline(0, color="#cccccc", lw=0.5)
-        if self.sticks_var.get() and sim.get("sticks"):
+        ylabel = "first-derivative absorption (a.u.)"
+        for m in self.mols:
+            sim = self._sim_for(m, freq, lw)
+            field, trace, ylabel = self._trace_of(sim)
+            m["_field"], m["_trace"], m["_sim"] = field, trace, sim
+            ax.plot(field, trace, color=m["color"], lw=1.0, label=m["short"])
+        # line markers only for a single spectrum (ambiguous across stacked molecules)
+        if self.sticks_var.get() and not self._stacked:
+            trace = self.mols[0]["_trace"]
+            sticks = self.mols[0]["_sim"].get("sticks") or []
             peak = max((abs(v) for v in trace), default=1.0) or 1.0
-            imax = max((i for _, i in sim["sticks"]), default=1.0) or 1.0
-            base = 0.0 if disp != "Absorption" else 0.0
-            for bc, inten in sim["sticks"]:
-                ax.vlines(bc, base, base + peak * (inten / imax), color="#888888",
+            imax = max((i for _, i in sticks), default=1.0) or 1.0
+            for bc, inten in sticks:
+                ax.vlines(bc, 0.0, peak * (inten / imax), color="#888888",
                           linewidth=0.6, alpha=0.6)
         ax.set_xlabel("magnetic field (mT)")
         ax.set_ylabel(ylabel)
         ax.set_title("Simulated {} EPR spectrum".format(
             "powder (anisotropic)" if powder else "isotropic"))
+        if self._stacked:
+            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+            gtxt = "\n".join("{}: g_iso={:.4f}".format(m["short"], m["g_iso"])
+                             for m in self.mols[:10])
+            ax.text(0.01, 0.99, gtxt, transform=ax.transAxes, va="top", ha="left",
+                    fontsize=8, family="monospace",
+                    bbox=dict(boxstyle="round", fc="white", ec="#cccccc", alpha=0.85))
+        else:
+            self._single_annotation(ax, self.mols[0], freq, powder)
+            m0 = self.mols[0]
+            self.struct.show(0, m0["name"], m0.get("smiles"), m0["color"])
+        if getattr(self, "_axlim", None):
+            self._axlim.apply(self.fig.gca())
+        self.canvas.draw()
 
+    def _single_annotation(self, ax, m, freq, powder):
         def _coupling_mhz(g):
             a = g["A"]
             return abs(sum(a) / 3.0) if isinstance(a, (list, tuple)) else abs(a)
-
+        sim = m["_sim"]
         if powder:
-            gp = self._g_principal()
+            gp = m["g_principal"]
             txt = "g = [{:.5f}, {:.5f}, {:.5f}]\nB0(g_iso) = {:.1f} mT @ {:.2f} GHz".format(
                 gp[0], gp[1], gp[2], sim["center_mT"], freq)
         else:
             txt = "g_iso = {:.5f}\nB0 = {:.1f} mT @ {:.2f} GHz".format(
-                self.g_iso, sim["center_mT"], freq)
-        groups = sim["groups"]
+                m["g_iso"], sim["center_mT"], freq)
+        groups = sim.get("groups") or []
         if groups:
             txt += "\n" + "\n".join(
                 "a({}) = {:.1f} MHz  x{}".format(g["element"], _coupling_mhz(g), g["count"])
@@ -1235,9 +1271,67 @@ class EPRSpectrumWindow(tk.Toplevel):
         ax.text(0.01, 0.99, txt, transform=ax.transAxes, va="top", ha="left",
                 fontsize=8, family="monospace",
                 bbox=dict(boxstyle="round", fc="white", ec="#cccccc", alpha=0.85))
-        if getattr(self, "_axlim", None):
-            self._axlim.apply(self.fig.gca())
-        self.canvas.draw()
+
+    def _trace_val(self, m, x):
+        f = m.get("_field")
+        if not f or x is None or x < f[0] or x > f[-1] or f[-1] == f[0]:
+            return None
+        idx = int(round((x - f[0]) / (f[-1] - f[0]) * (len(f) - 1)))
+        return m["_trace"][min(len(f) - 1, max(0, idx))]
+
+    def _clear_hover(self):
+        for a in self._hover_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._hover_artists = []
+
+    def _on_motion(self, event):
+        ax = getattr(self, "ax", None)
+        if ax is None:
+            return
+        if event.inaxes is not ax or event.xdata is None:
+            if self._hover_artists:
+                self._clear_hover()
+                self.canvas.draw_idle()
+            self._set_active(None)
+            return
+        y = event.ydata if event.ydata is not None else 0.0
+        best, best_d = None, 1e9
+        for mi, m in enumerate(self.mols):
+            v = self._trace_val(m, event.xdata)
+            if v is None:
+                continue
+            if abs(v - y) < best_d:
+                best_d, best = abs(v - y), mi
+        self._clear_hover()
+        if best is None:
+            self._set_active(None)
+            self.canvas.draw_idle()
+            return
+        m = self.mols[best]
+        freq = max(0.1, float(self.freq_var.get()))
+        g_cursor = (freq * 1000.0) / (EPR_sim.MHZ_PER_MT * event.xdata) if event.xdata else 0.0
+        self._hover_artists.append(ax.annotate(
+            "{}\ng_iso = {:.5f}\ng(cursor) = {:.5f}".format(m["short"], m["g_iso"], g_cursor),
+            xy=(0.99, 0.02), xycoords="axes fraction", va="bottom", ha="right",
+            fontsize=9, family="monospace",
+            bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
+        if self._stacked:
+            self._set_active(best)
+        self.canvas.draw_idle()
+
+    def _set_active(self, mi):
+        if mi == self._active:
+            return
+        self._active = mi
+        if mi is None:
+            if self._stacked:
+                self.struct.clear()
+        else:
+            m = self.mols[mi]
+            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
 
     def _save_image(self):
         _save_figure(self.fig, self)

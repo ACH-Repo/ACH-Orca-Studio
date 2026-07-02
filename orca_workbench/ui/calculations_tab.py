@@ -2622,21 +2622,29 @@ class CalculationsTab(ttk.Frame):
         UVVisSpectrumWindow(self, title, entries)
 
     def _plot_epr(self, calcs):
-        # EPR is a per-molecule property; plot the first selected finished EPR calc.
-        c = calcs[0]
-        text = self._read_out(c)
-        epr = orca_parser.parse_epr(text) if text else None
-        if not epr or not (epr.get("g_tensor") or {}).get("g_iso"):
+        # One or more finished EPR calcs, stacked as colour-matched traces.
+        entries = []
+        for c in calcs:
+            text = self._read_out(c)
+            epr = orca_parser.parse_epr(text) if text else None
+            if not epr or not (epr.get("g_tensor") or {}).get("g_iso"):
+                continue
+            mol = self.app.project.molecule_by_filename(c.molecule_filename)
+            entries.append({
+                "name": "{} / {}".format(c.molecule_filename, c.recipe_name),
+                "smiles": mol.smiles if mol else None,
+                "epr": epr,
+            })
+        if not entries:
             messagebox.showinfo(
                 "No EPR data",
-                "No EPR g-tensor found in the selected calculation — is it a %eprnmr "
-                "run on an open-shell (radical) species?")
+                "No EPR g-tensor found in the selected calculation(s) — are they %eprnmr "
+                "runs on open-shell (radical) species?")
             return
-        mol = self.app.project.molecule_by_filename(c.molecule_filename)
         from orca_workbench.ui.spectra import EPRSpectrumWindow
-        EPRSpectrumWindow(self, c.molecule_filename, epr,
-                          name="{} / {}".format(c.molecule_filename, c.recipe_name),
-                          smiles=mol.smiles if mol else None)
+        title = (entries[0]["name"].split(" / ")[0] if len(entries) == 1
+                 else "{} molecules".format(len(entries)))
+        EPRSpectrumWindow(self, title, entries)
 
     def _plot_nmr(self, calcs):
         from orca_workbench.ui.spectra import NMROptionsDialog, NMRSpectrumWindow
