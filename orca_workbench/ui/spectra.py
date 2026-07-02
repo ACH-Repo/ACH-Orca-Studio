@@ -1007,6 +1007,12 @@ def _save_figure(fig, parent):
         messagebox.showerror("Save failed", str(e), parent=parent)
 
 
+# Standard CW-EPR microwave bands and their typical frequencies (GHz). There is no
+# standard "Z band"; the ladder is L/S/C/X/K/Q/W (then D/G above W).
+_EPR_BANDS = [("L", 1.0), ("S", 3.5), ("C", 6.0), ("X", 9.5),
+              ("K", 24.0), ("Q", 34.0), ("W", 94.0)]
+
+
 class EPRSpectrumWindow(tk.Toplevel):
     """Simulated isotropic (solution) EPR spectrum from a finished %eprnmr calc: the
     first-derivative lineshape swept in magnetic field at a fixed microwave
@@ -1045,6 +1051,11 @@ class EPRSpectrumWindow(tk.Toplevel):
                           textvariable=self.freq_var, command=self._redraw)
         sp1.pack(side=tk.LEFT, padx=6)
         sp1.bind("<Return>", lambda e: self._redraw())
+        self.band_var = tk.StringVar(value="X (9.5 GHz)")
+        band_cb = ttk.Combobox(bar, textvariable=self.band_var, width=12, state="readonly",
+                               values=["{} ({:g} GHz)".format(nm, gh) for nm, gh in _EPR_BANDS])
+        band_cb.pack(side=tk.LEFT, padx=(2, 0))
+        band_cb.bind("<<ComboboxSelected>>", self._on_band)
         ttk.Label(bar, text="Linewidth (mT):").pack(side=tk.LEFT, padx=(10, 0))
         self.lw_var = tk.DoubleVar(value=0.15)
         sp2 = ttk.Spinbox(bar, from_=0.01, to=10, increment=0.05, width=7,
@@ -1055,6 +1066,12 @@ class EPRSpectrumWindow(tk.Toplevel):
         self.mode_btn = ttk.Button(bar, text="Mode: isotropic", width=22,
                                    command=self._toggle_mode)
         self.mode_btn.pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Label(bar, text="Show:").pack(side=tk.LEFT, padx=(10, 0))
+        self.disp_var = tk.StringVar(value="1st derivative")
+        disp_cb = ttk.Combobox(bar, textvariable=self.disp_var, width=13, state="readonly",
+                               values=["1st derivative", "Absorption", "2nd derivative"])
+        disp_cb.pack(side=tk.LEFT, padx=(2, 0))
+        disp_cb.bind("<<ComboboxSelected>>", lambda e: self._redraw())
         self.sticks_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Line markers", variable=self.sticks_var,
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
@@ -1094,6 +1111,23 @@ class EPRSpectrumWindow(tk.Toplevel):
             self.lw_var.set(0.15)
         self._redraw()
 
+    def _on_band(self, _event=None):
+        s = self.band_var.get()
+        for nm, gh in _EPR_BANDS:
+            if s.startswith(nm + " "):
+                self.freq_var.set(gh)
+                break
+        self._redraw()
+
+    @staticmethod
+    def _derivative(y, x):
+        n = len(y)
+        d = [0.0] * n
+        for i in range(1, n - 1):
+            dx = x[i + 1] - x[i - 1]
+            d[i] = (y[i + 1] - y[i - 1]) / dx if dx else 0.0
+        return d
+
     def _g_principal(self):
         return (self.epr.get("g_tensor") or {}).get("g") or [self.g_iso] * 3
 
@@ -1107,18 +1141,30 @@ class EPRSpectrumWindow(tk.Toplevel):
                                           n_theta=40, n_phi=80, npoints=2500)
         else:
             sim = EPR_sim.simulate(self.g_iso, self.hyperfine, freq_GHz=freq, linewidth_mT=lw)
+        field = sim["field_mT"]
+        disp = self.disp_var.get()
+        if disp == "Absorption":
+            trace = sim.get("absorption") or sim["derivative"]
+            ylabel = "absorption (a.u.)"
+        elif disp == "2nd derivative":
+            trace = self._derivative(sim["derivative"], field)
+            ylabel = "2nd derivative (a.u.)"
+        else:
+            trace = sim["derivative"]
+            ylabel = "first-derivative absorption (a.u.)"
         self.fig.clear()
         ax = self.fig.add_subplot(111)
-        ax.plot(sim["field_mT"], sim["derivative"], color=_COLORS[0], lw=1.0)
+        ax.plot(field, trace, color=_COLORS[0], lw=1.0)
         ax.axhline(0, color="#cccccc", lw=0.5)
         if self.sticks_var.get() and sim.get("sticks"):
-            peak = max((abs(d) for d in sim["derivative"]), default=1.0)
+            peak = max((abs(v) for v in trace), default=1.0) or 1.0
             imax = max((i for _, i in sim["sticks"]), default=1.0) or 1.0
+            base = 0.0 if disp != "Absorption" else 0.0
             for bc, inten in sim["sticks"]:
-                ax.vlines(bc, 0.0, peak * (inten / imax), color="#888888",
+                ax.vlines(bc, base, base + peak * (inten / imax), color="#888888",
                           linewidth=0.6, alpha=0.6)
         ax.set_xlabel("magnetic field (mT)")
-        ax.set_ylabel("first-derivative absorption (a.u.)")
+        ax.set_ylabel(ylabel)
         ax.set_title("Simulated {} EPR spectrum".format(
             "powder (anisotropic)" if powder else "isotropic"))
 

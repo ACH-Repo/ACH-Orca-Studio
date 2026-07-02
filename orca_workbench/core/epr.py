@@ -112,12 +112,14 @@ def stick_lines(groups):
 def simulate(g_iso, hyperfine, freq_GHz=9.5, linewidth_mT=0.15, npoints=4000,
              tol_MHz=1.0):
     # type: (float, List[dict], float, float, int, float) -> dict
-    """Isotropic first-derivative EPR spectrum. Returns a dict with:
+    """Isotropic EPR spectrum. Returns a dict with:
       field_mT   : the swept field axis (mT),
-      derivative : the derivative-of-Gaussian lineshape (arb. units),
+      absorption : the Gaussian absorption lineshape (the integral of the derivative),
+      derivative : the first-derivative lineshape (what a CW spectrometer records),
       sticks     : [(field_mT, intensity)] absolute stick positions,
       center_mT  : B0, groups : the equivalent-group list.
-    `linewidth_mT` is the Gaussian sigma of each line."""
+    `linewidth_mT` is the Gaussian sigma of each line. The window can also plot the
+    2nd derivative by differentiating `derivative`."""
     groups = equivalent_groups(hyperfine, tol_MHz=tol_MHz)
     sticks_off = stick_lines(groups)
     B0 = center_field_mT(g_iso, freq_GHz)
@@ -126,22 +128,28 @@ def simulate(g_iso, hyperfine, freq_GHz=9.5, linewidth_mT=0.15, npoints=4000,
 
     lo = min((b for b, _ in sticks), default=B0)
     hi = max((b for b, _ in sticks), default=B0)
-    pad = max((hi - lo) * 0.15, 6.0 * linewidth_mT)
+    # Roomy margins so the signal isn't zoomed hard against the axes.
+    pad = max((hi - lo) * 0.30, 14.0 * linewidth_mT)
     lo -= pad
     hi += pad
     n = max(2, int(npoints))
     sigma = float(linewidth_mT)
     field = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
     deriv = []
+    absorp = []
     for b in field:
         d = 0.0
+        a = 0.0
         for bc, inten in sticks:
             x = (b - bc) / sigma
             if abs(x) < 12.0:                   # skip negligible tails
-                d += inten * (-x / sigma) * math.exp(-0.5 * x * x)
+                g = inten * math.exp(-0.5 * x * x)
+                a += g
+                d += g * (-x / sigma)
         deriv.append(d)
-    return {"field_mT": field, "derivative": deriv, "sticks": sticks,
-            "center_mT": B0, "groups": groups}
+        absorp.append(a)
+    return {"field_mT": field, "absorption": absorp, "derivative": deriv,
+            "sticks": sticks, "center_mT": B0, "groups": groups}
 
 
 def _aniso_groups(hyperfine, tol_MHz=1.0):
@@ -220,7 +228,7 @@ def powder_spectrum(g, hyperfine, freq_GHz=9.5, linewidth_mT=0.3, n_theta=50,
 
     lo = min(f for f, _ in lines)
     hi = max(f for f, _ in lines)
-    pad = max((hi - lo) * 0.04, 6.0 * linewidth_mT)
+    pad = max((hi - lo) * 0.15, 12.0 * linewidth_mT)   # roomy margins
     lo -= pad
     hi += pad
     dB = (hi - lo) / (n - 1)
