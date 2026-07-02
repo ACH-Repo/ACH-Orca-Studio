@@ -120,7 +120,7 @@ class MoleculesTab(ttk.Frame):
         # Narrow columns are fixed-width (stretch=False); name and smiles
         # absorb whatever horizontal space is left, so resizing the window
         # widens the readable fields instead of squeezing the labels.
-        columns = ("status", "name", "filename", "smiles", "charge", "mult")
+        columns = ("status", "name", "filename", "smiles", "charge", "mult", "lock")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="extended")
         col_specs = [
             # (id, label, width, minwidth, stretch)
@@ -130,7 +130,11 @@ class MoleculesTab(ttk.Frame):
             ("smiles",   "SMILES",   280, 100, True),
             ("charge",   "Q",        35,  30,  False),
             ("mult",     "M",        35,  30,  False),
+            ("lock",     "Lock",     45,  40,  False),
         ]
+        self._lock_col_id = "#{}".format(len(columns))   # display id of the Lock column
+        self._lock_painting = False
+        self._lock_paint = False
         self._col_labels = {c: lbl for c, lbl, _w, _mw, _s in col_specs}
         for col, label, width, minw, stretch in col_specs:
             self.tree.heading(col, text=label,
@@ -144,6 +148,7 @@ class MoleculesTab(ttk.Frame):
         self.tree.tag_configure("pending", background="#fffde7")  # pale yellow
         self.tree.tag_configure("failed", background="#ffebee")   # pale red
         self.tree.tag_configure("ok", background="")
+        self.tree.tag_configure("locked", background="#dcdcdc")   # grey = user-locked
         scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         # Scrollbar before the tree: a wide table packed first would leave the bar
@@ -165,6 +170,14 @@ class MoleculesTab(ttk.Frame):
         self.tree.bind("<Control-Return>", lambda e: (self.on_generate(), "break")[1])
         self.tree.bind("<Control-KP_Enter>", lambda e: (self.on_generate(), "break")[1])
         install_tree_shift_select(self.tree)
+        # Lock column: Ctrl+L toggles lock on the selection; click or drag the Lock
+        # cell to flip it (drag-paint, like the Report tab). Locked rows grey out and
+        # are protected from removal.
+        self.tree.bind("<Control-l>", self._toggle_lock_selected, add="+")
+        self.tree.bind("<Control-L>", self._toggle_lock_selected, add="+")
+        self.tree.bind("<Button-1>", self._lock_press, add="+")
+        self.tree.bind("<B1-Motion>", self._lock_motion, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._lock_release, add="+")
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
         tip(self.tree, "Molecules in this project.\n\n"
@@ -347,7 +360,7 @@ class MoleculesTab(ttk.Frame):
             self.tree.insert(
                 "", tk.END, iid=mol.filename,
                 values=self._row_values(mol),
-                tags=(mol.gen_status,),
+                tags=self._row_tags(mol),
             )
         # Warm the depiction cache in the background so row clicks are instant.
         self._prerender_depictions()
@@ -559,22 +572,80 @@ class MoleculesTab(ttk.Frame):
             self.tree.item(
                 mol.filename,
                 values=self._row_values(mol),
-                tags=(mol.gen_status,),
+                tags=self._row_tags(mol),
             )
         else:
             self.refresh()
 
     def _row_values(self, mol):
         # type: (Molecule) -> tuple
-        """Build the Treeview values tuple for one molecule, matching the
-        configured column order (status, name, filename, smiles, charge, mult)."""
+        """Build the Treeview values tuple for one molecule, matching the configured
+        column order (status, name, filename, smiles, charge, mult, lock)."""
         if mol.gen_status == "ok":
             status = "ok ({})".format(mol.method or "?")
         elif mol.gen_status == "failed":
             status = "failed"
         else:
             status = "pending"
-        return (status, mol.name, mol.filename, mol.smiles or "", mol.charge, mol.multiplicity)
+        lock = "[x]" if getattr(mol, "locked", False) else "[ ]"
+        return (status, mol.name, mol.filename, mol.smiles or "", mol.charge,
+                mol.multiplicity, lock)
+
+    def _row_tags(self, mol):
+        # A locked row greys out (overriding the gen_status colour) so it's obvious.
+        return ("locked",) if getattr(mol, "locked", False) else (mol.gen_status,)
+
+    def _update_row(self, mol):
+        if self.tree.exists(mol.filename):
+            self.tree.item(mol.filename, values=self._row_values(mol), tags=self._row_tags(mol))
+
+    def _toggle_lock_selected(self, _event=None):
+        """Ctrl+L: lock the selected molecules, or unlock them if they're all locked."""
+        mols = [self.app.project.molecule_by_filename(i) for i in self.tree.selection()]
+        mols = [m for m in mols if m is not None]
+        if not mols:
+            return "break"
+        target = not all(getattr(m, "locked", False) for m in mols)
+        for m in mols:
+            m.locked = target
+            self._update_row(m)
+        self.app.mark_dirty()
+        self.app.set_status("{} {} molecule(s).".format(
+            "Locked" if target else "Unlocked", len(mols)))
+        return "break"
+
+    def _lock_press(self, event):
+        # Click on a Lock cell: flip it and start a drag-paint at that value. Return
+        # "break" so the click doesn't also change the row selection.
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return None
+        if self.tree.identify_column(event.x) != self._lock_col_id:
+            return None
+        mol = self.app.project.molecule_by_filename(self.tree.identify_row(event.y))
+        if mol is None:
+            return None
+        self._lock_paint = not getattr(mol, "locked", False)
+        self._lock_painting = True
+        mol.locked = self._lock_paint
+        self._update_row(mol)
+        self.app.mark_dirty()
+        return "break"
+
+    def _lock_motion(self, event):
+        if not self._lock_painting:
+            return None
+        mol = self.app.project.molecule_by_filename(self.tree.identify_row(event.y))
+        if mol is not None and getattr(mol, "locked", False) != self._lock_paint:
+            mol.locked = self._lock_paint
+            self._update_row(mol)
+            self.app.mark_dirty()
+        return "break"
+
+    def _lock_release(self, _event):
+        if self._lock_painting:
+            self._lock_painting = False
+            return "break"
+        return None
 
     def on_add(self):
         if len(self.tree.selection()) > 0:
@@ -635,6 +706,21 @@ class MoleculesTab(ttk.Frame):
         if not selected:
             messagebox.showinfo("No selection", "Select one or more molecules to remove.")
             return
+        # Locked molecules are protected — drop them from the removal set with a note.
+        locked = [i for i in selected
+                  if getattr(self.app.project.molecule_by_filename(i), "locked", False)]
+        if locked:
+            selected = [i for i in selected if i not in locked]
+            if not selected:
+                messagebox.showinfo(
+                    "Locked",
+                    "{} selected molecule(s) are locked. Unlock them (Ctrl+L or the Lock "
+                    "column) before removing.".format(len(locked)))
+                return
+            messagebox.showinfo(
+                "Locked",
+                "{} locked molecule(s) will be kept; removing the other {}.".format(
+                    len(locked), len(selected)))
         n = len(selected)
         if n == 1:
             mol = self.app.project.molecule_by_filename(selected[0])

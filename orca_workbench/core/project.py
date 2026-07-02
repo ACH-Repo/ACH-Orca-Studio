@@ -36,6 +36,9 @@ class Molecule(object):
                                       # their .xyz is the original, so SMILES generation is
                                       # refused (it would overwrite + lose provenance). To use
                                       # SMILES instead, delete the entry and add it fresh.
+    locked: bool = False              # user "Lock molecule" flag (Ctrl+L / the Lock column):
+                                      # greys the row and protects it from removal. Distinct
+                                      # from coords_locked (which is about SMILES regeneration).
 
     @classmethod
     def from_dict(cls, d):
@@ -43,6 +46,7 @@ class Molecule(object):
         d = dict(d)
         d.setdefault("gen_smiles", None)
         d.setdefault("gen_error", None)
+        d.setdefault("locked", False)
         if "gen_status" not in d:
             # Migrate: derive from the boolean `generated` flag.
             d["gen_status"] = "ok" if d.get("generated") else "pending"

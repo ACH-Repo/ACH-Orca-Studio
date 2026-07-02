@@ -529,12 +529,40 @@ class WorkflowTab(ttk.Frame):
             self._set_cfg(node, "extractors", None if keys == allkeys else keys)
 
         # Checkboxes go straight into the (scrollable) settings panel — no inner
-        # scroll of their own, so one wheel scrolls the whole panel.
+        # scroll of their own, so one wheel scrolls the whole panel. Press-and-drag
+        # across them to flip several at once (like the Report tab).
+        self._rep_paint_vars = {}
+        self._rep_on_toggle = on_toggle
         for ex in reporting.EXTRACTORS:
             v = tk.BooleanVar(value=(chosen is None or ex.key in chosen))
             cvars[ex.key] = v
-            ttk.Checkbutton(self.cfg_frame, text="{}  ({})".format(ex.label, ex.applies_hint),
-                            variable=v, command=on_toggle).pack(anchor=tk.W, padx=12, pady=1)
+            cb = ttk.Checkbutton(self.cfg_frame, text="{}  ({})".format(ex.label, ex.applies_hint),
+                                 variable=v, command=on_toggle)
+            cb.pack(anchor=tk.W, padx=12, pady=1)
+            self._rep_paint_vars[str(cb)] = v
+            cb.bind("<Button-1>", lambda e, var=v: self._rep_paint_press(var))
+            cb.bind("<B1-Motion>", self._rep_paint_motion)
+            cb.bind("<ButtonRelease-1>", self._rep_paint_release)
+
+    def _rep_paint_press(self, var):
+        self._rep_painting = True
+        self._rep_paint_value = not bool(var.get())
+        var.set(self._rep_paint_value)
+        self._rep_on_toggle()
+        return "break"   # suppress the Checkbutton's own toggle (we set it directly)
+
+    def _rep_paint_motion(self, event):
+        if not getattr(self, "_rep_painting", False):
+            return
+        w = self.winfo_containing(event.x_root, event.y_root)
+        var = self._rep_paint_vars.get(str(w)) if w is not None else None
+        if var is not None and bool(var.get()) != self._rep_paint_value:
+            var.set(self._rep_paint_value)
+            self._rep_on_toggle()
+
+    def _rep_paint_release(self, _event):
+        self._rep_painting = False
+        return "break"
 
     # ----------------------------------------------------- workflow <-> project
 
