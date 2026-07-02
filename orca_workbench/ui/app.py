@@ -195,6 +195,8 @@ class App(object):
         menubar.add_cascade(label="Settings", menu=setmenu)
 
         helpmenu = tk.Menu(menubar, tearoff=0)
+        helpmenu.add_command(label="Node graphs...", command=self.on_help_nodegraph)
+        helpmenu.add_separator()
         helpmenu.add_command(label="Check coordinate backends...", command=self.on_diagnose)
         if diag.is_enabled():
             # Only shown in --diagnose mode: dump a perf log without quitting.
@@ -632,8 +634,89 @@ class App(object):
                 self._ensure_tab("calculations_tab").reconcile_after_load()
             except Exception:
                 pass
+            # Refresh the Workflow view too, so node status + per-node result/plot
+            # buttons appear straight away when reopening a project (no manual click).
+            try:
+                wt = getattr(self, "workflow_tab", None)
+                if wt is not None:
+                    wt.on_refresh_status()
+            except Exception:
+                pass
         self.mark_clean()
         self.set_status("Opened {}".format(path))
+
+    def on_help_nodegraph(self):
+        """Scrollable help for the node-graph editor (the on-canvas line is terse)."""
+        win = tk.Toplevel(self.root)
+        win.title("Node graphs — help")
+        win.geometry("640x580")
+        ttk.Label(win, text="Workflow node graph editor",
+                  font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, padx=14, pady=(12, 2))
+        body = ttk.Frame(win)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(14, 0), pady=4)
+        canvas = tk.Canvas(body, highlightthickness=0)
+        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = ttk.Frame(canvas)
+        wid = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(wid, width=e.width))
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        def section(t):
+            ttk.Label(inner, text=t, font=("TkDefaultFont", 10, "bold")).pack(
+                anchor=tk.W, padx=4, pady=(10, 2))
+
+        def bullet(t):
+            ttk.Label(inner, text="•  " + t, wraplength=560, justify=tk.LEFT).pack(
+                anchor=tk.W, padx=14, pady=1)
+
+        ttk.Label(inner, wraplength=580, justify=tk.LEFT, foreground="#333",
+                  text="Build a pipeline by adding nodes and wiring their pins. The graph runs "
+                       "chronologically from left to right: each node's output geometry / results "
+                       "feed the node(s) it connects to.").pack(anchor=tk.W, padx=4, pady=(4, 2))
+        section("Adding & wiring")
+        bullet("Add a node from the palette buttons up top, or press F3 (or drag from a pin onto "
+               "empty space) for a search popup listing every node type.")
+        bullet("Wire by dragging an output pin onto a compatible input pin; drop on empty space to "
+               "pick a new node to connect.")
+        bullet("J connects two selected nodes.")
+        section("Selecting & moving")
+        bullet("Click to select, Ctrl+click to multi-select, drag empty space to box-select, "
+               "Ctrl+A selects all.")
+        bullet("Drag a node to move it. Scroll to zoom; middle- or right-drag to pan; press 0 to "
+               "reset the view.")
+        section("Tidying the layout (Blueprint-style)")
+        bullet("Q straightens the selection so connected nodes line up and their wires run "
+               "straight across.")
+        bullet("Shift+W / Shift+S align top / bottom edges; Shift+A / Shift+D align left / right "
+               "edges.")
+        bullet("C frames the selection in a titled box; T drops a comment note (double-click to "
+               "edit it, drag its corner to resize).")
+        section("Running")
+        bullet("Generate only (grey): expand into calculations without launching, to review them "
+               "on the Calculations tab first.")
+        bullet("Run pipeline (amber): build and launch automatically as each input becomes ready "
+               "— keep the app open.")
+        bullet("Submit unattended (green): hand the whole pipeline to SLURM as a dependency chain, "
+               "then you can close the app.")
+        bullet("Select a node first to run only that network. Refresh (blue) re-queries status so "
+               "finished nodes light up and expose their plot / viewer buttons.")
+        section("Good to know")
+        bullet("Once a node has launched calculations, its recipe locks and it can't be deleted "
+               "(remove its calcs on the Calculations tab first) — this protects your run record. "
+               "Report nodes are exempt: they only aggregate, so they stay editable and re-runnable.")
+        section("Feel familiar?")
+        ttk.Label(inner, wraplength=580, justify=tk.LEFT, foreground="#555",
+                  text="This editor is largely inspired by Unreal Engine 5's Blueprint system and "
+                       "by KNIME, so it deliberately shares their feel and several of their "
+                       "hotkeys — if you've used either, you should feel right at home.").pack(
+                           anchor=tk.W, padx=4, pady=(2, 10))
+        ttk.Button(win, text="Close", command=win.destroy).pack(side=tk.BOTTOM, pady=8)
 
     def on_save(self):
         if not self.project.path:

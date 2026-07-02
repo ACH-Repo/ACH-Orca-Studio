@@ -131,13 +131,9 @@ class WorkflowTab(ttk.Frame):
                    "conditional gates) and jump to the Calculations tab — but don't launch them. "
                    "Use this if you want to review or edit before running.")
 
-        ttk.Label(self, text="Drag a node to move · drag an output port onto an input to wire (drop "
-                  "on empty space to pick a new node) · drag empty space to box-select · Ctrl+click "
-                  "to multi-select · Ctrl+A all · J connects two selected nodes · F3 adds a node · "
-                  "C frames the selection · T adds a comment (double-click to edit, drag its corner "
-                  "to resize) · Q straightens the selection, Shift+WASD aligns its edges · "
-                  "scroll to zoom · middle/right-drag to pan · Delete removes. "
-                  "Select a node then Run pipeline to run just that network.",
+        ttk.Label(self, text="Add nodes to the canvas and connect their pins to build a workflow, "
+                  "run chronologically from left to right.  For hotkeys and the full guide: "
+                  "Help > Node graphs.",
                   foreground="#666", wraplength=1100, justify=tk.LEFT).pack(
                       side=tk.TOP, anchor=tk.W, padx=8, pady=2)
 

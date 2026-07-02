@@ -77,6 +77,25 @@ class ReportTab(ttk.Frame):
         ttk.Separator(ext_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=2)
         ttk.Label(ext_frame, text="(tip: click-and-drag down the boxes to flip several at once)",
                   foreground="#888").pack(anchor=tk.W, padx=16, pady=(0, 2))
+        # The extractor list keeps growing, so the per-extractor boxes live in a
+        # fixed-height scrollable area — otherwise they push the Generate button
+        # (in the Output frame below) off the bottom of the tab.
+        boxwrap = ttk.Frame(ext_frame)
+        boxwrap.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
+        box_canvas = tk.Canvas(boxwrap, height=190, highlightthickness=0)
+        box_sb = ttk.Scrollbar(boxwrap, orient=tk.VERTICAL, command=box_canvas.yview)
+        box_canvas.configure(yscrollcommand=box_sb.set)
+        box_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        box_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        box_inner = ttk.Frame(box_canvas)
+        box_win = box_canvas.create_window((0, 0), window=box_inner, anchor="nw")
+        box_inner.bind("<Configure>",
+                       lambda e: box_canvas.configure(scrollregion=box_canvas.bbox("all")))
+        box_canvas.bind("<Configure>",
+                        lambda e: box_canvas.itemconfigure(box_win, width=e.width))
+        box_canvas.bind("<Enter>", lambda e: box_canvas.bind_all(
+            "<MouseWheel>", lambda ev: box_canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        box_canvas.bind("<Leave>", lambda e: box_canvas.unbind_all("<MouseWheel>"))
         # Blender-style drag-paint: press on a box and drag across others to set
         # them all to the value the first one took. _paint_vars maps each box
         # widget to its var so motion can find which box is under the cursor.
@@ -86,7 +105,7 @@ class ReportTab(ttk.Frame):
         for ex in reporting.EXTRACTORS:
             var = tk.BooleanVar(value=True)
             self._ext_vars[ex.key] = var
-            cb = ttk.Checkbutton(ext_frame, text="{}   ({})".format(ex.label, ex.applies_hint),
+            cb = ttk.Checkbutton(box_inner, text="{}   ({})".format(ex.label, ex.applies_hint),
                                  variable=var, command=self._sync_all_var)
             cb.pack(anchor=tk.W, padx=16, pady=1)
             self._paint_vars[str(cb)] = var
