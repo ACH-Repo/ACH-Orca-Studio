@@ -294,8 +294,27 @@ off the core path and gracefully degradable.
   Workflow + Calc-derive; was flagged experimental). ORCA-restart check (local): a
   cancelled OPT can resume from the last `_trj.xyz` geometry + MOREAD in ~half the cycles —
   a "Resume from last geometry" feature is viable (not built; Interrupt stays cancel-only).
+- **Workflow config-panel scroll + global hardware defaults + polish** (branch
+  `posthoc-properties`) — (a) the **node settings panel is scrollable** (canvas +
+  scrollbar; wheel bound on every child so it scrolls anywhere, not just on the bar),
+  fixing Property/Optimize panels cut off at the bottom; the Report node's extractor
+  checkboxes now pack straight into it (no nested scroll). (b) a **locked** node shows
+  its recipe as a read-only "`<recipe>` (locked - node has run)" label, not a greyed
+  combobox. (c) Workflow **Refresh (F5)** — F5 is now context-aware in `app._on_f5`
+  (Workflow tab → `wt.on_refresh_status` in place; else Calc tab), and the workflow
+  refresh queries SLURM **directly** (updates `ct._squeue_states` without calling the
+  Calc tab's refresh) so it no longer switches tabs. (d) **Traj** tooltip notes it's a
+  multi-frame `.xyz` (molden/Avogadro/PyMOL/VMD). (e) help-popup bullets rewritten terse.
+  (f) **Global hardware defaults** — Settings ▸ *Default cores per job* / *Default
+  memory per core (MB)* (config `default_cores`/`default_maxcore_mb`, 0=off) override
+  every built job's `%pal nprocs` / `%maxcore` in `_build_one` before the SLURM core
+  count is derived, so you set PC specs once instead of per recipe. `inputs.set_maxcore`
+  added; tests in `tests/test_hardware_defaults.py`.
 
 ## Open work / TODO
+- The SLURM `--mem` line isn't driven by the global "memory per core" default (it lives
+  in the submit-script template); if per-job `--mem` should scale with cores×maxcore,
+  add a MEM placeholder to the template + render_slurm.
 - Possible: a "Resume from last geometry" action (rebuild an OPT from `_trj.xyz` last
   frame + MOREAD) — verified locally it converges in ~half the cycles vs from scratch.
 - Possible: an "add for all molecules × selected recipes" button on the Calc tab if the
