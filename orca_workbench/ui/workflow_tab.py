@@ -70,6 +70,12 @@ class WorkflowTab(ttk.Frame):
         self._pan = None           # transient middle/right pan state
         # Live execution: node_id -> [calc id, ...] from the last "Run pipeline".
         self._node_calcs = {}
+        # Undo/redo of graph edits (add/delete/move/wire): whole-graph snapshots.
+        # Every mutation goes through _commit(), so one snapshot per commit — and a
+        # drag commits once (at release), so a move is a single undo step.
+        self._undo_stack = []      # type: list
+        self._redo_stack = []      # type: list
+        self._undo_baseline = None
         self._build()
 
     # ---- world <-> screen transform (for zoom + pan) ----
@@ -200,6 +206,11 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<S>", lambda e: self._align_selected("bottom"))
         self.canvas.bind("<A>", lambda e: self._align_selected("left"))
         self.canvas.bind("<D>", lambda e: self._align_selected("right"))
+        # Undo/redo of graph edits (canvas-scoped; text fields keep their own Ctrl+Z).
+        self.canvas.bind("<Control-z>", self._undo_graph)
+        self.canvas.bind("<Control-Z>", self._undo_graph)
+        self.canvas.bind("<Control-y>", self._redo_graph)
+        self.canvas.bind("<Control-Y>", self._redo_graph)
         self.canvas.bind("<Double-Button-1>", self._on_double_click)
 
         self.cfg_frame = ttk.LabelFrame(paned, text="Node settings")
@@ -438,6 +449,11 @@ class WorkflowTab(ttk.Frame):
 
     def refresh(self):
         self.wf = wf_mod.Workflow.from_dict(self.app.project.workflow)
+        # Only wipe the undo history when the graph actually changed underneath us
+        # (project opened / new / cleared) — not on incidental refreshes, so undo
+        # survives a normal editing session.
+        if self._undo_baseline is None or self.app.project.workflow != self._undo_baseline:
+            self._reset_undo()
         # drop selections that no longer exist
         self._sel_nodes = [nid for nid in self._sel_nodes if self.wf.node(nid) is not None]
         if self._sel_edge is not None and self.wf.edge(self._sel_edge) is None:
@@ -446,8 +462,51 @@ class WorkflowTab(ttk.Frame):
         self._build_config_panel()
 
     def _commit(self):
+        cur = self.wf.to_dict()
+        self.app.project.workflow = cur
+        self.app.mark_dirty()
+        base = self._undo_baseline
+        if base is not None and base != cur:
+            self._undo_stack.append(base)
+            if len(self._undo_stack) > 100:
+                self._undo_stack.pop(0)
+            self._redo_stack = []
+        self._undo_baseline = cur
+
+    def _reset_undo(self):
+        """Start a fresh undo history from the current graph (used when the graph is
+        (re)loaded from the project)."""
+        self._undo_stack = []
+        self._redo_stack = []
+        self._undo_baseline = self.wf.to_dict()
+
+    def _restore_graph(self, d):
+        """Replace the graph with snapshot dict `d` WITHOUT going through _commit
+        (so undo/redo don't feed themselves)."""
+        self.wf = wf_mod.Workflow.from_dict(d)
         self.app.project.workflow = self.wf.to_dict()
         self.app.mark_dirty()
+        self._undo_baseline = self.app.project.workflow
+        self._sel_nodes = [nid for nid in self._sel_nodes if self.wf.node(nid) is not None]
+        self._sel_edge = None
+        self._redraw()
+        self._build_config_panel()
+
+    def _undo_graph(self, _event=None):
+        if not self._undo_stack:
+            return "break"
+        self._redo_stack.append(self.wf.to_dict())
+        self._restore_graph(self._undo_stack.pop())
+        self.app.set_status("Undo (node graph).")
+        return "break"
+
+    def _redo_graph(self, _event=None):
+        if not self._redo_stack:
+            return "break"
+        self._undo_stack.append(self.wf.to_dict())
+        self._restore_graph(self._redo_stack.pop())
+        self.app.set_status("Redo (node graph).")
+        return "break"
 
     # --------------------------------------------------------------- geometry
 
@@ -998,15 +1057,31 @@ class WorkflowTab(ttk.Frame):
         return "break"
 
     def _straighten_selected(self):
-        """Blueprint-style Q: straighten a connected chain by putting the selected
-        nodes' vertical centres on one line, so wires between them run straight
-        across (the common left-to-right pipeline case)."""
+        """Blueprint-style Q: align connected nodes so the wires between them run
+        straight — for each edge among the selection, move the downstream node so
+        its input pin sits at the same height as the upstream output pin. Processed
+        left-to-right so a chain propagates. With no connections in the selection,
+        falls back to aligning vertical centres onto one line."""
         nodes = self._selected_node_objs()
         if len(nodes) < 2:
             return "break"
-        cy = sum(n.y + self._node_height(n) / 2.0 for n in nodes) / len(nodes)
-        for n in nodes:
-            n.y = cy - self._node_height(n) / 2.0
+        sel = {n.id for n in nodes}
+        edges = [e for e in self.wf.edges if e.src_node in sel and e.dst_node in sel]
+        if not edges:
+            cy = sum(n.y + self._node_height(n) / 2.0 for n in nodes) / len(nodes)
+            for n in nodes:
+                n.y = cy - self._node_height(n) / 2.0
+            self.app.mark_dirty()
+            self._redraw()
+            return "break"
+        edges.sort(key=lambda e: self.wf.node(e.src_node).x)   # upstream first
+        for e in edges:
+            src, dst = self.wf.node(e.src_node), self.wf.node(e.dst_node)
+            sp = self._port_xy(src, e.src_port, is_input=False)
+            dp = self._port_xy(dst, e.dst_port, is_input=True)
+            if sp is None or dp is None:
+                continue
+            dst.y = sp[1] - (dp[1] - dst.y)   # dst input pin height := src output pin height
         self.app.mark_dirty()
         self._redraw()
         return "break"
