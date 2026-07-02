@@ -164,6 +164,44 @@ def _place_structure_in_axes(ax, arr, anchor=(0.985, 0.985), box_align=(1.0, 1.0
 
 # ----------------------------------------------------------- shared UI helpers
 
+class _AxisLimitControls(object):
+    """A tiny toolbar group of x0/x1/y0/y1 entry fields (blank = auto). Every plot
+    window creates one and calls `apply(ax)` at the end of its redraw, so any axis
+    limit can be pinned to an explicit data value while the rest stay auto-scaled."""
+
+    def __init__(self, bar, redraw_cb):
+        self.vars = {}
+        ttk.Label(bar, text="x:").pack(side=tk.LEFT, padx=(8, 0))
+        for k in ("x0", "x1"):
+            self.vars[k] = tk.StringVar()
+            e = ttk.Entry(bar, textvariable=self.vars[k], width=6)
+            e.pack(side=tk.LEFT, padx=1)
+            e.bind("<Return>", lambda _e: redraw_cb())
+        ttk.Label(bar, text="y:").pack(side=tk.LEFT, padx=(6, 0))
+        for k in ("y0", "y1"):
+            self.vars[k] = tk.StringVar()
+            e = ttk.Entry(bar, textvariable=self.vars[k], width=6)
+            e.pack(side=tk.LEFT, padx=1)
+            e.bind("<Return>", lambda _e: redraw_cb())
+        ttk.Button(bar, text="Set", width=4, command=redraw_cb).pack(side=tk.LEFT, padx=(2, 4))
+
+    def _f(self, k):
+        try:
+            return float(self.vars[k].get())
+        except (ValueError, TypeError):
+            return None
+
+    def apply(self, ax):
+        x0, x1 = self._f("x0"), self._f("x1")
+        y0, y1 = self._f("y0"), self._f("y1")
+        if x0 is not None or x1 is not None:
+            cur = ax.get_xlim()
+            ax.set_xlim(x0 if x0 is not None else cur[0], x1 if x1 is not None else cur[1])
+        if y0 is not None or y1 is not None:
+            cur = ax.get_ylim()
+            ax.set_ylim(y0 if y0 is not None else cur[0], y1 if y1 is not None else cur[1])
+
+
 def _maximize_window(win):
     """Best-effort maximise a Toplevel across platforms / window managers."""
     for attempt in (lambda: win.state("zoomed"),
@@ -291,6 +329,7 @@ class IRSpectrumWindow(tk.Toplevel):
         self.mode_btn.pack(side=tk.LEFT, padx=6)
         ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
         ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
+        self._axlim = _AxisLimitControls(bar, self._redraw)
         ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
 
@@ -374,6 +413,8 @@ class IRSpectrumWindow(tk.Toplevel):
             m = self.mols[0]
             self.struct.show(0, m["name"], m.get("smiles"), m["color"])
 
+        if getattr(self, "_axlim", None):
+            self._axlim.apply(self.fig.gca())
         self.canvas.draw()
 
     def _clear_hover(self):
@@ -508,6 +549,7 @@ class UVVisSpectrumWindow(tk.Toplevel):
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
         ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
         ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
+        self._axlim = _AxisLimitControls(bar, self._redraw)
         ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
 
@@ -586,6 +628,8 @@ class UVVisSpectrumWindow(tk.Toplevel):
         else:
             m = self.mols[0]
             self.struct.show(0, m["name"], m.get("smiles"), m["color"])
+        if getattr(self, "_axlim", None):
+            self._axlim.apply(self.fig.gca())
         self.canvas.draw()
 
     def _clear_hover(self):
@@ -819,6 +863,7 @@ class NMRSpectrumWindow(tk.Toplevel):
         ttk.Label(bar, text="(hover a peak to highlight its molecule)",
                   foreground="#666").pack(side=tk.LEFT, padx=12)
         ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
+        self._axlim = _AxisLimitControls(bar, self._redraw)
         ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
 
@@ -909,6 +954,8 @@ class NMRSpectrumWindow(tk.Toplevel):
 
         self._active = None
         self.struct.clear()
+        if getattr(self, "_axlim", None):
+            self._axlim.apply(self.fig.gca())
         self.canvas.draw()
         # reflect the active x-range in the entry boxes
         x0, x1 = self.ax.get_xlim()
@@ -1077,6 +1124,7 @@ class EPRSpectrumWindow(tk.Toplevel):
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
         ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
         ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
+        self._axlim = _AxisLimitControls(bar, self._redraw)
         ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
 
@@ -1187,6 +1235,8 @@ class EPRSpectrumWindow(tk.Toplevel):
         ax.text(0.01, 0.99, txt, transform=ax.transAxes, va="top", ha="left",
                 fontsize=8, family="monospace",
                 bbox=dict(boxstyle="round", fc="white", ec="#cccccc", alpha=0.85))
+        if getattr(self, "_axlim", None):
+            self._axlim.apply(self.fig.gca())
         self.canvas.draw()
 
     def _save_image(self):
