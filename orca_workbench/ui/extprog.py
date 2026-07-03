@@ -57,6 +57,11 @@ PROGRAM_SLOTS = [
     {"key": "editor_3d_path", "label": "3D editor (geometry round-trip)",
      "desc": "Opens a molecule's .xyz to EDIT the geometry; on save the app reloads it "
              "(Molecules tab, right-click > Edit geometry). e.g. Avogadro."},
+    {"key": "traj_viewer_path", "label": "Trajectory viewer (optimisation _trj.xyz)",
+     "desc": "Opens an optimisation trajectory (multi-frame _trj.xyz) as a movie — Calc tab "
+             "'Open trajectory', or a node's Traj button. PyMOL animates these best; for the "
+             "PyMOL 3 installer point at PyMOLWin.exe (NOT the conda .bat — it drops the file "
+             "argument). Blank = use the 3D viewer."},
     {"key": "editor_2d_path", "label": "2D editor (structure / SMILES round-trip)",
      "desc": "Opens the 2D structure to edit; the app reads the SMILES back (Molecules tab: "
              "Edit structure, or double-click the depiction). e.g. ChemDraw, Marvin."},
@@ -69,6 +74,7 @@ PROGRAM_SLOTS = [
 _PATH_FALLBACKS = {
     "viewer_3d_path": ("viewer_3d_path", "avogadro_path", "editor_3d_path"),
     "editor_3d_path": ("editor_3d_path", "avogadro_path", "viewer_3d_path"),
+    "traj_viewer_path": ("traj_viewer_path", "viewer_3d_path", "avogadro_path"),
     "editor_2d_path": ("editor_2d_path", "structure_editor_path"),
     "text_editor_path": ("text_editor_path",),
 }

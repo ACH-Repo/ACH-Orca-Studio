@@ -1941,30 +1941,31 @@ def open_in_molden(parent, xyz_path):
             "X-forwarded session.".format(e))
 
 
-def open_xyz_3d(parent, app, xyz_path):
-    """Open an .xyz read-only in the configured 3D VIEWER (the `viewer_3d_path` slot,
-    which defaults to the same program as the 3D editor) if it's present on THIS
-    machine, otherwise the OpenXyzDialog (which offers molden on the gateway + hands
-    you the path). Works for a single geometry or a multi-frame trajectory. Shared by
-    the Molecules tab and the Calculations-tab right-click (open geometry / trajectory)."""
+def open_xyz_3d(parent, app, xyz_path, slot="viewer_3d_path"):
+    """Open an .xyz read-only in an external program if it's present on THIS machine,
+    otherwise the OpenXyzDialog (which offers molden on the gateway + hands you the
+    path). `slot` selects which configured program: `viewer_3d_path` (default) for a
+    single geometry, `traj_viewer_path` for a multi-frame optimisation trajectory
+    (PyMOL by preference) — each falls back to the 3D viewer if unset. Shared by the
+    Molecules / Calculations / Workflow tabs."""
     abs_xyz = xyz_path
     if not os.path.isabs(abs_xyz):
         abs_xyz = os.path.join(app.project.root(), abs_xyz)
     if not os.path.isfile(abs_xyz):
         messagebox.showerror("File missing", "File not found:\n{}".format(abs_xyz))
         return
-    # Only launch directly if the viewer is on the machine the app *runs* on (on the
+    # Only launch directly if the program is on the machine the app *runs* on (on the
     # gateway it isn't — the local viewer is on the Windows PC, unreachable from a
     # cluster process), in which case the dialog hands you the path / offers molden.
-    viewer = extprog_mod.program_path("viewer_3d_path")
+    viewer = extprog_mod.program_path(slot)
     if viewer and (os.path.isfile(viewer) or _on_path(viewer)):
         try:
             subprocess.Popen([viewer, abs_xyz])
-            app.set_status("Opened {} in the 3D viewer.".format(os.path.basename(abs_xyz)))
+            app.set_status("Opened {} in the external viewer.".format(os.path.basename(abs_xyz)))
             return
         except Exception as e:
             messagebox.showerror("Launch failed",
-                                 "Could not launch the 3D viewer:\n{}\n\n{}".format(viewer, e))
+                                 "Could not launch the viewer:\n{}\n\n{}".format(viewer, e))
             return
     OpenXyzDialog(parent, abs_xyz)
 
