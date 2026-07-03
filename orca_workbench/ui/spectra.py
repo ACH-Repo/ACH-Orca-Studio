@@ -295,6 +295,7 @@ class BaseSpectrumWindow(tk.Toplevel):
                       command=lambda _v: self._redraw()).pack(side=tk.RIGHT, padx=(0, 4))
             ttk.Label(bar, text="Stack offset:").pack(side=tk.RIGHT, padx=(10, 2))
 
+        self._add_limits_row()                       # compact x/y limit boxes + key hints
         self.add_summary()                           # optional subclass summary line
 
         body = ttk.Frame(self)
@@ -303,6 +304,10 @@ class BaseSpectrumWindow(tk.Toplevel):
         self.struct.pack(side=tk.RIGHT, fill=tk.Y)
         left = ttk.Frame(body)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Reserve the toolbar's strip at the bottom FIRST so it always shows, then
+        # let the canvas fill the rest.
+        nav_frame = ttk.Frame(left)
+        nav_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.fig = self._Figure(figsize=(8.6, 5.0), dpi=100)
         try:
             self.fig.set_layout_engine("tight")
@@ -311,16 +316,20 @@ class BaseSpectrumWindow(tk.Toplevel):
         self.canvas = self._Canvas(self.fig, master=left)
         pin_device_pixel_ratio(self.canvas)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        # Standard matplotlib toolbar below the plot: Home / Back / Forward / Pan /
-        # Zoom / Save. Keeps the top control row slim (replaces custom axis-limit
-        # boxes + Save + Maximize with familiar, compact tools).
+        # Standard matplotlib toolbar (Home/Pan/Zoom/Save) below the plot. Use the
+        # default constructor (auto-packs into nav_frame) — it works on every
+        # matplotlib version; the newer `pack_toolbar=` kwarg raised on older builds,
+        # which the previous try/except swallowed so NO toolbar appeared.
+        self._nav = None
         try:
-            nav = self._NavToolbar(self.canvas, left, pack_toolbar=False)
-            nav.update()
-            nav.pack(side=tk.BOTTOM, fill=tk.X)
+            self._nav = self._NavToolbar(self.canvas, nav_frame)
+            self._nav.update()
         except Exception:
-            pass
+            import traceback
+            traceback.print_exc()
+        self._disable_mpl_keymap()
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self._bind_plot_keys()
 
         fit_to_content(self)     # non-modal: keep real WM decorations (maximize button)
         self.after(0, self._first_draw)
@@ -332,6 +341,115 @@ class BaseSpectrumWindow(tk.Toplevel):
         except tk.TclError:
             return
         self._redraw()
+
+    # ---------------------------------------------- limit boxes + shortcuts
+
+    def _add_limits_row(self):
+        """A compact second row of x/y limit boxes + Mestrenova-style key hints. The
+        boxes give manual numeric limits (blank = auto); the keys (active while the
+        pointer is over the plot) drive reset / manual-edit / zoom / pan."""
+        row = ttk.Frame(self)
+        row.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0, 2))
+        self._lim = {}
+        self._lim_entries = {}
+        ttk.Label(row, text="View  x:").pack(side=tk.LEFT)
+        for k in ("x0", "x1"):
+            self._lim[k] = tk.StringVar()
+            e = ttk.Entry(row, textvariable=self._lim[k], width=7)
+            e.pack(side=tk.LEFT, padx=1)
+            e.bind("<Return>", lambda _e: self._redraw())
+            self._lim_entries[k] = e
+        ttk.Label(row, text="y:").pack(side=tk.LEFT, padx=(6, 0))
+        for k in ("y0", "y1"):
+            self._lim[k] = tk.StringVar()
+            e = ttk.Entry(row, textvariable=self._lim[k], width=7)
+            e.pack(side=tk.LEFT, padx=1)
+            e.bind("<Return>", lambda _e: self._redraw())
+            self._lim_entries[k] = e
+        ttk.Button(row, text="Apply", width=6, command=self._redraw).pack(side=tk.LEFT, padx=(3, 1))
+        ttk.Label(row, text="   keys over plot:  F full reset · M edit limits · Z zoom · P pan",
+                  foreground="#777").pack(side=tk.LEFT, padx=8)
+
+    def _lim_val(self, k):
+        try:
+            return float(self._lim[k].get())
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    def _apply_limit_boxes(self, ax):
+        x0, x1 = self._lim_val("x0"), self._lim_val("x1")
+        y0, y1 = self._lim_val("y0"), self._lim_val("y1")
+        if x0 is not None or x1 is not None:
+            cur = ax.get_xlim()
+            ax.set_xlim(x0 if x0 is not None else cur[0], x1 if x1 is not None else cur[1])
+        if y0 is not None or y1 is not None:
+            cur = ax.get_ylim()
+            ax.set_ylim(y0 if y0 is not None else cur[0], y1 if y1 is not None else cur[1])
+
+    def _disable_mpl_keymap(self):
+        """Drop matplotlib's default single-key bindings (f=fullscreen, p=pan, o=zoom,
+        g=grid, ...) so our F/M/Z/P over the canvas aren't shadowed by them."""
+        try:
+            import matplotlib
+            for k in ("keymap.fullscreen", "keymap.pan", "keymap.zoom", "keymap.grid",
+                      "keymap.grid_minor", "keymap.xscale", "keymap.yscale",
+                      "keymap.home", "keymap.save"):
+                if k in matplotlib.rcParams:
+                    matplotlib.rcParams[k] = []
+        except Exception:
+            pass
+
+    def _bind_plot_keys(self):
+        w = self.canvas.get_tk_widget()
+        w.bind("<Enter>", lambda e: w.focus_set(), add="+")
+        for key, fn in (("f", self._key_full), ("m", self._key_focus_limits),
+                        ("z", self._key_zoom), ("p", self._key_pan)):
+            for ks in (key, key.upper()):
+                w.bind("<KeyPress-{}>".format(ks), lambda e, f=fn: (f(), "break")[1])
+
+    def _key_focus_limits(self):
+        e = self._lim_entries.get("x0")
+        if e is not None:
+            try:
+                e.focus_set()
+                e.select_range(0, tk.END)
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _lims_close(a, b):
+        span = abs(b[1] - b[0]) or 1.0
+        return abs(a[0] - b[0]) < span * 1e-3 and abs(a[1] - b[1]) < span * 1e-3
+
+    def _key_full(self):
+        """Mestrenova 'F': two-stage reset. First reset X to the data view, then (if X
+        is already there) reset Y too — clearing any manual limit boxes as it goes.
+        Works whether the view was changed by the boxes or by mouse zoom/pan."""
+        ax = self.ax
+        if ax is None or not getattr(self, "_home_xlim", None):
+            return
+        if not self._lims_close(ax.get_xlim(), self._home_xlim):
+            self._lim["x0"].set(""); self._lim["x1"].set("")
+            ax.set_xlim(self._home_xlim)
+            self.canvas.draw_idle()
+        elif not self._lims_close(ax.get_ylim(), self._home_ylim):
+            self._lim["y0"].set(""); self._lim["y1"].set("")
+            ax.set_ylim(self._home_ylim)
+            self.canvas.draw_idle()
+
+    def _key_zoom(self):
+        if self._nav is not None:
+            try:
+                self._nav.zoom()   # toggle box-zoom (hold x / y while dragging = 1-axis)
+            except Exception:
+                pass
+
+    def _key_pan(self):
+        if self._nav is not None:
+            try:
+                self._nav.pan()    # toggle pan (hold x / y while dragging = 1-axis)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------ stacking
 
@@ -362,8 +480,13 @@ class BaseSpectrumWindow(tk.Toplevel):
             ax = self.fig.add_subplot(111)
             self.ax = ax
             self.plot(ax)
+            # Capture the data-driven view as 'home' (for the F reset) BEFORE any
+            # manual limit-box overrides are applied on top.
+            self._home_xlim = ax.get_xlim()
+            self._home_ylim = ax.get_ylim()
+            self._apply_limit_boxes(ax)
             if self._stacked:
-                ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+                ax.legend(loc="best", fontsize=8, framealpha=0.9)   # 'best' dodges the peaks
             else:
                 m = self.mols[0]
                 self.struct.show(0, m["name"], m.get("smiles"), m["color"])
@@ -1128,11 +1251,24 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
             ref = max(ref, max((abs(v) for v in trace), default=0.0))
         ref = ref or 1.0
 
+        # Give every trace a COMMON field range (+ extra tolerance) so widely-separated
+        # resonances — e.g. different g at W-band — share one x-axis instead of each
+        # line stopping at its own narrow window. Traces extend flat at their baseline.
+        clo = min(f[0] for _, f, _ in traces)
+        chi = max(f[-1] for _, f, _ in traces)
+        extra = (chi - clo) * 0.10 or 1.0
+        clo -= extra; chi += extra
+
         for i, (m, field, trace) in enumerate(traces):
             base = self.baseline(i, ref)
             m["_base"] = base
             ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
-            ax.plot(field, [v + base for v in trace], color=m["color"], lw=1.0, label=m["short"])
+            xs = [clo] + list(field) + [chi]
+            ys = [base] + [v + base for v in trace] + [base]
+            # g_iso in the (colour-coded) legend label — replaces the old permanent
+            # top-left text box, which would eventually collide with offset traces.
+            ax.plot(xs, ys, color=m["color"], lw=1.0,
+                    label="{}  g={:.4f}".format(m["short"], m["g_iso"]))
 
         # Line markers: draw for EVERY trace at its own baseline (works stacked too now),
         # each scaled to that trace's own peak so a marker never dwarfs the line.
@@ -1147,17 +1283,12 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
                     ax.vlines(bc, base, base + peak * (inten / imax),
                               color="#888888", linewidth=0.6, alpha=0.6)
 
+        ax.set_xlim(clo, chi)
         ax.set_xlabel("magnetic field (mT)")
         ax.set_ylabel(ylabel)
         ax.set_title("Simulated {} EPR spectrum".format(
             "powder (anisotropic)" if powder else "isotropic"))
-        if self._stacked:
-            gtxt = "\n".join("{}: g_iso={:.4f}".format(m["short"], m["g_iso"])
-                             for m in self.mols[:10])
-            ax.text(0.01, 0.99, gtxt, transform=ax.transAxes, va="top", ha="left",
-                    fontsize=8, family="monospace",
-                    bbox=dict(boxstyle="round", fc="white", ec="#cccccc", alpha=0.85))
-        else:
+        if not self._stacked:
             self._single_annotation(ax, self.mols[0], freq, powder)
 
     def _single_annotation(self, ax, m, freq, powder):
@@ -1303,12 +1434,21 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
             ref = max(ref, max((abs(v) for v in ys), default=0.0))
         ref = ref or 1.0
 
+        # Common RF range (+ tolerance) so stacked traces share one x-axis.
+        clo = min(x[0] for _, x, _ in traces)
+        chi = max(x[-1] for _, x, _ in traces)
+        extra = (chi - clo) * 0.08 or 1.0
+        clo -= extra; chi += extra
+
         for i, (m, xs, ys) in enumerate(traces):
             base = self.baseline(i, ref)
             m["_base"] = base
             if base or deriv:
                 ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
-            ax.plot(xs, [v + base for v in ys], color=m["color"], lw=1.0, label=m["short"])
+            xx = [clo] + list(xs) + [chi]
+            yy = [base] + [v + base for v in ys] + [base]
+            ax.plot(xx, yy, color=m["color"], lw=1.0, label=m["short"])
+        ax.set_xlim(clo, chi)
 
         if self.sticks_var.get():
             for m in self.mols:

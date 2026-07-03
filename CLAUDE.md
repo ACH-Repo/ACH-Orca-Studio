@@ -395,6 +395,22 @@ off the core path and gracefully degradable.
   toolbar does Save now). Public constructors unchanged (callers in `calculations_tab.py`).
   BLIND refactor (no GUI here) — headless-smoke-tested all 5 (construct/redraw/offset/mode
   toggles/markers/hover incl. single-mol), but wants a visual pass on ThinLinc.
+- **Plotter refinements** (same branch, on top of the foundation) — from a ThinLinc review:
+  (a) **matplotlib toolbar now actually shows** — was created with `pack_toolbar=False` (a
+  newer-mpl kwarg) inside a `try/except` that silently swallowed the error on older mpl; now
+  the version-agnostic `NavigationToolbar2Tk(canvas, nav_frame)` (auto-packs) into a bottom
+  frame reserved first. (b) **EPR/ENDOR common x-range** — each trace was simulated over its
+  own narrow field/RF window around its own B0, so at high bands (W) different g's gave
+  non-overlapping windows and fragmented lines; the UI now computes a shared min/max (+~10%
+  tolerance) and extends every trace flat at its baseline across it (no core change). (c) EPR
+  **g_iso folded into the colour-coded legend** (`label="000  g=2.0024"`, `loc="best"`) —
+  removed the permanent top-left g-list box that would collide with offset traces. (d) a
+  compact **x/y limit-box row** + **Mestrenova keys over the plot**: `F` two-stage reset (X to
+  the data view, then Y — clears the boxes; captured as `_home_xlim/_ylim` pre-override), `M`
+  focuses the x0 box, `Z`/`P` toggle mpl zoom/pan (hold x or y while dragging = one axis;
+  full h/v/box *cycling* not yet wired). Base `_disable_mpl_keymap()` drops mpl's default
+  f/p/o/g keys so ours aren't shadowed. TODO/asked-for: **blitting** the hover (currently a
+  full `draw_idle()` per mouse-move — a ThinLinc cost) and the full Z/P axis cycle.
 - **Plotter phase-A quick fixes** (same branch, committed first) — calc-tab right-click menu
   now **dismisses on click-away** (deferred `menu.grab_release()` to `<Unmap>` instead of
   firing it right after `tk_popup`, which on X11 left the menu posted-but-ungrabbed so it
