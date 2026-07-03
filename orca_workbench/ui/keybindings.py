@@ -22,10 +22,12 @@ class KeybindingsDialog(tk.Toplevel):
         self._on_change = on_change
         self._capturing = None    # action_id currently capturing a keypress, or None
         self._rows = {}           # action_id -> key button
+        self._reset_btns = {}     # action_id -> its Reset button (enabled iff customised)
 
         ttk.Label(self, text="Click a shortcut, then press the new key combination "
-                  "(Esc to cancel). Application shortcuts apply immediately; plot "
-                  "shortcuts apply to plot windows opened afterwards.  '*' = customised.",
+                  "(Esc to cancel). Application shortcuts apply immediately; plot shortcuts "
+                  "apply to plot windows opened afterwards. A customised shortcut's Reset "
+                  "button is enabled.",
                   wraplength=545, justify=tk.LEFT, foreground="#444").pack(
             side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
 
@@ -64,20 +66,23 @@ class KeybindingsDialog(tk.Toplevel):
                     row=r, column=0, sticky=tk.W, padx=(16, 8), pady=2)
                 key_btn = ttk.Button(parent, width=20, command=lambda a=aid: self._start_capture(a))
                 key_btn.grid(row=r, column=1, sticky=tk.W, pady=2)
-                ttk.Button(parent, text="Reset", width=6,
-                           command=lambda a=aid: self._reset_one(a)).grid(
-                    row=r, column=2, sticky=tk.W, padx=4, pady=2)
+                reset_btn = ttk.Button(parent, text="Reset", width=6,
+                                       command=lambda a=aid: self._reset_one(a))
+                reset_btn.grid(row=r, column=2, sticky=tk.W, padx=4, pady=2)
                 self._rows[aid] = key_btn
+                self._reset_btns[aid] = reset_btn
                 r += 1
         parent.columnconfigure(0, weight=1)
         self._refresh_all()
 
     def _refresh_all(self):
         for aid, btn in self._rows.items():
-            txt = keymap.humanize(keymap.sequence(aid))
-            if keymap.is_overridden(aid):
-                txt += "  *"
-            btn.configure(text=txt)
+            btn.configure(text=keymap.humanize(keymap.sequence(aid)))
+            rb = self._reset_btns.get(aid)
+            if rb is not None:
+                # Enabled Reset == this shortcut differs from its default (customised);
+                # cleaner than tacking a '*' onto the key text, which read as part of it.
+                rb.configure(state=tk.NORMAL if keymap.is_overridden(aid) else tk.DISABLED)
 
     def _start_capture(self, aid):
         if self._capturing and self._capturing in self._rows:
