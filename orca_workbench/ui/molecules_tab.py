@@ -2084,7 +2084,7 @@ class AvogadroPathDialog(tk.Toplevel):
             self.var.set(path)
 
     def _ok(self):
-        path = self.var.get().strip()
+        path = extprog_mod.strip_path_quotes(self.var.get())
         if not path:
             messagebox.showinfo("Empty", "Enter a path or command, or Cancel.", parent=self)
             return

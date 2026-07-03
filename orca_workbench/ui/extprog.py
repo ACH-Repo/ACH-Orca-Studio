@@ -23,10 +23,23 @@ from orca_workbench.core import config as config_mod
 from orca_workbench.ui.modal import make_modal
 
 
+def strip_path_quotes(s):
+    # type: (str) -> str
+    """Strip surrounding whitespace and a matched pair of quotes from a pasted path.
+    Windows' 'Copy as path' (Shift+right-click) wraps the path in double quotes, which
+    most programs then reject — and quotes are illegal in Windows filenames anyway, so
+    removing a symmetric surrounding pair is always safe."""
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("\"", "'"):
+        s = s[1:-1].strip()
+    return s
+
+
 def _is_usable(path):
     # type: (str) -> bool
     if not path:
         return False
+    path = strip_path_quotes(path)
     return os.path.isfile(path) or (shutil.which(path) is not None)
 
 
@@ -67,7 +80,7 @@ def program_path(key):
     (so view/edit 3D default to the same program and legacy keys still resolve).
     Empty string if nothing is set anywhere in the chain."""
     for k in _PATH_FALLBACKS.get(key, (key,)):
-        v = config_mod.get(k, "") or ""
+        v = strip_path_quotes(config_mod.get(k, "") or "")
         if v:
             return v
     return ""
@@ -111,7 +124,7 @@ class ProgramPathDialog(tk.Toplevel):
             self.var.set(path)
 
     def _ok(self):
-        path = self.var.get().strip()
+        path = strip_path_quotes(self.var.get())
         if not path:
             messagebox.showinfo("Empty", "Enter a path/command, Clear, or Cancel.", parent=self)
             return
@@ -190,7 +203,7 @@ class ExternalProgramsDialog(tk.Toplevel):
 
     def _save(self):
         for key, var in self._vars.items():
-            config_mod.set_value(key, var.get().strip())
+            config_mod.set_value(key, strip_path_quotes(var.get()))
         self.destroy()
 
 
