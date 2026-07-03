@@ -370,6 +370,36 @@ off the core path and gracefully degradable.
   that's reliable regardless. Tests: `parse_xyz_frames_text` in `tests/test_coords.py`
   (233 total).
 
+- **Plotter foundation: `BaseSpectrumWindow`** (branch `posthoc-properties`, `ui/spectra.py`)
+  — the five spectrum windows (IR/UV-Vis/NMR/EPR/ENDOR) were five ~250-line `tk.Toplevel`
+  clones with no shared base, so every chrome fix was 5-place whack-a-mole and they'd
+  drifted. Replaced with ONE `BaseSpectrumWindow` that owns all chrome; each subclass is now
+  ~data-prep + `add_controls(bar)` + `plot(ax)` (+ optional `add_summary`/`after_plot`/
+  `_on_motion`). What the base centralises / what it fixed:
+  (a) **Non-modal** window (dropped `make_modal` for the plots) → real WM decorations incl.
+  the **standard maximize button** (the custom "Maximize" did nothing on ThinLinc's WM —
+  `state("zoomed")`/`-zoomed` unsupported); the app also stays usable and multiple plots can
+  be open. (b) **Embedded matplotlib `NavigationToolbar2Tk`** (Home/Pan/Zoom/Save) below the
+  plot + a **slim top control row** (plot-specific widgets only) → fixes the horizontal
+  cut-off / too-many-buttons (replaced the custom axis-limit boxes + Save + Maximize).
+  (c) **Stack y-offset slider** (shown when >1 trace; `baseline(i, ref)` = `i·frac·ref`) for
+  a waterfall of any stacked plot, not just EPR. (d) **Colour-matched hover structure border**
+  (`_StructurePanel` wraps the image in a `tk.Frame` whose `highlightbackground` = the trace
+  colour). (e) **EPR/ENDOR line markers now draw per-trace even when stacked** (were gated
+  `not _stacked`), each scaled to its own trace peak, at its stacking baseline; EPR/ENDOR
+  hover adds `m["_base"]` so the y-match still works when offset. (f) **IR stick heights**:
+  the broadening kernels are peak-normalised (peak value 1.0), so an isolated line's curve
+  peaks at exactly its intensity — sticks now draw at height = raw intensity, not
+  `summed_ymax·frac` (which overshot wherever two lines overlapped). Dropped the per-window
+  `make_modal`/custom Save/Maximize; `_save_figure`/`_ask_image_format` kept (unused, MPL
+  toolbar does Save now). Public constructors unchanged (callers in `calculations_tab.py`).
+  BLIND refactor (no GUI here) — headless-smoke-tested all 5 (construct/redraw/offset/mode
+  toggles/markers/hover incl. single-mol), but wants a visual pass on ThinLinc.
+- **Plotter phase-A quick fixes** (same branch, committed first) — calc-tab right-click menu
+  now **dismisses on click-away** (deferred `menu.grab_release()` to `<Unmap>` instead of
+  firing it right after `tk_popup`, which on X11 left the menu posted-but-ungrabbed so it
+  only closed on an item click); and the structure hover border (carried into the base).
+
 ## Open work / TODO
 - The SLURM `--mem` line isn't driven by the global "memory per core" default (it lives
   in the submit-script template); if per-job `--mem` should scale with cores×maxcore,

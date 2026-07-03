@@ -1,17 +1,15 @@
-"""Simulated IR and NMR spectra windows (matplotlib embedded in Tk).
+"""Simulated spectrum windows (matplotlib embedded in Tk): IR, UV-Vis, NMR, EPR, ENDOR.
 
-IR: broadened spectrum vs wavenumber for one FREQ calc. Toggle absorbance vs
-transmission, optional stick lines, hover to read off the peaks near the cursor,
-a cropped structure image pinned to the top-right, and an imaginary-mode summary.
+All five share ONE foundation, `BaseSpectrumWindow`, which owns every bit of window
+chrome — a non-modal Toplevel with real WM decorations (the standard maximize button
+works), an embedded matplotlib navigation toolbar (Home/Pan/Zoom/Save), a slim custom
+control row plus a stack y-offset slider, the canvas, and a colour-matched hover
+structure panel — so a subclass only describes its data and how to draw its traces.
+Fix a layout / maximise / hover / stacking issue in the base once, not five times.
 
-NMR: overlaid simulated spectra for one or more NMR calcs of a chosen isotope,
-converted to chemical shift via a user-supplied reference shielding. A panel of
-colour-matched structure thumbnails sits beside the spectrum; hovering a peak
-highlights the molecule it belongs to. Adjustable x-range and image export.
-
-matplotlib is a soft dependency (already needed for live plots); structure
-images additionally need matplotlib's PNG reader (Pillow). Everything degrades
-gracefully if those are missing.
+matplotlib is a soft dependency (already needed for live plots); structure images
+additionally need matplotlib's PNG reader (Pillow). Everything degrades gracefully if
+those are missing.
 """
 
 import io
@@ -23,16 +21,26 @@ from typing import List, Optional
 from orca_workbench.core import spectra as S
 from orca_workbench.core import epr as EPR_sim
 from orca_workbench.ui.depict import render_smiles_png
-from orca_workbench.ui.modal import make_modal
+from orca_workbench.ui.modal import fit_to_content, make_modal
 
 
 def _load_mpl():
-    """Return the matplotlib pieces or raise with a friendly message."""
+    """Return the core matplotlib pieces or raise with a friendly message."""
     import matplotlib
     matplotlib.use("TkAgg")
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     return Figure, FigureCanvasTkAgg
+
+
+def _load_mpl_full():
+    """matplotlib pieces incl. the navigation toolbar, or raise with a message."""
+    import matplotlib
+    matplotlib.use("TkAgg")
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import (
+        FigureCanvasTkAgg, NavigationToolbar2Tk)
+    return Figure, FigureCanvasTkAgg, NavigationToolbar2Tk
 
 
 def pin_device_pixel_ratio(canvas):
@@ -43,12 +51,7 @@ def pin_device_pixel_ratio(canvas):
     ~1.2–1.5× too big and overflows the window — and a recompute on the next
     <Configure> makes it grow a moment after opening. Pinning the ratio to 1.0
     means the figure size is driven purely by the Tk widget size (matplotlib's
-    own resize handler fits it), independent of the UI font scaling.
-
-    We override `_set_device_pixel_ratio` to always apply 1.0: matplotlib's
-    <Configure> handler still recomputes the ratio from `tk scaling` and calls
-    this, but the override forces it back to 1.0 (reassigning the recompute
-    method itself wouldn't help — its binding captured the original)."""
+    own resize handler fits it), independent of the UI font scaling."""
     try:
         orig = canvas._set_device_pixel_ratio
         canvas._set_device_pixel_ratio = lambda ratio, _o=orig: _o(1.0)
@@ -138,72 +141,15 @@ def _smiles_to_array(smiles, size=(320, 240), crop=True):
     return arr
 
 
-def _place_structure_in_axes(ax, arr, anchor=(0.985, 0.985), box_align=(1.0, 1.0),
-                             target_h=110):
-    """Pin a structure image *inside* the plot axes at a fixed display height,
-    undistorted and clipped to the axes so it can't spill out. `anchor` is the
-    (x, y) position in axes fraction and `box_align` how the image box aligns to
-    it (e.g. (0.5, 1.0) = centred horizontally, top edge on the anchor)."""
-    if arr is None:
-        return None
-    try:
-        from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-    except Exception:
-        return None
-    zoom = float(target_h) / float(arr.shape[0])
-    oi = OffsetImage(arr, zoom=zoom)
-    ab = AnnotationBbox(oi, anchor, xycoords="axes fraction", box_alignment=box_align,
-                        frameon=False, pad=0.0, zorder=5)
-    ax.add_artist(ab)
-    try:
-        ab.set_clip_on(True)
-    except Exception:
-        pass
-    return ab
-
-
-# ----------------------------------------------------------- shared UI helpers
-
-class _AxisLimitControls(object):
-    """A tiny toolbar group of x0/x1/y0/y1 entry fields (blank = auto). Every plot
-    window creates one and calls `apply(ax)` at the end of its redraw, so any axis
-    limit can be pinned to an explicit data value while the rest stay auto-scaled."""
-
-    def __init__(self, bar, redraw_cb):
-        self.vars = {}
-        ttk.Label(bar, text="x:").pack(side=tk.LEFT, padx=(8, 0))
-        for k in ("x0", "x1"):
-            self.vars[k] = tk.StringVar()
-            e = ttk.Entry(bar, textvariable=self.vars[k], width=6)
-            e.pack(side=tk.LEFT, padx=1)
-            e.bind("<Return>", lambda _e: redraw_cb())
-        ttk.Label(bar, text="y:").pack(side=tk.LEFT, padx=(6, 0))
-        for k in ("y0", "y1"):
-            self.vars[k] = tk.StringVar()
-            e = ttk.Entry(bar, textvariable=self.vars[k], width=6)
-            e.pack(side=tk.LEFT, padx=1)
-            e.bind("<Return>", lambda _e: redraw_cb())
-        ttk.Button(bar, text="Set", width=4, command=redraw_cb).pack(side=tk.LEFT, padx=(2, 4))
-
-    def _f(self, k):
-        try:
-            return float(self.vars[k].get())
-        except (ValueError, TypeError):
-            return None
-
-    def apply(self, ax):
-        x0, x1 = self._f("x0"), self._f("x1")
-        y0, y1 = self._f("y0"), self._f("y1")
-        if x0 is not None or x1 is not None:
-            cur = ax.get_xlim()
-            ax.set_xlim(x0 if x0 is not None else cur[0], x1 if x1 is not None else cur[1])
-        if y0 is not None or y1 is not None:
-            cur = ax.get_ylim()
-            ax.set_ylim(y0 if y0 is not None else cur[0], y1 if y1 is not None else cur[1])
+# A consistent qualitative colour cycle for molecules.
+_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
+           "#e377c2", "#17becf", "#bcbd22", "#7f7f7f"]
 
 
 def _maximize_window(win):
-    """Best-effort maximise a Toplevel across platforms / window managers."""
+    """Best-effort maximise a Toplevel across platforms / window managers. (The
+    windows are non-modal with real decorations now, so the WM's own maximize
+    button is the primary path; this stays as a programmatic fallback.)"""
     for attempt in (lambda: win.state("zoomed"),
                     lambda: win.attributes("-zoomed", True)):
         try:
@@ -219,8 +165,8 @@ def _maximize_window(win):
 
 class _StructurePanel(ttk.Frame):
     """One fixed-width side panel showing a SINGLE molecule's 2D structure + name,
-    updated on hover. Replaces per-trace thumbnails: exactly one structure is on
-    screen at a time — whichever trace the cursor is over."""
+    updated on hover. Exactly one structure is on screen at a time — whichever trace
+    the cursor is over — and the image sits in a border coloured to match that trace."""
 
     _NEUTRAL = "#cccccc"
 
@@ -274,24 +220,208 @@ class _StructurePanel(ttk.Frame):
         self.img.image = None
 
 
+# --------------------------------------------------------------- the foundation
+
+class BaseSpectrumWindow(tk.Toplevel):
+    """Shared foundation for every spectrum window.
+
+    Owns all the window chrome so subclasses only describe their data and drawing:
+      * a NON-modal Toplevel with real WM decorations (the standard maximize button
+        works; the main app stays usable; several plots can be open at once),
+      * an embedded matplotlib navigation toolbar (Home / Pan / Zoom / Save),
+      * a slim custom control row (subclass widgets, packed left) plus Redraw / Close
+        and a stack y-offset slider (shown only when >1 trace), so the top bar can't
+        overflow the window,
+      * the canvas + a colour-matched hover structure panel,
+      * per-trace vertical stacking with an adjustable offset, and the shared
+        redraw / legend / structure / hover plumbing.
+
+    Subclass contract: populate self.mols (a list of trace dicts, each with at least
+    'name', 'short', 'color', 'smiles') in __init__, then call self._build_ui(...).
+    Implement add_controls(bar) and plot(ax); optionally override add_summary(),
+    after_plot(ax) and _on_motion(event) (the base provides _set_active / _clear_hover
+    and the self.baseline() stacking helper)."""
+
+    DEFAULT_GEOMETRY = "1150x720"
+
+    def __init__(self, parent, window_title):
+        super().__init__(parent)
+        self.title(window_title)
+        self.geometry(self.DEFAULT_GEOMETRY)
+        self._parent = parent
+        self.mols = []            # subclass fills this before _build_ui()
+        self._stacked = False
+        self._active = None
+        self._hover_artists = []
+        self.ax = None
+        self.fig = None
+        self.canvas = None
+        self.struct = None
+        self.offset_var = None
+        self._mpl_ok = True
+        try:
+            self._Figure, self._Canvas, self._NavToolbar = _load_mpl_full()
+        except Exception as e:
+            self._mpl_ok = False
+            self.destroy()
+            _mpl_unavailable_window(parent, e)
+
+    # -------------------------------------------------------- construction
+
+    def _build_ui(self, empty_message=None):
+        """Assemble the toolbar + body once self.mols is populated. Returns False
+        (after showing a small placeholder) when there's nothing to plot or mpl is
+        unavailable, so the subclass __init__ can just `return`."""
+        if not self._mpl_ok:
+            return False
+        if not self.mols:
+            ttk.Label(self, text=empty_message or "Nothing to plot.").pack(padx=20, pady=20)
+            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
+            fit_to_content(self)
+            return False
+        self._stacked = len(self.mols) > 1
+
+        bar = ttk.Frame(self)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 2))
+        self._bar = bar
+        self.add_controls(bar)                       # subclass widgets (packed LEFT)
+        # shared right-hand controls
+        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT, padx=(2, 0))
+        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.RIGHT, padx=2)
+        self.offset_var = tk.DoubleVar(value=0.0)
+        if self._stacked:
+            ttk.Scale(bar, from_=0.0, to=1.5, orient=tk.HORIZONTAL, length=110,
+                      variable=self.offset_var,
+                      command=lambda _v: self._redraw()).pack(side=tk.RIGHT, padx=(0, 4))
+            ttk.Label(bar, text="Stack offset:").pack(side=tk.RIGHT, padx=(10, 2))
+
+        self.add_summary()                           # optional subclass summary line
+
+        body = ttk.Frame(self)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.struct = _StructurePanel(body, width=300)
+        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
+        left = ttk.Frame(body)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.fig = self._Figure(figsize=(8.6, 5.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
+        self.canvas = self._Canvas(self.fig, master=left)
+        pin_device_pixel_ratio(self.canvas)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # Standard matplotlib toolbar below the plot: Home / Back / Forward / Pan /
+        # Zoom / Save. Keeps the top control row slim (replaces custom axis-limit
+        # boxes + Save + Maximize with familiar, compact tools).
+        try:
+            nav = self._NavToolbar(self.canvas, left, pack_toolbar=False)
+            nav.update()
+            nav.pack(side=tk.BOTTOM, fill=tk.X)
+        except Exception:
+            pass
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+
+        fit_to_content(self)     # non-modal: keep real WM decorations (maximize button)
+        self.after(0, self._first_draw)
+        return True
+
+    def _first_draw(self):
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        self._redraw()
+
+    # ------------------------------------------------------------ stacking
+
+    def _offset_frac(self):
+        try:
+            return float(self.offset_var.get()) if self.offset_var is not None else 0.0
+        except Exception:
+            return 0.0
+
+    def baseline(self, i, ref_amplitude):
+        """Vertical baseline for trace i: i * offset_fraction * reference amplitude.
+        0 for every trace when the slider is at 0 (plain overlay)."""
+        return i * self._offset_frac() * (ref_amplitude or 1.0)
+
+    def stack_top(self, ref_amplitude):
+        """Baseline of the topmost stacked trace (0 when not offset)."""
+        return self.baseline(len(self.mols) - 1, ref_amplitude)
+
+    # ------------------------------------------------------ redraw skeleton
+
+    def _redraw(self):
+        if not getattr(self, "fig", None):
+            return
+        try:
+            self.fig.clear()
+            self._hover_artists = []
+            self._active = None
+            ax = self.fig.add_subplot(111)
+            self.ax = ax
+            self.plot(ax)
+            if self._stacked:
+                ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+            else:
+                m = self.mols[0]
+                self.struct.show(0, m["name"], m.get("smiles"), m["color"])
+            self.after_plot(ax)
+            self.canvas.draw()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    # --------------------------------------------------------- hover helpers
+
+    def _clear_hover(self):
+        for a in self._hover_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._hover_artists = []
+
+    def _set_active(self, mi):
+        if mi == self._active:
+            return
+        self._active = mi
+        if mi is None:
+            if self._stacked:
+                self.struct.clear()
+        else:
+            m = self.mols[mi]
+            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
+
+    # --------------------------------------------------------- subclass hooks
+
+    def add_controls(self, bar):
+        raise NotImplementedError
+
+    def plot(self, ax):
+        raise NotImplementedError
+
+    def add_summary(self):
+        pass
+
+    def after_plot(self, ax):
+        pass
+
+    def _on_motion(self, event):
+        pass
+
+
 # --------------------------------------------------------------------------- IR
 
-class IRSpectrumWindow(tk.Toplevel):
+class IRSpectrumWindow(BaseSpectrumWindow):
     def __init__(self, parent, title, entries):
         # type: (tk.Misc, str, List[dict]) -> None
         # entries: [{name, smiles, centers, intensities, freqs}] — one or more,
         # stacked as colour-matched traces.
-        super().__init__(parent)
-        self.title("IR spectrum — {}".format(title))
-        self.geometry("1100x700")
-        try:
-            Figure, FigureCanvasTkAgg = _load_mpl()
-        except Exception as e:
-            self.destroy()
-            _mpl_unavailable_window(parent, e)
+        super().__init__(parent, "IR spectrum - {}".format(title))
+        if not self._mpl_ok:
             return
-
-        self.mols = []
         for idx, e in enumerate(entries):
             pairs = [(f, i) for f, i in zip(e["centers"], e["intensities"]) if abs(f) > 1.0]
             if not pairs:
@@ -307,144 +437,102 @@ class IRSpectrumWindow(tk.Toplevel):
                 "smiles": e.get("smiles"),
                 "imag": imag,
             })
-        self._stacked = len(self.mols) > 1
-        self._active = None
-        self._hover_artists = []
+        self.fwhm_var = tk.DoubleVar(value=20.0)
+        self.sticks_var = tk.BooleanVar(value=False)   # sticks OFF by default
+        self.mode_var = tk.StringVar(value="absorbance")
         self._ymax = 1.0
+        self._build_ui("No vibrational modes with IR intensity found.")
 
-        if not self.mols:
-            ttk.Label(self, text="No vibrational modes with IR intensity found.").pack(padx=20, pady=20)
-            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
-            make_modal(self, parent)
-            return
-
-        # Imaginary-mode summary, combined across molecules.
+    def add_summary(self):
         if sum(len(m["imag"]) for m in self.mols) == 0:
-            summary = "All vibrational frequencies >= 0 - genuine minima."
-            summary_fg = "#1a7a1a"
+            summary, fg = "All vibrational frequencies >= 0 - genuine minima.", "#1a7a1a"
         else:
             bits = ["{}: {}".format(m["short"], ", ".join("{:.1f}".format(f) for f in m["imag"]))
                     for m in self.mols if m["imag"]]
             summary = "Imaginary frequency(ies) - NOT a minimum: " + "; ".join(bits)
-            summary_fg = "#b00000"
+            fg = "#b00000"
+        ttk.Label(self, text=summary, foreground=fg).pack(side=tk.TOP, anchor=tk.W, padx=10)
 
-        # ---- controls ----
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+    def add_controls(self, bar):
         ttk.Label(bar, text="FWHM (cm^-1):").pack(side=tk.LEFT)
-        self.fwhm_var = tk.DoubleVar(value=20.0)
         sp = ttk.Spinbox(bar, from_=2, to=80, increment=2, width=6, textvariable=self.fwhm_var,
                          command=self._redraw)
         sp.pack(side=tk.LEFT, padx=6)
-        sp.bind("<Return>", lambda e: self._redraw())          # Enter confirms the typed value
-        self.sticks_var = tk.BooleanVar(value=False)            # sticks OFF by default
+        sp.bind("<Return>", lambda e: self._redraw())
         ttk.Checkbutton(bar, text="Stick lines", variable=self.sticks_var,
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
-        self.mode_var = tk.StringVar(value="absorbance")
         self.mode_btn = ttk.Button(bar, text="Show: Absorbance", command=self._toggle_mode)
         self.mode_btn.pack(side=tk.LEFT, padx=6)
-        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
-        self._axlim = _AxisLimitControls(bar, self._redraw)
-        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
-
-        ttk.Label(self, text=summary, foreground=summary_fg).pack(
-            side=tk.TOP, anchor=tk.W, padx=10, pady=(4, 0))
-
-        body = ttk.Frame(self)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
-        self.struct = _StructurePanel(body, width=300)
-        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
-        self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
-        try:
-            self.fig.set_layout_engine("tight")
-        except Exception:
-            pass
-        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
-        pin_device_pixel_ratio(self.canvas)
-        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.after(0, self._first_draw)
-        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
-        make_modal(self, parent)
-
-    def _first_draw(self):
-        self.update_idletasks()
-        self._redraw()
 
     def _toggle_mode(self):
         self.mode_var.set("transmission" if self.mode_var.get() == "absorbance" else "absorbance")
         self.mode_btn.configure(text="Show: " + self.mode_var.get().capitalize())
         self._redraw()
 
-    def _stick_span(self, frac):
-        """(y0, y1) for a stick of relative height frac in the current mode."""
-        if self.mode_var.get() == "transmission":
-            return (100.0, 100.0 * (1.0 - frac))
-        return (0.0, self._ymax * frac)
+    def _imax_all(self):
+        return max((m.get("_imax", 1.0) for m in self.mols), default=1.0) or 1.0
 
-    def _redraw(self):
+    def _stick_span(self, it, base, transmission):
+        """(y0, y1) for a stick of raw intensity `it` above baseline `base`.
+
+        Absorbance: peak-normalised kernels mean an isolated line's broadened curve
+        peaks at exactly `it`, so a stick of height `it` matches the curve and never
+        overshoots it. (The old code scaled sticks to the SUMMED-curve max, which
+        inflated wherever two lines overlapped — the 'sticks too tall' bug.)"""
+        if transmission:
+            frac = it / self._imax_all()
+            return (base + 100.0, base + 100.0 * (1.0 - frac))
+        return (base, base + it)
+
+    def plot(self, ax):
         fwhm = max(1.0, float(self.fwhm_var.get()))
         all_centers = [c for m in self.mols for c in m["centers"]]
         lo, hi = S.auto_range(all_centers, min_pad=80.0)
         transmission = self.mode_var.get() == "transmission"
-
-        self.fig.clear()
-        self._hover_artists = []
-        ax = self.fig.add_subplot(111)
-        self.ax = ax
+        self._transmission = transmission
 
         ymax = 0.0
+        curves = []
         for m in self.mols:
             xs, ys = S.broaden(m["centers"], m["intens"], lo, hi, n=1500, fwhm=fwhm)
             m["_imax"] = max(m["intens"]) or 1.0
+            curves.append((m, xs, ys))
+            ymax = max(ymax, max(ys) if ys else 0.0)
+        self._ymax = ymax or 1.0
+        ref = 100.0 if transmission else self._ymax
+
+        for i, (m, xs, ys) in enumerate(curves):
+            base = self.baseline(i, ref)
+            m["_base"] = base
             if transmission:
                 ypk = max(ys) or 1.0
-                tvals = [100.0 * (1.0 - y / ypk) for y in ys]
+                tvals = [base + 100.0 * (1.0 - y / ypk) for y in ys]
                 ax.plot(xs, tvals, color=m["color"], lw=0.8, label=m["short"])
             else:
-                ax.plot(xs, ys, color=m["color"], lw=0.8, label=m["short"])
-                ymax = max(ymax, max(ys) if ys else 0.0)
-        if transmission:
-            ax.set_ylim(-2.0, 102.0)
-            ax.set_ylabel("transmittance (%)")
-        else:
-            self._ymax = ymax or 1.0
-            ax.set_ylim(0, self._ymax * 1.12)
-            ax.set_ylabel("IR absorbance (a.u.)")
+                ax.plot(xs, [y + base for y in ys], color=m["color"], lw=0.8, label=m["short"])
 
         if self.sticks_var.get():
-            for m in self.mols:
+            for i, (m, xs, ys) in enumerate(curves):
+                base = m["_base"]
                 for c, it in zip(m["centers"], m["intens"]):
-                    y0, y1 = self._stick_span(it / m["_imax"])
+                    y0, y1 = self._stick_span(it, base, transmission)
                     ax.vlines(c, y0, y1, color=m["color"], linewidth=0.5, alpha=0.6)
 
-        ax.set_xlim(hi, lo)  # IR convention: high wavenumber on the left
+        if transmission:
+            ax.set_ylim(-2.0, 102.0 + self.stack_top(ref))
+            ax.set_ylabel("transmittance (%)")
+        else:
+            ax.set_ylim(0, (self._ymax + self.stack_top(ref)) * 1.12)
+            ax.set_ylabel("IR absorbance (a.u.)")
+
+        ax.set_xlim(hi, lo)   # IR convention: high wavenumber on the left
         ax.set_xlabel(r"wavenumber (cm$^{-1}$)")
         ax.set_title("Simulated IR spectrum")
-        if self._stacked:
-            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
-        else:
-            m = self.mols[0]
-            self.struct.show(0, m["name"], m.get("smiles"), m["color"])
-
-        if getattr(self, "_axlim", None):
-            self._axlim.apply(self.fig.gca())
-        self.canvas.draw()
-
-    def _clear_hover(self):
-        for a in self._hover_artists:
-            try:
-                a.remove()
-            except Exception:
-                pass
-        self._hover_artists = []
 
     def _on_motion(self, event):
-        ax = getattr(self, "ax", None)
+        ax = self.ax
         if ax is None:
-            return  # first draw hasn't run yet (deferred); nothing to hover
+            return
         if event.inaxes is not ax or event.xdata is None:
             if self._hover_artists:
                 self._clear_hover(); self.canvas.draw_idle()
@@ -453,7 +541,6 @@ class IRSpectrumWindow(tk.Toplevel):
             return
         x0, x1 = ax.get_xlim()
         tol = abs(x1 - x0) * 0.01 or 5.0
-        # nearest peak across molecules -> which molecule the cursor is over
         best, best_d = None, 1e9
         for mi, m in enumerate(self.mols):
             for c in m["centers"]:
@@ -468,11 +555,10 @@ class IRSpectrumWindow(tk.Toplevel):
             return
         m = self.mols[best]
         near = [(c, it) for c, it in zip(m["centers"], m["intens"]) if abs(c - event.xdata) <= tol]
-        # On-hover sticks only make sense for a single spectrum; in a stacked
-        # view they'd be ambiguous across molecules, so skip them there.
+        # On-hover sticks only make sense for a single spectrum; skip in stacked view.
         if not self._stacked:
             for c, it in near:
-                y0, y1 = self._stick_span(it / m["_imax"])
+                y0, y1 = self._stick_span(it, m.get("_base", 0.0), self._transmission)
                 self._hover_artists.append(
                     ax.vlines(c, y0, y1, color=(0.05, 0.05, 0.05), linewidth=0.9))
         near_sorted = sorted(near, key=lambda t: t[0], reverse=True)
@@ -485,44 +571,23 @@ class IRSpectrumWindow(tk.Toplevel):
             self._set_active(best)
         self.canvas.draw_idle()
 
-    def _set_active(self, mi):
-        if mi == self._active:
-            return
-        self._active = mi
-        if mi is None:
-            self.struct.clear()
-        else:
-            m = self.mols[mi]
-            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
-
-    def _save_image(self):
-        _save_figure(self.fig, self)
-
 
 # ------------------------------------------------------------------------ UV-Vis
 
 _EV_NM = 1239.841984   # eV*nm: E[eV] = _EV_NM / lambda[nm]
 
 
-class UVVisSpectrumWindow(tk.Toplevel):
-    """Simulated UV-Vis absorption from one or more TD-DFT calcs: oscillator-
-    strength sticks Gaussian-broadened into bands, x-axis in nm (default) or eV,
-    several molecules stacked as colour-matched traces with a hover structure panel."""
+class UVVisSpectrumWindow(BaseSpectrumWindow):
+    """Simulated UV-Vis absorption from one or more TD-DFT calcs: oscillator-strength
+    sticks Gaussian-broadened into bands, x-axis in nm (default) or eV, several
+    molecules stacked as colour-matched traces with a hover structure panel."""
 
     def __init__(self, parent, title, entries):
         # type: (tk.Misc, str, List[dict]) -> None
         # entries: [{name, smiles, states:[{wavelength_nm, energy_eV, fosc}]}]
-        super().__init__(parent)
-        self.title("UV-Vis spectrum - {}".format(title))
-        self.geometry("1100x700")
-        try:
-            Figure, FigureCanvasTkAgg = _load_mpl()
-        except Exception as e:
-            self.destroy()
-            _mpl_unavailable_window(parent, e)
+        super().__init__(parent, "UV-Vis spectrum - {}".format(title))
+        if not self._mpl_ok:
             return
-
-        self.mols = []
         for idx, e in enumerate(entries):
             states = [s for s in e.get("states", []) if s.get("wavelength_nm")]
             if not states:
@@ -536,59 +601,23 @@ class UVVisSpectrumWindow(tk.Toplevel):
                 "fosc": [s.get("fosc") or 0.0 for s in states],
                 "smiles": e.get("smiles"),
             })
-        self._stacked = len(self.mols) > 1
-        self._active = None
-        self._hover_artists = []
-        self._ymax = 1.0
-
-        if not self.mols:
-            ttk.Label(self, text="No excited states found in the selected calculation(s).").pack(
-                padx=20, pady=20)
-            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
-            make_modal(self, parent)
-            return
-
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
         self.axis_var = tk.StringVar(value="nm")
+        self.fwhm_var = tk.DoubleVar(value=20.0)
+        self.sticks_var = tk.BooleanVar(value=True)
+        self._ymax = 1.0
+        self._build_ui("No excited states found in the selected calculation(s).")
+
+    def add_controls(self, bar):
         ttk.Label(bar, text="x-axis:").pack(side=tk.LEFT)
         self.axis_btn = ttk.Button(bar, text="Wavelength (nm)", command=self._toggle_axis)
         self.axis_btn.pack(side=tk.LEFT, padx=6)
         ttk.Label(bar, text="FWHM:").pack(side=tk.LEFT, padx=(10, 0))
-        self.fwhm_var = tk.DoubleVar(value=20.0)
         sp = ttk.Spinbox(bar, from_=1, to=200, increment=1, width=6, textvariable=self.fwhm_var,
                          command=self._redraw)
         sp.pack(side=tk.LEFT, padx=6)
         sp.bind("<Return>", lambda e: self._redraw())
-        self.sticks_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text="Stick lines", variable=self.sticks_var,
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
-        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
-        self._axlim = _AxisLimitControls(bar, self._redraw)
-        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
-
-        body = ttk.Frame(self)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
-        self.struct = _StructurePanel(body, width=300)
-        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
-        self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
-        try:
-            self.fig.set_layout_engine("tight")
-        except Exception:
-            pass
-        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
-        pin_device_pixel_ratio(self.canvas)
-        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.after(0, self._first_draw)
-        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
-        make_modal(self, parent)
-
-    def _first_draw(self):
-        self.update_idletasks()
-        self._redraw()
 
     def _centers(self, m):
         return m["nm"] if self.axis_var.get() == "nm" else m["ev"]
@@ -604,7 +633,7 @@ class UVVisSpectrumWindow(tk.Toplevel):
             self.fwhm_var.set(20.0)
         self._redraw()
 
-    def _redraw(self):
+    def plot(self, ax):
         fwhm = max(0.001, float(self.fwhm_var.get()))
         nm_axis = self.axis_var.get() == "nm"
         all_centers = [c for m in self.mols for c in self._centers(m)]
@@ -612,58 +641,44 @@ class UVVisSpectrumWindow(tk.Toplevel):
         if nm_axis:
             lo = max(0.0, lo)
 
-        self.fig.clear()
-        self._hover_artists = []
-        ax = self.fig.add_subplot(111)
-        self.ax = ax
-
         ymax = 0.0
+        curves = []
         for m in self.mols:
             xs, ys = S.broaden(self._centers(m), m["fosc"], lo, hi, n=1400, fwhm=fwhm,
                                shape="gaussian")
-            ax.plot(xs, ys, color=m["color"], lw=1.0, label=m["short"])
-            ymax = max(ymax, max(ys) if ys else 0.0)
             m["_fmax"] = max(m["fosc"]) or 1.0
+            curves.append((m, xs, ys))
+            ymax = max(ymax, max(ys) if ys else 0.0)
         self._ymax = ymax or 1.0
-        ax.set_ylim(0, self._ymax * 1.12)
+        ref = self._ymax
+
+        for i, (m, xs, ys) in enumerate(curves):
+            base = self.baseline(i, ref)
+            m["_base"] = base
+            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.0, label=m["short"])
 
         if self.sticks_var.get():
             for m in self.mols:
+                base = m["_base"]
                 for c, f in zip(self._centers(m), m["fosc"]):
                     if f <= 0:
                         continue
-                    ax.vlines(c, 0.0, self._ymax * (f / m["_fmax"]),
+                    ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
                               color=m["color"], linewidth=0.6, alpha=0.6)
 
         ax.set_xlim(lo, hi)
+        ax.set_ylim(0, (self._ymax + self.stack_top(ref)) * 1.12)
         ax.set_xlabel("wavelength (nm)" if nm_axis else "energy (eV)")
         ax.set_ylabel("oscillator strength / absorbance (a.u.)")
         ax.set_title("Simulated UV-Vis spectrum")
-        if self._stacked:
-            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
-        else:
-            m = self.mols[0]
-            self.struct.show(0, m["name"], m.get("smiles"), m["color"])
-        if getattr(self, "_axlim", None):
-            self._axlim.apply(self.fig.gca())
-        self.canvas.draw()
-
-    def _clear_hover(self):
-        for a in self._hover_artists:
-            try:
-                a.remove()
-            except Exception:
-                pass
-        self._hover_artists = []
 
     def _on_motion(self, event):
-        ax = getattr(self, "ax", None)
+        ax = self.ax
         if ax is None:
             return
         if event.inaxes is not ax or event.xdata is None:
             if self._hover_artists:
-                self._clear_hover()
-                self.canvas.draw_idle()
+                self._clear_hover(); self.canvas.draw_idle()
             if self._stacked:
                 self._set_active(None)
             return
@@ -686,11 +701,12 @@ class UVVisSpectrumWindow(tk.Toplevel):
         near = [(c, f) for c, f in zip(self._centers(m), m["fosc"])
                 if abs(c - event.xdata) <= tol]
         if not self._stacked:
+            base = m.get("_base", 0.0)
             for c, f in near:
                 if f <= 0:
                     continue
                 self._hover_artists.append(
-                    ax.vlines(c, 0.0, self._ymax * (f / m["_fmax"]),
+                    ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
                               color=(0.05, 0.05, 0.05), linewidth=0.9))
         text = "\n".join("{:.1f} {}   f={:.3f}".format(c, unit, f)
                          for c, f in sorted(near, key=lambda t: t[0]))
@@ -702,19 +718,6 @@ class UVVisSpectrumWindow(tk.Toplevel):
         if self._stacked:
             self._set_active(best)
         self.canvas.draw_idle()
-
-    def _set_active(self, mi):
-        if mi == self._active:
-            return
-        self._active = mi
-        if mi is None:
-            self.struct.clear()
-        else:
-            m = self.mols[mi]
-            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
-
-    def _save_image(self):
-        _save_figure(self.fig, self)
 
 
 # -------------------------------------------------------------------------- NMR
@@ -812,29 +815,15 @@ class NMROptionsDialog(tk.Toplevel):
         self.destroy()
 
 
-# A consistent qualitative colour cycle for molecules.
-_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
-           "#e377c2", "#17becf", "#bcbd22", "#7f7f7f"]
-
-
-class NMRSpectrumWindow(tk.Toplevel):
-    """entries: list of dicts with keys name, smiles, shieldings (floats for
-    the chosen element). nucleus_label e.g. '1H' is for display; reference sets
-    the axis (δ vs raw σ)."""
+class NMRSpectrumWindow(BaseSpectrumWindow):
+    """entries: list of dicts with keys name, smiles, shieldings (floats for the
+    chosen element). nucleus_label e.g. '1H' is for display; reference sets the axis
+    (δ vs raw σ)."""
 
     def __init__(self, parent, entries, nucleus_label, reference):
-        super().__init__(parent)
-        self.title("NMR spectrum — {}".format(nucleus_label))
-        self.geometry("1200x760")
-        self._resize_after = None
-        try:
-            Figure, FigureCanvasTkAgg = _load_mpl()
-        except Exception as e:
-            self.destroy()
-            _mpl_unavailable_window(parent, e)
+        super().__init__(parent, "NMR spectrum - {}".format(nucleus_label))
+        if not self._mpl_ok:
             return
-
-        self.mols = []
         for idx, e in enumerate(entries):
             shifts = [S.nmr_shift(s, reference) for s in e["shieldings"]]
             if not shifts:
@@ -849,26 +838,19 @@ class NMRSpectrumWindow(tk.Toplevel):
             })
         self.nucleus_label = nucleus_label
         self.reference = reference
-        self._user_xlim = None
-
-        if not self.mols:
-            ttk.Label(self, text="No {} nuclei found in the selected calculations."
-                      .format(nucleus_label)).pack(padx=20, pady=20)
-            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
-            make_modal(self, parent)
-            return
-
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
-        ttk.Label(bar, text="FWHM (ppm):").pack(side=tk.LEFT)
         self.fwhm_var = tk.DoubleVar(value=0.2)
+        self.xmin_var = tk.StringVar(value="")
+        self.xmax_var = tk.StringVar(value="")
+        self._user_xlim = None
+        self._build_ui("No {} nuclei found in the selected calculations.".format(nucleus_label))
+
+    def add_controls(self, bar):
+        ttk.Label(bar, text="FWHM (ppm):").pack(side=tk.LEFT)
         sp = ttk.Spinbox(bar, from_=0.02, to=5.0, increment=0.05, width=6, textvariable=self.fwhm_var,
                          command=self._redraw)
         sp.pack(side=tk.LEFT, padx=6)
         sp.bind("<Return>", lambda e: self._redraw())
         ttk.Label(bar, text="x-range:").pack(side=tk.LEFT, padx=(12, 2))
-        self.xmin_var = tk.StringVar(value="")
-        self.xmax_var = tk.StringVar(value="")
         e1 = ttk.Entry(bar, textvariable=self.xmin_var, width=7); e1.pack(side=tk.LEFT)
         ttk.Label(bar, text="to").pack(side=tk.LEFT, padx=2)
         e2 = ttk.Entry(bar, textvariable=self.xmax_var, width=7); e2.pack(side=tk.LEFT)
@@ -876,36 +858,6 @@ class NMRSpectrumWindow(tk.Toplevel):
             e.bind("<Return>", lambda ev: self._apply_xrange())
         ttk.Button(bar, text="Apply", command=self._apply_xrange).pack(side=tk.LEFT, padx=3)
         ttk.Button(bar, text="Auto", command=self._auto_xrange).pack(side=tk.LEFT)
-        ttk.Label(bar, text="(hover a peak to highlight its molecule)",
-                  foreground="#666").pack(side=tk.LEFT, padx=12)
-        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
-        self._axlim = _AxisLimitControls(bar, self._redraw)
-        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
-
-        body = ttk.Frame(self)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
-        self.struct = _StructurePanel(body, width=300)
-        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
-        self.fig = Figure(figsize=(9.0, 6.0), dpi=100)
-        try:
-            self.fig.set_layout_engine("tight")
-        except Exception:
-            pass
-        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
-        pin_device_pixel_ratio(self.canvas)
-        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._active = None
-        # Populate once realised; matplotlib's resize keeps it fitted (device
-        # ratio pinned above).
-        self.after(0, self._first_draw)
-        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
-        make_modal(self, parent)
-
-    def _first_draw(self):
-        self.update_idletasks()
-        self._redraw()
 
     def _auto_range_vals(self):
         all_shifts = [s for m in self.mols for s in m["shifts"]]
@@ -933,85 +885,66 @@ class NMRSpectrumWindow(tk.Toplevel):
         self.xmin_var.set(""); self.xmax_var.set("")
         self._redraw()
 
-    def _redraw(self):
+    def plot(self, ax):
         fwhm = max(0.01, float(self.fwhm_var.get()))
-        # Determine the view range first (user override, else auto), and broaden
-        # the curves over that whole range (plus a margin) so they fill the axis
-        # rather than stopping at the data's auto-range edges.
+        # Determine the view range first (user override, else auto), and broaden the
+        # curves over that whole range (plus a margin) so they fill the axis rather
+        # than stopping at the data's auto-range edges.
         if self._user_xlim is not None:
             view_lo, view_hi = min(self._user_xlim), max(self._user_xlim)
         else:
             view_lo, view_hi = self._auto_range_vals()
         margin = (view_hi - view_lo) * 0.05 or 0.5
         grid_lo, grid_hi = view_lo - margin, view_hi + margin
-
-        self.fig.clear()
-        self.ax = self.fig.add_subplot(111)
+        self._view = (view_lo, view_hi)
 
         ymax = 0.0
+        curves = []
         for m in self.mols:
             xs, ys = S.broaden(m["shifts"], None, grid_lo, grid_hi, n=1600, fwhm=fwhm)
-            self.ax.plot(xs, ys, color=m["color"], lw=1.4, label=m["short"])
+            curves.append((m, xs, ys))
             if ys:
                 ymax = max(ymax, max(ys))
+        ref = ymax or 1.0
+        for i, (m, xs, ys) in enumerate(curves):
+            base = self.baseline(i, ref)
+            m["_base"] = base
+            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.4, label=m["short"])
 
         xlabel = ("chemical shift δ (ppm)" if self.reference is not None
                   else "isotropic shielding σ (ppm)")
         # NMR convention: high shift / low shielding on the left (axis reversed).
-        self.ax.set_xlim(view_hi, view_lo)
-        self.ax.set_ylim(0, (ymax or 1.0) * 1.12)   # fit the tallest peak
-        self.ax.set_xlabel(xlabel)
-        self.ax.set_ylabel("intensity (a.u.)")
-        self.ax.set_title("Simulated {} NMR".format(self.nucleus_label))
-        # Structures are no longer in the axes (one shared panel shows the hovered
-        # trace), so a compact legend can identify the traces without crowding.
-        if len(self.mols) > 1:
-            self.ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+        ax.set_xlim(view_hi, view_lo)
+        ax.set_ylim(0, (ref + self.stack_top(ref)) * 1.12)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("intensity (a.u.)")
+        ax.set_title("Simulated {} NMR".format(self.nucleus_label))
 
-        self._active = None
-        self.struct.clear()
-        if getattr(self, "_axlim", None):
-            self._axlim.apply(self.fig.gca())
-        self.canvas.draw()
-        # reflect the active x-range in the entry boxes
-        x0, x1 = self.ax.get_xlim()
-        if self._user_xlim is None:
-            self.xmin_var.set("{:.2f}".format(min(x0, x1)))
-            self.xmax_var.set("{:.2f}".format(max(x0, x1)))
+    def after_plot(self, ax):
+        # reflect the active x-range in the entry boxes (only when auto)
+        if self._user_xlim is None and getattr(self, "_view", None):
+            lo, hi = self._view
+            self.xmin_var.set("{:.2f}".format(min(lo, hi)))
+            self.xmax_var.set("{:.2f}".format(max(lo, hi)))
 
     def _on_motion(self, event):
-        ax = getattr(self, "ax", None)
+        ax = self.ax
         if ax is None:
-            return  # first draw hasn't run yet (deferred); nothing to hover
+            return
         if event.inaxes is not ax or event.xdata is None:
             self._set_active(None)
             return
-        # Work in data units (ppm) so it's symmetric about each peak and
-        # independent of the display's pixel scaling.
+        # Work in data units (ppm) so it's symmetric about each peak and independent
+        # of the display's pixel scaling.
         x0, x1 = ax.get_xlim()
         tol = abs(x1 - x0) * 0.025 or 0.5
-        best = None
-        best_d = 1e9
+        best, best_d = None, 1e9
         for mi, m in enumerate(self.mols):
             for sh in m["shifts"]:
                 d = abs(sh - event.xdata)
                 if d < best_d:
-                    best_d = d
-                    best = mi
+                    best_d, best = d, mi
         self._set_active(best if best_d <= tol else None)
-
-    def _set_active(self, mi):
-        if mi == self._active:
-            return
-        self._active = mi
-        if mi is None:
-            self.struct.clear()
-        else:
-            m = self.mols[mi]
-            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
-
-    def _save_image(self):
-        _save_figure(self.fig, self)
 
 
 _KNOWN_IMG_EXT = {".png", ".pdf", ".svg", ".svgz", ".jpg", ".jpeg",
@@ -1020,8 +953,8 @@ _KNOWN_IMG_EXT = {".png", ".pdf", ".svg", ".svgz", ".jpg", ".jpeg",
 
 def _ask_image_format(parent):
     # type: (tk.Misc) -> Optional[str]
-    """Tiny modal asking which image format to use (when the typed filename had
-    no extension). Returns 'png'/'svg'/... or None."""
+    """Tiny modal asking which image format to use (when the typed filename had no
+    extension). Returns 'png'/'svg'/... or None."""
     top = tk.Toplevel(parent)
     top.title("Image format")
     top.resizable(False, False)
@@ -1048,9 +981,8 @@ def _ask_image_format(parent):
 
 
 def _save_figure(fig, parent):
-    # No defaultextension: hardcoding it made the non-native Tk dialog append
-    # ".png" even when another filter was picked. Instead we honour whatever
-    # extension the user typed, and only ask for a format if none was given.
+    # Kept for callers that want a custom save; the embedded matplotlib toolbar's
+    # Save button is the primary path now.
     path = filedialog.asksaveasfilename(
         title="Save spectrum image",
         filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"),
@@ -1076,28 +1008,20 @@ _EPR_BANDS = [("L", 1.0), ("S", 3.5), ("C", 6.0), ("X", 9.5),
               ("K", 24.0), ("Q", 34.0), ("W", 94.0)]
 
 
-class EPRSpectrumWindow(tk.Toplevel):
+class EPRSpectrumWindow(BaseSpectrumWindow):
     """Simulated EPR spectra from one or more finished %eprnmr calcs, stacked as
     colour-matched traces. Isotropic (g_iso + A_iso) or anisotropic powder (principal
     g + A) via the mode toggle; the field-swept lineshape shown as 1st derivative
     (CW-EPR), absorption, or 2nd derivative; MW frequency by band or number. Hover a
-    trace to read its g-value and see its structure. (spin-1/2 / 100%-abundance
-    model — see core.epr.)"""
+    trace to read its g-value and see its structure. (spin-1/2 / 100%-abundance model
+    — see core.epr.)"""
 
     def __init__(self, parent, title, entries):
         # type: (tk.Misc, str, List[dict]) -> None
-        # entries: [{name, smiles, epr}] (epr = a parse_epr() dict) — one or more,
-        # stacked as colour-matched traces with a hover g-value readout.
-        super().__init__(parent)
-        self.title("EPR spectrum - {}".format(title))
-        self.geometry("1150x700")
-        try:
-            Figure, FigureCanvasTkAgg = _load_mpl()
-        except Exception as e:
-            self.destroy()
-            _mpl_unavailable_window(parent, e)
+        # entries: [{name, smiles, epr}] (epr = a parse_epr() dict).
+        super().__init__(parent, "EPR spectrum - {}".format(title))
+        if not self._mpl_ok:
             return
-        self.mols = []
         for idx, e in enumerate(entries):
             epr = e.get("epr") or {}
             g_iso = (epr.get("g_tensor") or {}).get("g_iso")
@@ -1111,74 +1035,38 @@ class EPRSpectrumWindow(tk.Toplevel):
                 "g_iso": g_iso, "g_principal": gp,
                 "hyperfine": epr.get("hyperfine") or [], "smiles": e.get("smiles"),
             })
-        self._stacked = len(self.mols) > 1
-        self._active = None
-        self._hover_artists = []
-
-        if not self.mols:
-            ttk.Label(self, text="No g-tensor found in the selected calculation(s).").pack(
-                padx=20, pady=20)
-            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
-            make_modal(self, parent)
-            return
-
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
-        ttk.Label(bar, text="MW freq (GHz):").pack(side=tk.LEFT)
         self.freq_var = tk.DoubleVar(value=9.5)
+        self.band_var = tk.StringVar(value="X (9.5 GHz)")
+        self.lw_var = tk.DoubleVar(value=0.15)
+        self.mode = "iso"
+        self.disp_var = tk.StringVar(value="1st derivative")
+        self.sticks_var = tk.BooleanVar(value=False)
+        self._build_ui("No g-tensor found in the selected calculation(s).")
+
+    def add_controls(self, bar):
+        ttk.Label(bar, text="MW freq (GHz):").pack(side=tk.LEFT)
         sp1 = ttk.Spinbox(bar, from_=1, to=400, increment=0.5, width=7,
                           textvariable=self.freq_var, command=self._redraw)
         sp1.pack(side=tk.LEFT, padx=6)
         sp1.bind("<Return>", lambda e: self._redraw())
-        self.band_var = tk.StringVar(value="X (9.5 GHz)")
         band_cb = ttk.Combobox(bar, textvariable=self.band_var, width=12, state="readonly",
                                values=["{} ({:g} GHz)".format(nm, gh) for nm, gh in _EPR_BANDS])
         band_cb.pack(side=tk.LEFT, padx=(2, 0))
         band_cb.bind("<<ComboboxSelected>>", self._on_band)
         ttk.Label(bar, text="Linewidth (mT):").pack(side=tk.LEFT, padx=(10, 0))
-        self.lw_var = tk.DoubleVar(value=0.15)
         sp2 = ttk.Spinbox(bar, from_=0.01, to=10, increment=0.05, width=7,
                           textvariable=self.lw_var, command=self._redraw)
         sp2.pack(side=tk.LEFT, padx=6)
         sp2.bind("<Return>", lambda e: self._redraw())
-        self.mode = "iso"
-        self.mode_btn = ttk.Button(bar, text="Mode: isotropic", width=22,
-                                   command=self._toggle_mode)
+        self.mode_btn = ttk.Button(bar, text="Mode: isotropic", width=22, command=self._toggle_mode)
         self.mode_btn.pack(side=tk.LEFT, padx=(10, 2))
         ttk.Label(bar, text="Show:").pack(side=tk.LEFT, padx=(10, 0))
-        self.disp_var = tk.StringVar(value="1st derivative")
         disp_cb = ttk.Combobox(bar, textvariable=self.disp_var, width=13, state="readonly",
                                values=["1st derivative", "Absorption", "2nd derivative"])
         disp_cb.pack(side=tk.LEFT, padx=(2, 0))
         disp_cb.bind("<<ComboboxSelected>>", lambda e: self._redraw())
-        self.sticks_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Line markers", variable=self.sticks_var,
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
-        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
-        self._axlim = _AxisLimitControls(bar, self._redraw)
-        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
-
-        body = ttk.Frame(self)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
-        self.struct = _StructurePanel(body, width=300)
-        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
-        self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
-        try:
-            self.fig.set_layout_engine("tight")
-        except Exception:
-            pass
-        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
-        pin_device_pixel_ratio(self.canvas)
-        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.after(0, self._first_draw)
-        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
-        make_modal(self, parent)
-
-    def _first_draw(self):
-        self.update_idletasks()
-        self._redraw()
 
     def _toggle_mode(self):
         if self.mode == "iso":
@@ -1224,36 +1112,46 @@ class EPRSpectrumWindow(tk.Toplevel):
             return field, self._derivative(sim["derivative"], field), "2nd derivative (a.u.)"
         return field, sim["derivative"], "first-derivative absorption (a.u.)"
 
-    def _redraw(self):
+    def plot(self, ax):
         freq = max(0.1, float(self.freq_var.get()))
         lw = max(0.001, float(self.lw_var.get()))
         powder = self.mode == "powder"
-        self.fig.clear()
-        self._hover_artists = []
-        ax = self.fig.add_subplot(111)
-        self.ax = ax
-        ax.axhline(0, color="#cccccc", lw=0.5)
+
         ylabel = "first-derivative absorption (a.u.)"
+        traces = []
+        ref = 0.0
         for m in self.mols:
             sim = self._sim_for(m, freq, lw)
             field, trace, ylabel = self._trace_of(sim)
             m["_field"], m["_trace"], m["_sim"] = field, trace, sim
-            ax.plot(field, trace, color=m["color"], lw=1.0, label=m["short"])
-        # line markers only for a single spectrum (ambiguous across stacked molecules)
-        if self.sticks_var.get() and not self._stacked:
-            trace = self.mols[0]["_trace"]
-            sticks = self.mols[0]["_sim"].get("sticks") or []
-            peak = max((abs(v) for v in trace), default=1.0) or 1.0
-            imax = max((i for _, i in sticks), default=1.0) or 1.0
-            for bc, inten in sticks:
-                ax.vlines(bc, 0.0, peak * (inten / imax), color="#888888",
-                          linewidth=0.6, alpha=0.6)
+            traces.append((m, field, trace))
+            ref = max(ref, max((abs(v) for v in trace), default=0.0))
+        ref = ref or 1.0
+
+        for i, (m, field, trace) in enumerate(traces):
+            base = self.baseline(i, ref)
+            m["_base"] = base
+            ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
+            ax.plot(field, [v + base for v in trace], color=m["color"], lw=1.0, label=m["short"])
+
+        # Line markers: draw for EVERY trace at its own baseline (works stacked too now),
+        # each scaled to that trace's own peak so a marker never dwarfs the line.
+        if self.sticks_var.get():
+            for m in self.mols:
+                base = m["_base"]
+                trace = m["_trace"]
+                sticks = m["_sim"].get("sticks") or []
+                peak = max((abs(v) for v in trace), default=1.0) or 1.0
+                imax = max((it for _, it in sticks), default=1.0) or 1.0
+                for bc, inten in sticks:
+                    ax.vlines(bc, base, base + peak * (inten / imax),
+                              color="#888888", linewidth=0.6, alpha=0.6)
+
         ax.set_xlabel("magnetic field (mT)")
         ax.set_ylabel(ylabel)
         ax.set_title("Simulated {} EPR spectrum".format(
             "powder (anisotropic)" if powder else "isotropic"))
         if self._stacked:
-            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
             gtxt = "\n".join("{}: g_iso={:.4f}".format(m["short"], m["g_iso"])
                              for m in self.mols[:10])
             ax.text(0.01, 0.99, gtxt, transform=ax.transAxes, va="top", ha="left",
@@ -1261,11 +1159,6 @@ class EPRSpectrumWindow(tk.Toplevel):
                     bbox=dict(boxstyle="round", fc="white", ec="#cccccc", alpha=0.85))
         else:
             self._single_annotation(ax, self.mols[0], freq, powder)
-            m0 = self.mols[0]
-            self.struct.show(0, m0["name"], m0.get("smiles"), m0["color"])
-        if getattr(self, "_axlim", None):
-            self._axlim.apply(self.fig.gca())
-        self.canvas.draw()
 
     def _single_annotation(self, ax, m, freq, powder):
         def _coupling_mhz(g):
@@ -1293,24 +1186,16 @@ class EPRSpectrumWindow(tk.Toplevel):
         if not f or x is None or x < f[0] or x > f[-1] or f[-1] == f[0]:
             return None
         idx = int(round((x - f[0]) / (f[-1] - f[0]) * (len(f) - 1)))
-        return m["_trace"][min(len(f) - 1, max(0, idx))]
-
-    def _clear_hover(self):
-        for a in self._hover_artists:
-            try:
-                a.remove()
-            except Exception:
-                pass
-        self._hover_artists = []
+        # include the trace's stacking baseline so the y-match works when offset
+        return m["_trace"][min(len(f) - 1, max(0, idx))] + m.get("_base", 0.0)
 
     def _on_motion(self, event):
-        ax = getattr(self, "ax", None)
+        ax = self.ax
         if ax is None:
             return
         if event.inaxes is not ax or event.xdata is None:
             if self._hover_artists:
-                self._clear_hover()
-                self.canvas.draw_idle()
+                self._clear_hover(); self.canvas.draw_idle()
             self._set_active(None)
             return
         y = event.ydata if event.ydata is not None else 0.0
@@ -1338,40 +1223,18 @@ class EPRSpectrumWindow(tk.Toplevel):
             self._set_active(best)
         self.canvas.draw_idle()
 
-    def _set_active(self, mi):
-        if mi == self._active:
-            return
-        self._active = mi
-        if mi is None:
-            if self._stacked:
-                self.struct.clear()
-        else:
-            m = self.mols[mi]
-            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
 
-    def _save_image(self):
-        _save_figure(self.fig, self)
-
-
-class ENDORSpectrumWindow(tk.Toplevel):
+class ENDORSpectrumWindow(BaseSpectrumWindow):
     """Simulated ENDOR spectra from one or more finished %eprnmr calcs — intensity vs
-    RF frequency (MHz), stacked as colour-matched traces. Built from the SAME
-    hyperfine data as EPR (no new calculation): each coupled nucleus gives lines at
-    |nu_n +/- A/2|. Hover a trace to read its structure; the annotation lists each
-    coupling's Larmor + line positions. (isotropic model — see core.epr.)"""
+    RF frequency (MHz), stacked as colour-matched traces. Built from the SAME hyperfine
+    data as EPR (no new calculation): each coupled nucleus gives lines at |nu_n +/- A/2|.
+    Hover a trace to read its structure. (isotropic model — see core.epr.)"""
 
     def __init__(self, parent, title, entries):
         # type: (tk.Misc, str, List[dict]) -> None
-        super().__init__(parent)
-        self.title("ENDOR spectrum - {}".format(title))
-        self.geometry("1150x700")
-        try:
-            Figure, FigureCanvasTkAgg = _load_mpl()
-        except Exception as e:
-            self.destroy()
-            _mpl_unavailable_window(parent, e)
+        super().__init__(parent, "ENDOR spectrum - {}".format(title))
+        if not self._mpl_ok:
             return
-        self.mols = []
         for idx, e in enumerate(entries):
             epr = e.get("epr") or {}
             g_iso = (epr.get("g_tensor") or {}).get("g_iso")
@@ -1384,70 +1247,36 @@ class ENDORSpectrumWindow(tk.Toplevel):
                 "color": _COLORS[idx % len(_COLORS)],
                 "g_iso": g_iso, "hyperfine": hf, "smiles": e.get("smiles"),
             })
-        self._stacked = len(self.mols) > 1
-        self._active = None
-        self._hover_artists = []
-
-        if not self.mols:
-            ttk.Label(self, text="No hyperfine couplings found in the selected "
-                      "calculation(s) - ENDOR needs computed A-tensors.").pack(padx=20, pady=20)
-            ttk.Button(self, text="Close", command=self.destroy).pack(pady=8)
-            make_modal(self, parent)
-            return
-
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
-        ttk.Label(bar, text="MW freq (GHz):").pack(side=tk.LEFT)
         self.freq_var = tk.DoubleVar(value=9.5)
+        self.band_var = tk.StringVar(value="X (9.5 GHz)")
+        self.lw_var = tk.DoubleVar(value=0.3)
+        self.disp_var = tk.StringVar(value="Absorption")
+        self.sticks_var = tk.BooleanVar(value=False)
+        self._build_ui("No hyperfine couplings found in the selected calculation(s) - "
+                       "ENDOR needs computed A-tensors.")
+
+    def add_controls(self, bar):
+        ttk.Label(bar, text="MW freq (GHz):").pack(side=tk.LEFT)
         sp1 = ttk.Spinbox(bar, from_=1, to=400, increment=0.5, width=7,
                           textvariable=self.freq_var, command=self._redraw)
         sp1.pack(side=tk.LEFT, padx=6)
         sp1.bind("<Return>", lambda e: self._redraw())
-        self.band_var = tk.StringVar(value="X (9.5 GHz)")
         band_cb = ttk.Combobox(bar, textvariable=self.band_var, width=12, state="readonly",
                                values=["{} ({:g} GHz)".format(nm, gh) for nm, gh in _EPR_BANDS])
         band_cb.pack(side=tk.LEFT, padx=(2, 0))
         band_cb.bind("<<ComboboxSelected>>", self._on_band)
         ttk.Label(bar, text="Linewidth (MHz):").pack(side=tk.LEFT, padx=(10, 0))
-        self.lw_var = tk.DoubleVar(value=0.3)
         sp2 = ttk.Spinbox(bar, from_=0.02, to=20, increment=0.1, width=7,
                           textvariable=self.lw_var, command=self._redraw)
         sp2.pack(side=tk.LEFT, padx=6)
         sp2.bind("<Return>", lambda e: self._redraw())
         ttk.Label(bar, text="Show:").pack(side=tk.LEFT, padx=(10, 0))
-        self.disp_var = tk.StringVar(value="Absorption")
         disp_cb = ttk.Combobox(bar, textvariable=self.disp_var, width=13, state="readonly",
                                values=["Absorption", "1st derivative"])
         disp_cb.pack(side=tk.LEFT, padx=(2, 0))
         disp_cb.bind("<<ComboboxSelected>>", lambda e: self._redraw())
-        self.sticks_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Line markers", variable=self.sticks_var,
                         command=self._redraw).pack(side=tk.LEFT, padx=10)
-        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="Maximize", command=lambda: _maximize_window(self)).pack(side=tk.RIGHT, padx=2)
-        self._axlim = _AxisLimitControls(bar, self._redraw)
-        ttk.Button(bar, text="Save image...", command=self._save_image).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
-
-        body = ttk.Frame(self)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
-        self.struct = _StructurePanel(body, width=300)
-        self.struct.pack(side=tk.RIGHT, fill=tk.Y)
-        self.fig = Figure(figsize=(8.6, 5.0), dpi=100)
-        try:
-            self.fig.set_layout_engine("tight")
-        except Exception:
-            pass
-        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
-        pin_device_pixel_ratio(self.canvas)
-        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.after(0, self._first_draw)
-        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
-        make_modal(self, parent)
-
-    def _first_draw(self):
-        self.update_idletasks()
-        self._redraw()
 
     def _on_band(self, _event=None):
         s = self.band_var.get()
@@ -1457,42 +1286,46 @@ class ENDORSpectrumWindow(tk.Toplevel):
                 break
         self._redraw()
 
-    def _redraw(self):
+    def plot(self, ax):
         freq = max(0.1, float(self.freq_var.get()))
         lw = max(0.001, float(self.lw_var.get()))
         deriv = self.disp_var.get() == "1st derivative"
-        self.fig.clear()
-        self._hover_artists = []
-        ax = self.fig.add_subplot(111)
-        self.ax = ax
-        ax.axhline(0, color="#cccccc", lw=0.5)
+
+        traces = []
+        ref = 0.0
         for m in self.mols:
             sim = EPR_sim.endor_spectrum(m["g_iso"], m["hyperfine"],
                                          freq_GHz=freq, linewidth_MHz=lw)
             xs = sim["freq_MHz"]
             ys = sim["derivative"] if deriv else sim["absorption"]
             m["_freq"], m["_trace"], m["_sim"] = xs, ys, sim
-            ax.plot(xs, ys, color=m["color"], lw=1.0, label=m["short"])
-        if self.sticks_var.get() and not self._stacked:
-            trace = self.mols[0]["_trace"]
-            sticks = self.mols[0]["_sim"].get("sticks") or []
-            peak = max((abs(v) for v in trace), default=1.0) or 1.0
-            smax = max((i for _, i in sticks), default=1.0) or 1.0
-            for fc, inten in sticks:
-                ax.vlines(fc, 0.0, peak * (inten / smax), color="#888888",
-                          linewidth=0.6, alpha=0.6)
+            traces.append((m, xs, ys))
+            ref = max(ref, max((abs(v) for v in ys), default=0.0))
+        ref = ref or 1.0
+
+        for i, (m, xs, ys) in enumerate(traces):
+            base = self.baseline(i, ref)
+            m["_base"] = base
+            if base or deriv:
+                ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
+            ax.plot(xs, [v + base for v in ys], color=m["color"], lw=1.0, label=m["short"])
+
+        if self.sticks_var.get():
+            for m in self.mols:
+                base = m["_base"]
+                trace = m["_trace"]
+                sticks = m["_sim"].get("sticks") or []
+                peak = max((abs(v) for v in trace), default=1.0) or 1.0
+                smax = max((it for _, it in sticks), default=1.0) or 1.0
+                for fc, inten in sticks:
+                    ax.vlines(fc, base, base + peak * (inten / smax),
+                              color="#888888", linewidth=0.6, alpha=0.6)
+
         ax.set_xlabel("RF frequency (MHz)")
         ax.set_ylabel("first-derivative (a.u.)" if deriv else "ENDOR intensity (a.u.)")
         ax.set_title("Simulated ENDOR spectrum")
-        if self._stacked:
-            ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
-        else:
+        if not self._stacked:
             self._single_annotation(ax, self.mols[0])
-            m0 = self.mols[0]
-            self.struct.show(0, m0["name"], m0.get("smiles"), m0["color"])
-        if getattr(self, "_axlim", None):
-            self._axlim.apply(self.fig.gca())
-        self.canvas.draw()
 
     def _single_annotation(self, ax, m):
         lines = m["_sim"].get("lines") or []
@@ -1510,24 +1343,15 @@ class ENDORSpectrumWindow(tk.Toplevel):
         if not f or x is None or x < f[0] or x > f[-1] or f[-1] == f[0]:
             return None
         idx = int(round((x - f[0]) / (f[-1] - f[0]) * (len(f) - 1)))
-        return m["_trace"][min(len(f) - 1, max(0, idx))]
-
-    def _clear_hover(self):
-        for a in self._hover_artists:
-            try:
-                a.remove()
-            except Exception:
-                pass
-        self._hover_artists = []
+        return m["_trace"][min(len(f) - 1, max(0, idx))] + m.get("_base", 0.0)
 
     def _on_motion(self, event):
-        ax = getattr(self, "ax", None)
+        ax = self.ax
         if ax is None:
             return
         if event.inaxes is not ax or event.xdata is None:
             if self._hover_artists:
-                self._clear_hover()
-                self.canvas.draw_idle()
+                self._clear_hover(); self.canvas.draw_idle()
             self._set_active(None)
             return
         y = event.ydata if event.ydata is not None else 0.0
@@ -1550,17 +1374,3 @@ class ENDORSpectrumWindow(tk.Toplevel):
         if self._stacked:
             self._set_active(best)
         self.canvas.draw_idle()
-
-    def _set_active(self, mi):
-        if mi == self._active:
-            return
-        self._active = mi
-        if mi is None:
-            if self._stacked:
-                self.struct.clear()
-        else:
-            m = self.mols[mi]
-            self.struct.show(mi, m["name"], m.get("smiles"), m["color"])
-
-    def _save_image(self):
-        _save_figure(self.fig, self)
