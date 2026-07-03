@@ -457,6 +457,54 @@ def parse_absorption_spectrum(text):
     return states
 
 
+_SCAN_HEADER = re.compile(r"(?im)^\s*The Calculated Surface using the .*energy\s*$")
+_SCAN_ROW = re.compile(r"^\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*$")
+
+
+def parse_relaxed_scan(text):
+    # type: (str) -> List[dict]
+    """Relaxed surface-scan profile from an OPT+Scan .out: a list of
+    {coordinate, energy} (energy in Hartree), in scan order.
+
+    ORCA prints a 'The Calculated Surface using the <SCF/MP2/...> energy' block of
+    `coordinate  energy` rows (the same data it writes to <base>.relaxscanact.dat).
+    We read the LAST such block. Returns [] if there's no scan surface.
+    """
+    m = None
+    for m in _SCAN_HEADER.finditer(text):
+        pass                       # keep the last header match
+    if m is None:
+        return []
+    points = []
+    for line in text[m.end():].splitlines():
+        s = line.strip()
+        if not s:
+            if points:
+                break              # blank line ends the table once rows have begun
+            continue
+        rm = _SCAN_ROW.match(line)
+        if rm:
+            points.append({"coordinate": float(rm.group(1)), "energy": float(rm.group(2))})
+        elif points:
+            break                  # a non-row line ends the table
+    return points
+
+
+def parse_relaxed_scan_dat(text):
+    # type: (str) -> List[dict]
+    """Same profile from a <base>.relaxscanact.dat file's text (2 whitespace-separated
+    columns: coordinate, energy). Returns [] if nothing parses."""
+    points = []
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                points.append({"coordinate": float(parts[0]), "energy": float(parts[1])})
+            except ValueError:
+                continue
+    return points
+
+
 def count_xyz_frames(path):
     # type: (str) -> int
     """Number of frames in a multi-frame .xyz (e.g. an ORCA _trj.xyz). 0 on error."""

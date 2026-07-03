@@ -2207,6 +2207,17 @@ class CalculationsTab(ttk.Frame):
             if trj:
                 menu.add_command(label="Open trajectory as movie",
                                  command=lambda p=trj: self._open_3d(p, slot="traj_viewer_path"))
+            # A relaxed surface scan (OPT + %geom Scan) leaves an energy surface in the
+            # .out — offer to plot it as an energy profile.
+            oc = finished_opt[0]
+            op = self._out_path(oc)
+            if op and os.path.isfile(op):
+                try:
+                    if orca_parser.parse_relaxed_scan(orca_parser.read_tail(op) or ""):
+                        menu.add_command(label="Plot scan energy profile",
+                                         command=lambda c=oc: self._plot_scan(c))
+                except Exception:
+                    pass
 
         # Finished FREQ: open the .out in the 3D viewer to animate the normal modes
         # (Avogadro reads ORCA output directly; a bare .xyz has no mode data).
@@ -2429,6 +2440,29 @@ class CalculationsTab(ttk.Frame):
             self.refresh()
 
         GeomSpecDialog(self, atoms, getattr(calc, "geom_spec", None), _save)
+
+    def _plot_scan(self, calc):
+        """Plot the relaxed-scan energy profile from a finished OPT+Scan calc's .out."""
+        from orca_workbench.ui.plot_window import open_scan_plot
+        op = self._out_path(calc)
+        txt = ""
+        if op and os.path.isfile(op):
+            try:
+                with open(op, "r", encoding="utf-8", errors="replace") as f:
+                    txt = f.read()
+            except IOError:
+                pass
+        open_scan_plot(self, self._short(calc), txt, xlabel=self._scan_xlabel(calc))
+
+    @staticmethod
+    def _scan_xlabel(calc):
+        s = (getattr(calc, "geom_spec", None) or {}).get("scan")
+        if s:
+            atoms = "-".join(str(a) for a in (s.get("atoms") or []))
+            unit = {"B": "Å", "A": "°", "D": "°"}.get(s.get("type"), "")
+            name = {"B": "bond", "A": "angle", "D": "dihedral"}.get(s.get("type"), "coordinate")
+            return "{} {} ({})".format(name, atoms, unit)
+        return "scan coordinate"
 
     # ---- post-hoc density / MO cubes (orca_plot on a finished .gbw) -----------
     def _generate_cube(self, calc):

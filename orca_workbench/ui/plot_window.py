@@ -177,3 +177,87 @@ class LivePlotWindow(tk.Toplevel):
             except Exception:
                 pass
         self.destroy()
+
+
+_HARTREE_KCAL = 627.5094740631
+
+
+class ScanPlotWindow(tk.Toplevel):
+    """Static energy profile of a relaxed surface scan: energy vs the scanned
+    coordinate. Defaults to ΔE (kcal/mol) relative to the lowest point (what you
+    usually want from a scan), with a toggle to absolute Hartree."""
+
+    def __init__(self, parent, title, points, xlabel="scan coordinate"):
+        # type: (tk.Misc, str, list, str) -> None
+        super().__init__(parent)
+        self.title("Scan profile - {}".format(title))
+        self.geometry("820x620")
+        self._points = [p for p in (points or []) if "coordinate" in p and "energy" in p]
+        self._xlabel = xlabel
+        try:
+            import matplotlib
+            matplotlib.use("TkAgg")
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        except Exception as e:
+            ttk.Label(self, text="Could not initialise matplotlib:\n  {}\n\n"
+                      "Install it:  pip install --user matplotlib".format(e),
+                      justify=tk.LEFT, wraplength=520).pack(padx=20, pady=20)
+            ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 12))
+            return
+        if not self._points:
+            ttk.Label(self, text="No scan surface found in this calculation's output.").pack(
+                padx=20, pady=20)
+            ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 12))
+            return
+
+        bar = ttk.Frame(self)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+        self._rel = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Relative to minimum (kcal/mol)", variable=self._rel,
+                        command=self._draw).pack(side=tk.LEFT)
+        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self._summary = tk.StringVar()
+        ttk.Label(bar, textvariable=self._summary, foreground="#444").pack(side=tk.LEFT, padx=12)
+
+        self.fig = Figure(figsize=(7.4, 5.0), dpi=100)
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        _pin_device_pixel_ratio(self.canvas)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        from orca_workbench.ui.modal import fit_to_content
+        fit_to_content(self)
+        self.after(0, self._draw)
+
+    def _draw(self):
+        xs = [p["coordinate"] for p in self._points]
+        e_h = [p["energy"] for p in self._points]
+        emin = min(e_h)
+        imin = e_h.index(emin)
+        rel = self._rel.get()
+        ys = [(e - emin) * _HARTREE_KCAL for e in e_h] if rel else e_h
+        self.ax.clear()
+        self.ax.plot(xs, ys, marker="o", color="#1f77b4", lw=1.4)
+        self.ax.plot([xs[imin]], [ys[imin]], marker="o", color="#d62728", ms=9,
+                     label="minimum")
+        self.ax.set_xlabel(self._xlabel)
+        self.ax.set_ylabel("ΔE (kcal/mol)" if rel else "energy (Eh)")
+        self.ax.set_title("Relaxed scan energy profile ({} points)".format(len(xs)))
+        self.ax.legend(loc="best", fontsize=8)
+        span = (max(ys) - min(ys)) if rel else (max(e_h) - min(e_h)) * _HARTREE_KCAL
+        self.summary_text = "min at {} = {:.6f} Eh; barrier span {:.2f} kcal/mol".format(
+            xs[imin], emin, span)
+        self._summary.set(self.summary_text)
+        self.canvas.draw_idle()
+
+
+def open_scan_plot(parent, title, out_text, xlabel="scan coordinate"):
+    """Parse a scan surface from an ORCA .out and show the profile. Returns the
+    window, or None (after a message) if there's no scan data."""
+    from orca_workbench.core import orca_parser
+    pts = orca_parser.parse_relaxed_scan(out_text or "")
+    return ScanPlotWindow(parent, title, pts, xlabel=xlabel)

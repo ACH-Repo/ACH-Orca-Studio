@@ -299,6 +299,8 @@ class WorkflowTab(ttk.Frame):
         if node.type in wf_mod.CALC_NODE_TYPES:
             ttk.Label(self.cfg_frame, text="Recipe (type to filter):").pack(anchor=tk.W, padx=8)
             self._recipe_search_combo(node, "recipe").pack(anchor=tk.W, padx=8, pady=2)
+            if node.type == "optimize":
+                self._geom_spec_widget(node)
         elif node.type == "molecules":
             mode = tk.StringVar(value=node.config.get("mode", "all"))
             ttk.Radiobutton(self.cfg_frame, text="All molecules", variable=mode, value="all",
@@ -401,6 +403,50 @@ class WorkflowTab(ttk.Frame):
         cb.bind("<Return>", commit, add="+")
         cb.bind("<FocusOut>", commit, add="+")
         return cb
+
+    def _geom_spec_widget(self, node):
+        """Optimize-node geometry constraints / relaxed scan. Applies to every molecule
+        the node optimizes, so atom indices must be valid across them (the dialog shows
+        the FIRST molecule's atoms for reference)."""
+        from orca_workbench.core import geomspec as G
+        ttk.Label(self.cfg_frame, text="Geometry: {}".format(G.describe(node.config.get("geom_spec"))),
+                  foreground="#444", wraplength=210, justify=tk.LEFT).pack(
+            anchor=tk.W, padx=8, pady=(6, 0))
+        if self._node_is_locked(node.id):
+            return   # node has run — don't let its spec desync from the calcs it spawned
+        ttk.Button(self.cfg_frame, text="Constraints / scan...",
+                   command=lambda n=node: self._edit_node_geom_spec(n)).pack(
+            anchor=tk.W, padx=8, pady=2)
+
+    def _edit_node_geom_spec(self, node):
+        import os as _os
+        from orca_workbench.core import coords as coords_mod
+        from orca_workbench.ui.geomspec_dialog import GeomSpecDialog
+        mols = self.app.project.molecules
+        atoms = []
+        if mols and mols[0].xyz_path:
+            p = mols[0].xyz_path
+            if not _os.path.isabs(p):
+                p = _os.path.join(self.app.project.root(), p)
+            try:
+                atoms, _m = coords_mod.read_xyz(p)
+            except Exception:
+                atoms = []
+        if not atoms:
+            messagebox.showinfo(
+                "No geometry yet",
+                "Generate a molecule's XYZ first so atom indices are known. Constraints "
+                "apply to every molecule this node optimizes - the first molecule's atoms "
+                "are shown for reference.")
+            return
+
+        def _save(spec):
+            node.config["geom_spec"] = spec
+            self.app.mark_dirty()
+            self._build_config_panel()   # refresh the summary
+
+        GeomSpecDialog(self, atoms, node.config.get("geom_spec"), _save,
+                       title="Optimize node: geometry constraints / scan")
 
     def _build_results_section(self, node):
         """List this calc node's expanded calculations with one-click launchers
@@ -1996,23 +2042,29 @@ class WorkflowTab(ttk.Frame):
         existing_before = {id(c) for c in self.app.project.planned_calcs}
 
         def factory(mol, recipe_name, category, geometry_source, parent_id, gate, origin_node):
+            # An Optimize node may carry geometry constraints / a relaxed scan; the node
+            # knows its own config (this closure has self.wf), so no signature change.
+            onode = self.wf.node(origin_node)
+            gspec = onode.config.get("geom_spec") if onode is not None else None
             existing = self._find_existing_calc(origin_node, mol, category, recipe_name)
             if existing is not None:
                 # Adopt this graph node so future runs match by node identity too.
                 if getattr(existing, "origin_node", None) is None:
                     existing.origin_node = origin_node
                 # Keep finished steps verbatim; let unfinished ones adopt any
-                # edits made to the graph (recipe / geometry / gate).
+                # edits made to the graph (recipe / geometry / gate / geom_spec).
                 if not self._calc_done(existing):
                     existing.recipe_name = recipe_name
                     existing.category = category
                     existing.geometry_source = geometry_source
                     existing.parent_id = parent_id
                     existing.gate = gate
+                    existing.geom_spec = gspec
                 return existing
             return PlannedCalc(id=new_calc_id(), molecule_filename=mol, recipe_name=recipe_name,
                                category=category, geometry_source=geometry_source,
-                               parent_id=parent_id, gate=gate, origin_node=origin_node)
+                               parent_id=parent_id, gate=gate, origin_node=origin_node,
+                               geom_spec=gspec)
 
         calcs, warnings, node_map = wf_mod.expand_to_calcs(self.wf, mol_files, factory,
                                                            source_ids=source_ids)

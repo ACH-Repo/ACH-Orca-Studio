@@ -9,6 +9,33 @@ Run:  python -m pytest tests/test_geomspec.py -q
 
 from orca_workbench.core import geomspec as G
 from orca_workbench.core import inputs as I
+from orca_workbench.core import orca_parser as P
+
+
+_SCAN_OUT = """
+Some header
+
+The Calculated Surface using the SCF energy
+   0.90000000 -74.95492770
+   1.00000000 -74.96577405
+   1.10000000 -74.95429355
+   1.20000000 -74.93028122
+
+SUGGESTED CITATIONS
+"""
+
+
+def test_parse_relaxed_scan_from_out():
+    pts = P.parse_relaxed_scan(_SCAN_OUT)
+    assert [p["coordinate"] for p in pts] == [0.9, 1.0, 1.1, 1.2]
+    assert abs(pts[1]["energy"] - (-74.96577405)) < 1e-9
+    assert P.parse_relaxed_scan("no scan here") == []
+
+
+def test_parse_relaxed_scan_dat():
+    dat = "   0.90000000 -74.95492770 \n   1.00000000 -74.96577405 \n"
+    pts = P.parse_relaxed_scan_dat(dat)
+    assert len(pts) == 2 and pts[0]["coordinate"] == 0.9
 
 
 def test_constraint_line_variants():

@@ -504,7 +504,8 @@ off the core path and gracefully degradable.
   argument (opens PyMOL empty).
 
 - **Geometry constraints + relaxed surface scans** (branch `relaxed-scans-constraints`,
-  off `main`) — roadmap #2, phase 1 (Calc tab). ONE unified "geometry spec" for OPT jobs,
+  off `main`) — roadmap #2, COMPLETE (Calc tab + Workflow node + scan plot). ONE unified
+  "geometry spec" for OPT jobs,
   rendered into ORCA's `%geom` block: **constraints** (freeze bond/angle/dihedral `{B a b [val] C}`
   / `{A …}` / `{D …}`, or a Cartesian position `{C a C}`, optionally pinned at a value) and/or
   **one relaxed scan** (`Scan\n <B/A/D> a b = r1, r2, N\n end` → energy profile). Pure
@@ -518,9 +519,14 @@ off the core path and gracefully degradable.
   → release → re-opt (ORCA constraints are hard freezes, no native inequality; the chain approximates
   it). **Verified against real local ORCA 6.0.1**: a constrained OPT held an O–H bond at exactly
   1.1000 Å; a relaxed scan produced the expected coordinate→energy surface + `.relaxscanact.dat`.
-  Tests `tests/test_geomspec.py` (261 total). TODO phase 2: the Optimize **node** carries the same
-  spec (config panel button → same dialog → factory passes it to the calc), and a **scan-energy
-  plot** (parse `.relaxscanact.dat`).
+  Phase 2: the **Optimize node** carries the same spec (config-panel "Constraints / scan…" button →
+  same dialog, shows the FIRST molecule's atoms for reference; the expand factory reads
+  `node.config['geom_spec']` — no signature change — and sets it on each calc, unfinished calcs
+  adopt graph edits). **Scan-energy plot**: `orca_parser.parse_relaxed_scan` (the "Calculated
+  Surface" table in the .out) / `parse_relaxed_scan_dat` (the `.relaxscanact.dat`), shown by
+  `plot_window.ScanPlotWindow` (ΔE kcal/mol vs the scanned coordinate, min marked; absolute-Eh
+  toggle) via Calc-tab right-click **"Plot scan energy profile"** on a finished OPT whose .out has a
+  scan surface. Tests `tests/test_geomspec.py` (263 total, incl. scan parsers).
 
 ## Open work / TODO
 - Keymap catalogue is partial — only app-globals + plot keys are registered/rebindable so far;

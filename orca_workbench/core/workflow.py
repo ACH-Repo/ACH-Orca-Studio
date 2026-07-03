@@ -37,7 +37,9 @@ NODE_TYPES = {
         # energy, trajectory, gradient), so it can feed a Report node directly.
         "outputs": [("geometry", "geometry"), ("results", "results")],
         "kind": "calc",
-        "config": {"recipe": ""},
+        # geom_spec: optional geometry constraints / a relaxed scan (core.geomspec),
+        # applied to every molecule this node optimizes. None = plain optimization.
+        "config": {"recipe": "", "geom_spec": None},
     },
     "frequencies": {
         "label": "Frequencies",
