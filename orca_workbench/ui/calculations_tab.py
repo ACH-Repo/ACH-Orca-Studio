@@ -2234,10 +2234,13 @@ class CalculationsTab(ttk.Frame):
                 menu.add_command(label=label,
                                  command=lambda cs=list(calcs): self._clear_parent(cs))
 
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        # tk_popup grabs the menu so a click anywhere dismisses it. On X11 tk_popup
+        # returns immediately (unlike Windows, where it blocks), so releasing the grab
+        # right after leaves the menu posted but UNgrabbed — it then only closes when
+        # you click ON an item, never when you click away (exactly the reported bug).
+        # Defer the release to when the menu actually unmaps instead of doing it now.
+        menu.bind("<Unmap>", lambda _e, m=menu: m.grab_release(), add="+")
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _descendant_ids(self, calc):
         """Ids of calcs reachable from `calc` via parent_id links (to avoid making

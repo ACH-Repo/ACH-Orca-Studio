@@ -222,22 +222,37 @@ class _StructurePanel(ttk.Frame):
     updated on hover. Replaces per-trace thumbnails: exactly one structure is on
     screen at a time — whichever trace the cursor is over."""
 
+    _NEUTRAL = "#cccccc"
+
     def __init__(self, parent, width=300):
         ttk.Frame.__init__(self, parent, width=width)
         self.pack_propagate(False)
         self.name = ttk.Label(self, text="hover a peak", anchor="center",
                               font=("TkDefaultFont", 10, "bold"))
         self.name.pack(side=tk.TOP, fill=tk.X, pady=(10, 4), padx=6)
-        self.img = ttk.Label(self, anchor="center")
-        self.img.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=6)
+        # A tk.Frame (not ttk) so we can colour its border to match the hovered
+        # trace — themed ttk frames don't expose a settable border colour.
+        self.border = tk.Frame(self, highlightthickness=3, bd=0,
+                               highlightbackground=self._NEUTRAL, highlightcolor=self._NEUTRAL)
+        self.border.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.img = ttk.Label(self.border, anchor="center")
+        self.img.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=2, pady=2)
         self._cache = {}     # smiles -> PhotoImage (or None)
         self._cur = object()  # sentinel so the first show() always renders
+
+    def _set_border(self, color):
+        try:
+            self.border.configure(highlightbackground=color, highlightcolor=color)
+        except tk.TclError:
+            pass
 
     def show(self, key, name, smiles, color="#000000"):
         if key == self._cur:
             return
         self._cur = key
-        self.name.configure(text=name or "", foreground=color or "#000000")
+        col = color or "#000000"
+        self.name.configure(text=name or "", foreground=col)
+        self._set_border(col)   # frame border matches the on-hover trace colour
         if smiles in self._cache:
             photo = self._cache[smiles]
         else:
@@ -254,6 +269,7 @@ class _StructurePanel(ttk.Frame):
             return
         self._cur = None
         self.name.configure(text="hover a peak", foreground="#000000")
+        self._set_border(self._NEUTRAL)
         self.img.configure(image="")
         self.img.image = None
 
