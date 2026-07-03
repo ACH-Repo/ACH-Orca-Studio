@@ -34,13 +34,14 @@ def _load_mpl():
 
 
 def _load_mpl_full():
-    """matplotlib pieces incl. the navigation toolbar, or raise with a message."""
+    """matplotlib pieces for BaseSpectrumWindow, or raise with a message. No navigation
+    toolbar — pan/zoom/save are keyboard-driven (over ThinLinc the Linux desktop panel
+    draws on top of the toolbar and it can't be reached)."""
     import matplotlib
     matplotlib.use("TkAgg")
     from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import (
-        FigureCanvasTkAgg, NavigationToolbar2Tk)
-    return Figure, FigureCanvasTkAgg, NavigationToolbar2Tk
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    return Figure, FigureCanvasTkAgg, None
 
 
 def pin_device_pixel_ratio(canvas):
@@ -258,6 +259,10 @@ class BaseSpectrumWindow(tk.Toplevel):
         self.canvas = None
         self.struct = None
         self.offset_var = None
+        self._home_xlim = None
+        self._home_ylim = None
+        self._nav_mode = None     # None | zoom_h/zoom_v/zoom_box | pan_h/pan_v/pan_free
+        self._drag = None         # active zoom/pan drag state
         self._mpl_ok = True
         try:
             self._Figure, self._Canvas, self._NavToolbar = _load_mpl_full()
@@ -285,15 +290,23 @@ class BaseSpectrumWindow(tk.Toplevel):
         bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 2))
         self._bar = bar
         self.add_controls(bar)                       # subclass widgets (packed LEFT)
-        # shared right-hand controls
-        ttk.Button(bar, text="Close", command=self.destroy).pack(side=tk.RIGHT, padx=(2, 0))
-        ttk.Button(bar, text="Redraw", command=self._redraw).pack(side=tk.RIGHT, padx=2)
+        # Shared right-hand controls. Created in tab order (offset -> Redraw -> Close)
+        # but packed so they READ left-to-right offset | Redraw | Close — Tk's tab order
+        # follows creation order, not visual position, which is why Close used to be
+        # tabbed before Redraw.
         self.offset_var = tk.DoubleVar(value=0.0)
+        off_label = off_scale = None
         if self._stacked:
-            ttk.Scale(bar, from_=0.0, to=1.5, orient=tk.HORIZONTAL, length=110,
-                      variable=self.offset_var,
-                      command=lambda _v: self._redraw()).pack(side=tk.RIGHT, padx=(0, 4))
-            ttk.Label(bar, text="Stack offset:").pack(side=tk.RIGHT, padx=(10, 2))
+            off_label = ttk.Label(bar, text="Stack offset:")
+            off_scale = ttk.Scale(bar, from_=0.0, to=1.5, orient=tk.HORIZONTAL, length=110,
+                                  variable=self.offset_var, command=lambda _v: self._redraw())
+        redraw_btn = ttk.Button(bar, text="Redraw", command=self._redraw)
+        close_btn = ttk.Button(bar, text="Close", command=self.destroy)
+        close_btn.pack(side=tk.RIGHT, padx=(2, 0))
+        redraw_btn.pack(side=tk.RIGHT, padx=2)
+        if self._stacked:
+            off_scale.pack(side=tk.RIGHT, padx=(0, 4))
+            off_label.pack(side=tk.RIGHT, padx=(10, 2))
 
         self._add_limits_row()                       # compact x/y limit boxes + key hints
         self.add_summary()                           # optional subclass summary line
@@ -304,10 +317,6 @@ class BaseSpectrumWindow(tk.Toplevel):
         self.struct.pack(side=tk.RIGHT, fill=tk.Y)
         left = ttk.Frame(body)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        # Reserve the toolbar's strip at the bottom FIRST so it always shows, then
-        # let the canvas fill the rest.
-        nav_frame = ttk.Frame(left)
-        nav_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.fig = self._Figure(figsize=(8.6, 5.0), dpi=100)
         try:
             self.fig.set_layout_engine("tight")
@@ -316,19 +325,13 @@ class BaseSpectrumWindow(tk.Toplevel):
         self.canvas = self._Canvas(self.fig, master=left)
         pin_device_pixel_ratio(self.canvas)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        # Standard matplotlib toolbar (Home/Pan/Zoom/Save) below the plot. Use the
-        # default constructor (auto-packs into nav_frame) — it works on every
-        # matplotlib version; the newer `pack_toolbar=` kwarg raised on older builds,
-        # which the previous try/except swallowed so NO toolbar appeared.
-        self._nav = None
-        try:
-            self._nav = self._NavToolbar(self.canvas, nav_frame)
-            self._nav.update()
-        except Exception:
-            import traceback
-            traceback.print_exc()
+        # No matplotlib navigation toolbar: over ThinLinc the Linux desktop panel
+        # draws on top of it and it can't be reached, so we drive pan/zoom/save/etc.
+        # entirely from keyboard shortcuts + our own zoom/pan (see _bind_plot_keys).
         self._disable_mpl_keymap()
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.canvas.mpl_connect("button_press_event", self._drag_press)
+        self.canvas.mpl_connect("button_release_event", self._drag_release)
         self._bind_plot_keys()
 
         fit_to_content(self)     # non-modal: keep real WM decorations (maximize button)
@@ -367,8 +370,12 @@ class BaseSpectrumWindow(tk.Toplevel):
             e.bind("<Return>", lambda _e: self._redraw())
             self._lim_entries[k] = e
         ttk.Button(row, text="Apply", width=6, command=self._redraw).pack(side=tk.LEFT, padx=(3, 1))
-        ttk.Label(row, text="   keys over plot:  F full reset · M edit limits · Z zoom · P pan",
+        ttk.Label(row, text="   keys over plot:  F reset · M limits · Z zoom · P pan · "
+                  "R redraw · Ctrl+S save · Ctrl+W close",
                   foreground="#777").pack(side=tk.LEFT, padx=8)
+        self._mode_label = ttk.Label(row, text="", foreground="#0055aa",
+                                     font=("TkDefaultFont", 9, "bold"))
+        self._mode_label.pack(side=tk.LEFT, padx=6)
 
     def _lim_val(self, k):
         try:
@@ -399,13 +406,56 @@ class BaseSpectrumWindow(tk.Toplevel):
         except Exception:
             pass
 
+    _ZOOM_CYCLE = ["zoom_h", "zoom_v", "zoom_box", None]
+    _PAN_CYCLE = ["pan_h", "pan_v", "pan_free", None]
+    _MODE_TEXT = {"zoom_h": "ZOOM horizontal — drag a range (Esc to exit)",
+                  "zoom_v": "ZOOM vertical — drag a range (Esc to exit)",
+                  "zoom_box": "ZOOM box — drag a rectangle (Esc to exit)",
+                  "pan_h": "PAN horizontal — drag (Esc to exit)",
+                  "pan_v": "PAN vertical — drag (Esc to exit)",
+                  "pan_free": "PAN free — drag (Esc to exit)"}
+    _MODE_CURSOR = {"zoom_h": "sb_h_double_arrow", "zoom_v": "sb_v_double_arrow",
+                    "zoom_box": "tcross", "pan_h": "sb_h_double_arrow",
+                    "pan_v": "sb_v_double_arrow", "pan_free": "fleur"}
+
     def _bind_plot_keys(self):
         w = self.canvas.get_tk_widget()
         w.bind("<Enter>", lambda e: w.focus_set(), add="+")
+        # Plain keys only fire while the pointer is over the plot (so they don't
+        # interfere with typing in the top fields).
         for key, fn in (("f", self._key_full), ("m", self._key_focus_limits),
-                        ("z", self._key_zoom), ("p", self._key_pan)):
+                        ("z", lambda: self._cycle_nav(self._ZOOM_CYCLE)),
+                        ("p", lambda: self._cycle_nav(self._PAN_CYCLE)),
+                        ("r", self._redraw)):
             for ks in (key, key.upper()):
                 w.bind("<KeyPress-{}>".format(ks), lambda e, f=fn: (f(), "break")[1])
+        w.bind("<Escape>", lambda e: (self._set_nav_mode(None), "break")[1])
+        # Window-wide shortcuts (safe modifiers / function keys).
+        self.bind("<F5>", lambda e: self._redraw())
+        self.bind("<Control-s>", lambda e: (self._key_save(), "break")[1])
+        self.bind("<Control-S>", lambda e: (self._key_save(), "break")[1])
+        self.bind("<Control-w>", lambda e: (self.destroy(), "break")[1])
+        self.bind("<Control-W>", lambda e: (self.destroy(), "break")[1])
+        self.bind("<Return>", self._activate_focused)
+
+    def _activate_focused(self, _event=None):
+        """Enter presses the focused Button/Checkbutton (Tk only does this for Space by
+        default). Entries/spinboxes keep their own Return handling (this no-ops there)."""
+        w = None
+        try:
+            w = self.focus_get()
+        except Exception:
+            pass
+        if isinstance(w, (ttk.Button, ttk.Checkbutton)):
+            try:
+                w.invoke()
+            except Exception:
+                pass
+            return "break"
+
+    def _key_save(self):
+        if getattr(self, "fig", None) is not None:
+            _save_figure(self.fig, self)
 
     def _key_focus_limits(self):
         e = self._lim_entries.get("x0")
@@ -424,9 +474,9 @@ class BaseSpectrumWindow(tk.Toplevel):
     def _key_full(self):
         """Mestrenova 'F': two-stage reset. First reset X to the data view, then (if X
         is already there) reset Y too — clearing any manual limit boxes as it goes.
-        Works whether the view was changed by the boxes or by mouse zoom/pan."""
+        Works whether the view was changed by the boxes or by our zoom/pan."""
         ax = self.ax
-        if ax is None or not getattr(self, "_home_xlim", None):
+        if ax is None or not self._home_xlim:
             return
         if not self._lims_close(ax.get_xlim(), self._home_xlim):
             self._lim["x0"].set(""); self._lim["x1"].set("")
@@ -437,19 +487,112 @@ class BaseSpectrumWindow(tk.Toplevel):
             ax.set_ylim(self._home_ylim)
             self.canvas.draw_idle()
 
-    def _key_zoom(self):
-        if self._nav is not None:
-            try:
-                self._nav.zoom()   # toggle box-zoom (hold x / y while dragging = 1-axis)
-            except Exception:
-                pass
+    # -------------------------------------------------- custom zoom / pan (no toolbar)
 
-    def _key_pan(self):
-        if self._nav is not None:
+    def _cycle_nav(self, cycle):
+        cur = self._nav_mode if self._nav_mode in cycle else None
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else cycle[0]
+        self._set_nav_mode(nxt)
+
+    def _set_nav_mode(self, mode):
+        self._drag = None
+        self._nav_mode = mode
+        try:
+            self._mode_label.configure(text=("  " + self._MODE_TEXT[mode]) if mode else "")
+        except (tk.TclError, KeyError):
+            pass
+        try:
+            self.canvas.get_tk_widget().configure(cursor=self._MODE_CURSOR.get(mode, ""))
+        except tk.TclError:
+            pass
+
+    def _set_axis(self, setter, getter, a, b):
+        """Set an axis limit a..b preserving the axis's current direction (NMR/IR have
+        a reversed x-axis, so we mustn't silently un-reverse it on zoom)."""
+        lo, hi = min(a, b), max(a, b)
+        cur = getter()
+        setter((hi, lo) if cur[0] > cur[1] else (lo, hi))
+
+    def _drag_press(self, event):
+        if (not self._nav_mode or event.button != 1 or event.inaxes is not self.ax
+                or event.xdata is None or event.ydata is None):
+            return
+        ax = self.ax
+        self._drag = {"x0": event.xdata, "y0": event.ydata,
+                      "xlim": ax.get_xlim(), "ylim": ax.get_ylim(), "mode": self._nav_mode}
+        if self._nav_mode.startswith("zoom"):
+            # Blitted rubber band: snapshot the plot once, then only re-blit the
+            # rectangle on motion (no full redraw per event — ThinLinc-friendly).
             try:
-                self._nav.pan()    # toggle pan (hold x / y while dragging = 1-axis)
+                self.canvas.draw()
+                self._drag["bg"] = self.canvas.copy_from_bbox(self.fig.bbox)
+                from matplotlib.patches import Rectangle
+                rect = Rectangle((event.xdata, event.ydata), 0, 0, fill=False,
+                                 edgecolor="#333333", linewidth=1.0, linestyle="--")
+                rect.set_animated(True)
+                ax.add_patch(rect)
+                self._drag["rect"] = rect
+            except Exception:
+                self._drag["rect"] = None
+
+    def _drag_motion(self, event):
+        d = self._drag
+        if d is None or event.xdata is None or event.ydata is None:
+            return
+        ax = self.ax
+        mode = d["mode"]
+        if mode.startswith("pan"):
+            dx, dy = d["x0"] - event.xdata, d["y0"] - event.ydata
+            (x0, x1), (y0, y1) = d["xlim"], d["ylim"]
+            if mode in ("pan_h", "pan_free"):
+                ax.set_xlim(x0 + dx, x1 + dx)
+            if mode in ("pan_v", "pan_free"):
+                ax.set_ylim(y0 + dy, y1 + dy)
+            self.canvas.draw_idle()
+            return
+        rect = d.get("rect")
+        if rect is None:
+            return
+        x0, y0 = d["x0"], d["y0"]
+        (xa, xb), (ya, yb) = ax.get_xlim(), ax.get_ylim()
+        if mode == "zoom_h":
+            rx0, rx1, ry0, ry1 = x0, event.xdata, min(ya, yb), max(ya, yb)
+        elif mode == "zoom_v":
+            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, event.ydata
+        else:
+            rx0, rx1, ry0, ry1 = x0, event.xdata, y0, event.ydata
+        rect.set_bounds(min(rx0, rx1), min(ry0, ry1), abs(rx1 - rx0), abs(ry1 - ry0))
+        try:
+            self.canvas.restore_region(d["bg"])
+            ax.draw_artist(rect)
+            self.canvas.blit(self.fig.bbox)
+        except Exception:
+            self.canvas.draw_idle()
+
+    def _drag_release(self, event):
+        d = self._drag
+        self._drag = None
+        if d is None:
+            return
+        ax = self.ax
+        mode = d["mode"]
+        if mode.startswith("pan"):
+            self.canvas.draw_idle()
+            return
+        rect = d.get("rect")
+        if rect is not None:
+            try:
+                rect.remove()
             except Exception:
                 pass
+        xe = event.xdata if event.xdata is not None else d["x0"]
+        ye = event.ydata if event.ydata is not None else d["y0"]
+        x0, y0 = d["x0"], d["y0"]
+        if mode in ("zoom_h", "zoom_box") and abs(xe - x0) > 1e-12:
+            self._set_axis(ax.set_xlim, ax.get_xlim, x0, xe)
+        if mode in ("zoom_v", "zoom_box") and abs(ye - y0) > 1e-12:
+            self._set_axis(ax.set_ylim, ax.get_ylim, y0, ye)
+        self.canvas.draw_idle()
 
     # ------------------------------------------------------------ stacking
 
@@ -532,6 +675,14 @@ class BaseSpectrumWindow(tk.Toplevel):
         pass
 
     def _on_motion(self, event):
+        # Single connected motion callback: route to an active zoom/pan drag,
+        # otherwise to the subclass hover handler.
+        if self._drag is not None:
+            self._drag_motion(event)
+            return
+        self._hover(event)
+
+    def _hover(self, event):
         pass
 
 
@@ -652,7 +803,7 @@ class IRSpectrumWindow(BaseSpectrumWindow):
         ax.set_xlabel(r"wavenumber (cm$^{-1}$)")
         ax.set_title("Simulated IR spectrum")
 
-    def _on_motion(self, event):
+    def _hover(self, event):
         ax = self.ax
         if ax is None:
             return
@@ -795,7 +946,7 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
         ax.set_ylabel("oscillator strength / absorbance (a.u.)")
         ax.set_title("Simulated UV-Vis spectrum")
 
-    def _on_motion(self, event):
+    def _hover(self, event):
         ax = self.ax
         if ax is None:
             return
@@ -1050,7 +1201,7 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
             self.xmin_var.set("{:.2f}".format(min(lo, hi)))
             self.xmax_var.set("{:.2f}".format(max(lo, hi)))
 
-    def _on_motion(self, event):
+    def _hover(self, event):
         ax = self.ax
         if ax is None:
             return
@@ -1320,7 +1471,7 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
         # include the trace's stacking baseline so the y-match works when offset
         return m["_trace"][min(len(f) - 1, max(0, idx))] + m.get("_base", 0.0)
 
-    def _on_motion(self, event):
+    def _hover(self, event):
         ax = self.ax
         if ax is None:
             return
@@ -1485,7 +1636,7 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
         idx = int(round((x - f[0]) / (f[-1] - f[0]) * (len(f) - 1)))
         return m["_trace"][min(len(f) - 1, max(0, idx))] + m.get("_base", 0.0)
 
-    def _on_motion(self, event):
+    def _hover(self, event):
         ax = self.ax
         if ax is None:
             return

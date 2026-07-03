@@ -395,11 +395,26 @@ off the core path and gracefully degradable.
   toolbar does Save now). Public constructors unchanged (callers in `calculations_tab.py`).
   BLIND refactor (no GUI here) — headless-smoke-tested all 5 (construct/redraw/offset/mode
   toggles/markers/hover incl. single-mol), but wants a visual pass on ThinLinc.
+- **Plotter navigation is all-keyboard now** (same branch) — the embedded matplotlib
+  NavigationToolbar was **removed**: over ThinLinc the Linux desktop panel draws on top of it
+  and it's unreachable (and the window wouldn't rescale to expose it). Replaced with hotkeys
+  in `BaseSpectrumWindow` so ALL five plots inherit them: **Z** cycles zoom horizontal→vertical→box,
+  **P** cycles pan horizontal→vertical→free (custom handlers on mpl button/motion/release; zoom
+  uses a **blitted** rubber band = one snapshot + re-blit per move, no full redraw, ThinLinc-safe;
+  pan preserves reversed axes via `_set_axis`), **Esc** exits a mode (a live `_mode_label` shows
+  the active one), **F** two-stage reset, **M** focuses the x-limit box, **R**/**F5** redraw,
+  **Ctrl+S** save (`_save_figure`), **Ctrl+W** close. Plain keys bind on the canvas widget (fire
+  only while the pointer's over the plot, so they don't disturb typing in the top fields);
+  Ctrl/F5 bind window-wide. Also: **Enter activates the focused Button/Checkbutton**
+  (`_activate_focused`; Tk only does Space by default), and the right-hand controls are created
+  in tab order **offset → Redraw → Close** but packed to read L→R (Tk tab order follows creation
+  order, which is why Close used to tab before Redraw). `_disable_mpl_keymap()` drops mpl's
+  default f/p/o/g keys. Single connected `_on_motion` dispatcher routes to an active drag else
+  the subclass `_hover` (was `_on_motion`). BLIND — headless-smoke-tested (zoom cycle, box-zoom
+  drag sets both limits, pan shift, reversed-axis preserved, F/Esc/R, all 5 windows).
 - **Plotter refinements** (same branch, on top of the foundation) — from a ThinLinc review:
-  (a) **matplotlib toolbar now actually shows** — was created with `pack_toolbar=False` (a
-  newer-mpl kwarg) inside a `try/except` that silently swallowed the error on older mpl; now
-  the version-agnostic `NavigationToolbar2Tk(canvas, nav_frame)` (auto-packs) into a bottom
-  frame reserved first. (b) **EPR/ENDOR common x-range** — each trace was simulated over its
+  (a) ~~matplotlib toolbar embedding~~ (superseded — toolbar removed, see above). (b) **EPR/ENDOR
+  common x-range** — each trace was simulated over its
   own narrow field/RF window around its own B0, so at high bands (W) different g's gave
   non-overlapping windows and fragmented lines; the UI now computes a shared min/max (+~10%
   tolerance) and extends every trace flat at its baseline across it (no core change). (c) EPR
