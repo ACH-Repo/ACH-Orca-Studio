@@ -451,7 +451,7 @@ class WorkflowTab(ttk.Frame):
                 trj = ct._calc_file(calc, calc.molecule_filename + "_trj.xyz")
                 if trj:
                     b = ttk.Button(btns, text="Traj", width=5,
-                                   command=lambda p=trj: ct._open_3d(p))
+                                   command=lambda p=trj: ct._open_3d(p, slot="traj_viewer_path"))
                     b.pack(side=tk.LEFT, padx=1)
                     tip(b, "Open the optimisation trajectory (<mol>_trj.xyz), a multi-frame .xyz. "
                            "molden and Avogadro animate it as a movie; you can also load it into "

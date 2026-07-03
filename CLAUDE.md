@@ -450,6 +450,54 @@ off the core path and gracefully degradable.
   limits/zoom/pan/redraw/save/close); per-tab tree keys (Ctrl+L, Delete, …) can be added to
   the registry later. Tests `tests/test_keymap.py` (registry/override/humanize/event/variants/
   conflicts, fake-config injected so no real `~/.orca_workbench.json` write). 241 tests.
+- **Editor round-trips** (branch `editor-roundtrips`, off `main`/1.3.0) — external-editor
+  editing launched from the **Molecules tab only** (the prepping phase; everywhere else stays
+  read-only so a finished calc can't be mutated). Two independent round-trips:
+  (a) **SMILES via a 2D editor** — the Structure panel's **"Edit in ChemDraw..."** button
+  writes the current SMILES to a temp `.mol` (`roundtrip.write_smiles_molfile`, RDKit
+  `Compute2DCoords`; empty SMILES → blank canvas to draw from scratch), launches the editor,
+  and a non-modal `EditRoundtripDialog` waits; **Import** reads back whatever the editor saved
+  (`roundtrip.newest_structure_file` picks the newest structure file in the temp dir, so it
+  copes with ChemDraw choosing `.cdxml` over the `.mol`), converts to canonical SMILES
+  (`read_structure_smiles`: RDKit for `.mol/.sdf`, OpenBabel/pybel for `.cdx/.cdxml/.mrv`),
+  and on a confirmed diff sets `smiles_var` (→ `_on_field_change`: updates the mol, redraws
+  the depiction, invalidates a generated geometry, re-fills charge/mult). **SMILES only** —
+  never the geometry. (b) **Geometry via Avogadro** — double-clicking a molecule row now opens
+  its `.xyz` in a LOCAL Avogadro to edit (`_edit_geometry`); Avogadro saves in place, and
+  **Reload** (`_reload_geometry`, dialog stays open for iterate-reload) re-reads it, refreshes
+  the preview, and **locks the coords** (`coords_locked=True` + a provenance note — a
+  hand-edited geometry mustn't be clobbered by SMILES regen). Falls back to the read-only
+  viewer (`open_xyz_3d` → OpenXyzDialog/molden) when no local Avogadro (the gateway). Editor
+  paths: `config` keys `structure_editor_path` (auto-detects ChemDraw via `_CHEMDRAW_CANDIDATES`,
+  else asks) and the existing `avogadro_path`; both settable via **Settings**. New pure module
+  `core/roundtrip.py`; tests `tests/test_roundtrip.py` (242 total). **Verified locally** (real
+  RDKit round-trips incl. carboxylate; ChemDraw + Avogadro both launch; UI import/reload/resolve
+  smoke). The human draw-and-save step wasn't automatable — needs a real ChemDraw save to
+  confirm the `.cdxml`/`.mol` read-back end to end.
+- **Editor round-trips — UX pass** (same branch, from a local ChemDraw/Avogadro test) —
+  (a) **row double-click = VIEW-only** again (`_view_geometry`); the geometry **edit** round-trip
+  moved to a **right-click menu** (`_on_row_right_click`: View geometry / Edit geometry / Edit 2D
+  structure) so browsing rows never pops the never-self-closing reload dialog. (b) **double-click
+  the depiction image** opens the 2D editor (intuitive; the button stays, renamed **"Edit 2D
+  structure..."**, product-neutral). (c) **abstract program paths**: new `extprog.PROGRAM_SLOTS`
+  (`viewer_3d_path`, `editor_3d_path`, `editor_2d_path`, `text_editor_path`) with a **fallback
+  chain** (`program_path()`: view/edit-3D default to the SAME program and to legacy
+  `avogadro_path`/`structure_editor_path`) and ONE **Settings ▸ External programs** dialog
+  (`ExternalProgramsDialog`) replacing the per-program menu lines — ORCA exe kept separate. These
+  path targets are the main future-extension point (JMol/PyMOL/Marvin = just set the path). (d)
+  geometry edit now **flags SMILES as possibly stale** (can't re-derive SMILES from coords) — a
+  once-per-molecule note + a locked-coords preview caveat. (e) removed the redundant **top-level
+  Recipes menu** (Reload/Add folder/Manage folders are all buttons on the Recipes tab). Still
+  needs a real ChemDraw draw-and-save pass; ChemDraw's own "save as Original/CDXML" prompts are
+  unavoidable (non-native `.mol`).
+- **Trajectory viewer path** (same branch) — a **5th program slot** `traj_viewer_path`
+  (fallback → `viewer_3d_path`) for opening an optimisation **`_trj.xyz`** as a movie
+  (Calc-tab "Open trajectory", node **Traj** button); `open_xyz_3d` gained a `slot=` arg.
+  PyMOL animates trajectories best — **verified locally**: a real ORCA HF/STO-3G water OPT
+  writes `_trj.xyz` and `PyMOLWin.exe <trj>` loads/steps the frames. NOTE for PyMOL 3 (conda
+  installer): point at **`PyMOLWin.exe`**, NOT the generated `PyMOL.bat` — the .bat is a conda
+  activation wrapper that ends `... PyMOLWin.exe` with **no `%*`**, so it drops the file
+  argument (opens PyMOL empty).
 
 ## Open work / TODO
 - Keymap catalogue is partial — only app-globals + plot keys are registered/rebindable so far;

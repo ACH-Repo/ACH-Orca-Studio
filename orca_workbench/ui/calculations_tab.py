@@ -2192,7 +2192,7 @@ class CalculationsTab(ttk.Frame):
                                  command=lambda p=geom: self._open_3d(p))
             if trj:
                 menu.add_command(label="Open trajectory as movie",
-                                 command=lambda p=trj: self._open_3d(p))
+                                 command=lambda p=trj: self._open_3d(p, slot="traj_viewer_path"))
 
         # Finished FREQ: open the .out in the 3D viewer to animate the normal modes
         # (Avogadro reads ORCA output directly; a bare .xyz has no mode data).
@@ -2370,9 +2370,9 @@ class CalculationsTab(ttk.Frame):
         p = os.path.join(self.app.project.root(), calc.rundir, name)
         return p if os.path.isfile(p) else None
 
-    def _open_3d(self, path):
+    def _open_3d(self, path, slot="viewer_3d_path"):
         from orca_workbench.ui.molecules_tab import open_xyz_3d
-        open_xyz_3d(self, self.app, path)
+        open_xyz_3d(self, self.app, path, slot=slot)
 
     # ---- post-hoc density / MO cubes (orca_plot on a finished .gbw) -----------
     def _generate_cube(self, calc):

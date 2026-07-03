@@ -167,26 +167,16 @@ class App(object):
         filemenu.add_command(label="Quit", command=self.on_quit)
         menubar.add_cascade(label="File", menu=filemenu)
 
-        recipemenu = tk.Menu(menubar, tearoff=0)
-        recipemenu.add_command(label="Reload recipes", command=self.reload_recipes)
-        recipemenu.add_command(label="Add recipe directory...", command=self.on_add_recipe_dir)
-        recipemenu.add_command(label="Manage recipe directories...",
-                               command=self.on_manage_recipe_dirs)
-        menubar.add_cascade(label="Recipes", menu=recipemenu)
+        # (No top-level Recipes menu — its Reload / Add folder / Manage folders all
+        # live as buttons on the Recipes tab now.)
 
-        # Settings — explicit places to set (and fix) external-program paths.
+        # Settings — external-program paths live in one abstract dialog so the menu
+        # doesn't grow a line per program; ORCA stays separate (it's not an editor).
         setmenu = tk.Menu(menubar, tearoff=0)
-        setmenu.add_command(label="Avogadro path...",
-                            command=lambda: self._set_program("avogadro_path", "Avogadro",
-                                "Path/command for Avogadro, used to open molecules on THIS machine. "
-                                "On the gateway, leave blank and use molden instead."))
+        setmenu.add_command(label="External programs...", command=self._on_external_programs)
         setmenu.add_command(label="ORCA executable...",
                             command=lambda: self._set_program("orca_path", "the ORCA executable",
                                 "Path to orca / orca.exe — used by 'Run locally' to run jobs on this machine."))
-        setmenu.add_command(label="Text editor (for recipes)...",
-                            command=lambda: self._set_program("text_editor_path", "your text editor",
-                                "Program to open a recipe's JSON when you double-click it. A GUI "
-                                "editor (Notepad++, Sublime, gedit, …); terminal editors won't work."))
         setmenu.add_command(label="molden module name...", command=self._set_molden_module)
         setmenu.add_separator()
         setmenu.add_command(label="Default cores per job...", command=self._set_default_cores)
@@ -480,6 +470,10 @@ class App(object):
                                           "Set {}".format(friendly), description)
         self.set_status("Set {} to: {}".format(friendly, path) if path
                         else "{} unset.".format(friendly))
+
+    def _on_external_programs(self):
+        extprog.edit_external_programs(self.root)
+        self.set_status("External program paths saved.")
 
     def _set_submit_delay(self):
         from tkinter import simpledialog

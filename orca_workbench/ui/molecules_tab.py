@@ -4,7 +4,9 @@ import os
 import platform
 import re
 import subprocess
+import tempfile
 import threading
+import time
 import uuid
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -13,6 +15,8 @@ from typing import Optional
 from orca_workbench.core import config as config_mod
 from orca_workbench.core import coords as coords_mod
 from orca_workbench.core import resolve as resolve_mod
+from orca_workbench.core import roundtrip as roundtrip_mod
+from orca_workbench.ui import extprog as extprog_mod
 from orca_workbench.core.project import Molecule
 from orca_workbench.ui.depict import smiles_to_photoimage
 from orca_workbench.ui.modal import fit_to_content, make_modal
@@ -57,6 +61,9 @@ class MoleculesTab(ttk.Frame):
         self._drag_item = None  # type: Optional[str]
         self._drag_moved = False
         self._drag_y0 = 0
+        # Molecules already warned (this session) that a geometry edit may have staled
+        # their SMILES — so iterative reloads don't nag each time.
+        self._geom_edit_warned = set()
         # Depiction cache {smiles: PhotoImage} so switching rows is instant.
         self._depict_cache = {}
         self._depict_image = None  # current displayed image (kept from GC)
@@ -198,6 +205,7 @@ class MoleculesTab(ttk.Frame):
         self.tree.bind("<Alt-Up>", lambda e: self._move_focused(-1), add="+")
         self.tree.bind("<Alt-Down>", lambda e: self._move_focused(+1), add="+")
         self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Button-3>", self._on_row_right_click)
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
         tip(self.tree, "Molecules in this project.\n\n"
                        "Row colors (status column shows the same info):\n"
@@ -309,9 +317,23 @@ class MoleculesTab(ttk.Frame):
 
         depict_frame = ttk.LabelFrame(vpaned, text="Structure (from SMILES)")
         vpaned.add(depict_frame, weight=2)
+        # Round-trip: open the current 2D structure in an external editor (ChemDraw /
+        # Marvin / …), edit, and read the new SMILES back. Molecules-tab only (prepping).
+        edit_bar = ttk.Frame(depict_frame)
+        edit_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self._edit_smiles_btn = ttk.Button(edit_bar, text="Edit 2D structure...",
+                                           command=self.on_edit_smiles_external)
+        self._edit_smiles_btn.pack(side=tk.RIGHT, padx=4, pady=(0, 2))
+        tip(self._edit_smiles_btn,
+            "Open this molecule's 2D structure in your external 2D editor (set under "
+            "Settings > External programs), draw/modify it, save, then import the edited "
+            "SMILES back here. Updates the SMILES only, never the 3D geometry. With no SMILES "
+            "yet you can draw one from scratch.\n\nShortcut: double-click the structure image.")
         self.depict_label = tk.Label(depict_frame, anchor=tk.CENTER, background="white",
                                      text="(no structure)", foreground="#888")
         self.depict_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # Double-click the depiction to edit the structure in the external 2D editor.
+        self.depict_label.bind("<Double-1>", lambda e: self.on_edit_smiles_external())
         # Re-render the current structure to fit when the panel is resized, so
         # it scales uniformly into the box instead of being clipped.
         self._current_depict_smiles = ""
@@ -1319,8 +1341,12 @@ class MoleculesTab(ttk.Frame):
         except IOError as e:
             text = "(failed to read XYZ: {})".format(e)
         if mol.coords_locked:
-            text = ("# imported coordinates (locked — SMILES generation is "
-                    "disabled for this entry)\n" + text)
+            note = ("# locked coordinates — this .xyz is authoritative (SMILES generation "
+                    "is disabled for this entry)")
+            if (mol.smiles or "").strip():
+                note += ("\n# NOTE: the recorded SMILES is reference only and may not match "
+                         "these coordinates")
+            text = note + "\n" + text
         self._set_preview(text)
 
     def _set_preview(self, text):
@@ -1465,7 +1491,227 @@ class MoleculesTab(ttk.Frame):
                 "(select it and press Ctrl+Enter, or click Generate XYZ).".format(mol.name),
             )
             return
+        # Double-click = VIEW only (read-only). The geometry EDIT round-trip is on the
+        # right-click menu so a plain double-click never pops the reload dialog.
+        self._view_geometry(mol)
+
+    def _on_row_right_click(self, event):
+        """Row context menu: view / edit geometry, and edit the 2D structure. The edit
+        round-trips live here (not on double-click) so browsing rows stays friction-free."""
+        row = self.tree.identify_row(event.y)
+        if row and row not in self.tree.selection():
+            self.tree.selection_set(row)
+        mol = self.app.project.molecule_by_filename(row) if row else None
+        menu = tk.Menu(self, tearoff=0)
+        has_xyz = bool(mol and mol.generated and mol.xyz_path)
+        menu.add_command(label="View geometry (3D)",
+                         state=tk.NORMAL if has_xyz else tk.DISABLED,
+                         command=lambda: mol and self._view_geometry(mol))
+        menu.add_command(label="Edit geometry (round-trip)...",
+                         state=tk.NORMAL if has_xyz else tk.DISABLED,
+                         command=lambda: mol and self._edit_geometry(mol))
+        menu.add_separator()
+        menu.add_command(label="Edit 2D structure (round-trip)...",
+                         state=tk.NORMAL if mol is not None else tk.DISABLED,
+                         command=self.on_edit_smiles_external)
+        # Defer grab_release to <Unmap> so the menu dismisses on click-away (on X11
+        # releasing it right after tk_popup leaves it posted-but-ungrabbed).
+        menu.bind("<Unmap>", lambda _e, m=menu: m.grab_release(), add="+")
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _view_geometry(self, mol):
+        # type: (Molecule) -> None
+        """Open the molecule's .xyz read-only in the configured 3D viewer (or the
+        gateway path dialog / molden fallback)."""
         open_xyz_3d(self, self.app, mol.xyz_path)
+
+    # -------------------------------------------------- SMILES round-trip (2D editor)
+
+    def on_edit_smiles_external(self):
+        """Launch an external 2D editor on the current structure, then read the edited
+        SMILES back. Works on the selected molecule or the draft; SMILES-only (never
+        touches the 3D geometry). With no SMILES yet, opens a blank canvas to draw one."""
+        target = self._current_target()
+        if target is None:
+            messagebox.showinfo("No molecule", "Select a molecule (or start a draft) first.")
+            return
+        editor = self._resolve_structure_editor()
+        if not editor:
+            return
+        smiles = (self.smiles_var.get() or "").strip()
+        tmpdir = tempfile.mkdtemp(prefix="owb_smiles_")
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", target.filename or "structure") or "structure"
+        molpath = os.path.join(tmpdir, stem + ".mol")
+        try:
+            roundtrip_mod.write_smiles_molfile(smiles, molpath)
+        except ImportError:
+            messagebox.showerror("RDKit needed",
+                                 "Editing SMILES externally needs RDKit to build the 2D file.\n"
+                                 "Install it:  pip install --user rdkit")
+            return
+        except ValueError as e:
+            messagebox.showerror("Bad SMILES", str(e))
+            return
+        try:
+            subprocess.Popen([editor, molpath])
+        except Exception as e:
+            messagebox.showerror("Launch failed",
+                                 "Could not launch the 2D editor:\n{}\n\n{}".format(editor, e))
+            return
+        launched_at = time.time()
+        EditRoundtripDialog(
+            self,
+            title="Edit structure in the 2D editor",
+            message=("Editing the structure of '{}'.\n\n"
+                     "In the editor: draw/modify the structure, then Save (an MDL molfile / .mol "
+                     "is ideal; ChemDraw's .cdxml is also read). Then click Import to read the "
+                     "SMILES back.\n\nThis updates the SMILES only, not the 3D geometry.\n\n"
+                     "Working file:\n{}".format(target.filename or "(draft)", molpath)),
+            action_label="Import edited structure",
+            on_action=lambda: self._import_edited_smiles(molpath, tmpdir, launched_at))
+
+    def _resolve_structure_editor(self):
+        # type: () -> Optional[str]
+        """Path to the external 2D editor (the `editor_2d_path` slot): the configured one,
+        else auto-detect ChemDraw, else ask (and remember). None if the user cancels."""
+        p = extprog_mod.program_path("editor_2d_path")
+        if p and (os.path.isfile(p) or _on_path(p)):
+            return p
+        for cand in _CHEMDRAW_CANDIDATES:
+            if os.path.isfile(cand):
+                config_mod.set_value("editor_2d_path", cand)
+                self.app.set_status("Using 2D editor: {}".format(cand))
+                return cand
+        messagebox.showinfo(
+            "Pick a 2D editor",
+            "No 2D structure editor is set yet. Choose the executable of ChemDraw, Marvin, "
+            "or another editor that can open an .mol file. It'll be remembered (Settings > "
+            "External programs).")
+        path = filedialog.askopenfilename(
+            title="Locate the 2D structure editor executable",
+            filetypes=[("Executable", "*.exe"), ("All files", "*.*")])
+        if not path:
+            return None
+        config_mod.set_value("editor_2d_path", path)
+        return path
+
+    def _import_edited_smiles(self, molpath, tmpdir, launched_at):
+        # type: (str, str, float) -> bool
+        """Read whatever the editor saved (the .mol we handed it, or a .cdxml/etc. it chose)
+        back into a SMILES and, if changed, update the field after a confirm. Returns True
+        to close the dialog."""
+        src = roundtrip_mod.newest_structure_file(tmpdir, after=launched_at)
+        if src is None:
+            src = molpath if os.path.isfile(molpath) else None
+        if src is None:
+            messagebox.showwarning(
+                "Nothing to import",
+                "No saved structure file was found in\n{}\n\nMake sure you saved in the editor "
+                "(an .mol molfile is safest).".format(tmpdir), parent=self)
+            return False
+        new_smiles = roundtrip_mod.read_structure_smiles(src)
+        if not new_smiles:
+            messagebox.showwarning(
+                "Unreadable",
+                "Couldn't read a structure from:\n{}\n\nIf it's a ChemDraw .cdxml, OpenBabel is "
+                "needed to read it — try saving as an MDL molfile (.mol) instead.".format(
+                    os.path.basename(src)), parent=self)
+            return False
+        old = (self.smiles_var.get() or "").strip()
+        if new_smiles == old:
+            self.app.set_status("Structure unchanged - SMILES kept.")
+            return True
+        if not messagebox.askyesno(
+                "Update SMILES",
+                "Replace the SMILES from the edited structure?\n\n"
+                "Old:  {}\nNew:  {}".format(old or "(none)", new_smiles), parent=self):
+            return False
+        # Setting the var runs _on_field_change: updates the molecule/draft, redraws the
+        # depiction, invalidates a generated geometry (-> pending), and (draft/fresh row)
+        # re-fills charge/mult.
+        self.smiles_var.set(new_smiles)
+        self.app.set_status("Imported edited SMILES: {}".format(new_smiles))
+        return True
+
+    # ------------------------------------------------- geometry round-trip (3D editor)
+
+    def _edit_geometry(self, mol):
+        # type: (Molecule) -> None
+        """Molecules-tab geometry round-trip: open the .xyz in the LOCAL 3D editor, then
+        Reload re-reads the file it saved. Falls back to the read-only viewer (OpenXyzDialog
+        / molden) when no local 3D editor is set (e.g. the gateway)."""
+        abs_xyz = mol.xyz_path
+        if not os.path.isabs(abs_xyz):
+            abs_xyz = os.path.join(self.app.project.root(), abs_xyz)
+        if not os.path.isfile(abs_xyz):
+            messagebox.showerror("File missing", "File not found:\n{}".format(abs_xyz))
+            return
+        avo = extprog_mod.program_path("editor_3d_path")
+        if not (avo and (os.path.isfile(avo) or _on_path(avo))):
+            # No local 3D editor to round-trip with — just view it (gateway dialog / molden).
+            open_xyz_3d(self, self.app, mol.xyz_path)
+            return
+        try:
+            subprocess.Popen([avo, abs_xyz])
+        except Exception as e:
+            messagebox.showerror("Launch failed",
+                                 "Could not launch the 3D editor:\n{}\n\n{}".format(avo, e))
+            return
+        EditRoundtripDialog(
+            self,
+            title="Edit geometry (round-trip)",
+            message=("Editing the geometry of '{}' in your 3D editor.\n\n"
+                     "In the editor: adjust the geometry, then Save so it overwrites the .xyz "
+                     "(in Avogadro, if it asks, choose Save/Export to the same file). Come back "
+                     "and click Reload to pull the changes into the app - you can reload as many "
+                     "times as you like.\n\nFile:\n{}".format(mol.filename, abs_xyz)),
+            action_label="Reload geometry",
+            on_action=lambda: self._reload_geometry(mol, abs_xyz),
+            keep_open=True)
+
+    def _reload_geometry(self, mol, abs_xyz):
+        # type: (Molecule, str) -> bool
+        """Re-read the (Avogadro-saved) .xyz. The geometry is already on disk, so this
+        refreshes the preview and locks the coords (a hand-edited geometry shouldn't be
+        clobbered by SMILES regeneration). Returns True but keeps the dialog open."""
+        try:
+            atoms, _meta = coords_mod.read_xyz(abs_xyz)
+        except Exception as e:
+            messagebox.showerror("Reload failed", "Could not read the .xyz:\n{}".format(e),
+                                 parent=self)
+            return False
+        if not atoms:
+            messagebox.showwarning("Empty", "The .xyz has no atoms - not reloaded.", parent=self)
+            return False
+        mol.generated = True
+        mol.gen_status = "ok"
+        mol.gen_error = None
+        first_edit = not mol.coords_locked
+        if first_edit:
+            mol.coords_locked = True   # hand-edited geometry is now authoritative
+            note = "geometry hand-edited in the 3D editor"
+            mol.comment = (mol.comment + "; " + note) if mol.comment else note
+        # A hand-edited geometry can drift from the recorded SMILES; we can't reliably
+        # re-derive SMILES from coordinates, so flag it (and the locked-coords preview
+        # note repeats the caveat). Warn once per molecule, only if a SMILES is set.
+        stale = bool((mol.smiles or "").strip())
+        if stale and mol.filename not in self._geom_edit_warned:
+            self._geom_edit_warned.add(mol.filename)
+            messagebox.showinfo(
+                "Geometry updated",
+                "The 3D geometry of '{}' is now the hand-edited one (locked; ORCA uses it "
+                "directly).\n\nHeads-up: its recorded SMILES\n  {}\nmay no longer match the "
+                "edited structure. SMILES can't be reliably re-derived from coordinates, so "
+                "it's kept for reference only - update it via 'Edit 2D structure' if needed."
+                .format(mol.filename, mol.smiles), parent=self)
+        self.app.mark_dirty()
+        self._update_row(mol)
+        if self._focus_filename == mol.filename:
+            self._update_preview(mol)
+        self.app.set_status(
+            "Reloaded geometry for '{}' ({} atoms).{}".format(
+                mol.filename, len(atoms), " SMILES may no longer match." if stale else ""))
+        return True
 
     def on_add_by_name(self):
         """Resolve a chemical name/identifier to a structure over the web and add it."""
@@ -1615,6 +1861,57 @@ def _on_path(name):
         return False
 
 
+# Common install locations of ChemDraw, tried when no 2D editor is configured yet.
+# (Revvity/PerkinElmer/CambridgeSoft across recent versions.) The user can override
+# via Settings > 2D structure editor.
+_CHEMDRAW_CANDIDATES = [
+    r"C:\Program Files\RevvitySignalsSoftware\ChemDrawApplications\ChemDraw\ChemDraw.exe",
+    r"C:\Program Files (x86)\RevvitySignalsSoftware\ChemDrawApplications\ChemDraw\ChemDraw.exe",
+    r"C:\Program Files\PerkinElmerInformatics\ChemOffice\ChemDraw\ChemDraw.exe",
+    r"C:\Program Files (x86)\PerkinElmerInformatics\ChemOffice\ChemDraw\ChemDraw.exe",
+    r"C:\Program Files\CambridgeSoft\ChemOffice\ChemDraw\ChemDraw.exe",
+    r"C:\Program Files (x86)\CambridgeSoft\ChemOffice\ChemDraw\ChemDraw.exe",
+]
+
+
+class EditRoundtripDialog(tk.Toplevel):
+    """Non-modal 'edit then re-import' handshake for the external-editor round-trips.
+
+    Shows instructions while the external editor (ChemDraw / Avogadro) is open, with an
+    action button (Import / Reload) that runs `on_action` — which returns True on success.
+    Non-modal so the app and the editor coexist; `keep_open` leaves it up after a
+    successful action so a geometry edit can be reloaded repeatedly."""
+
+    def __init__(self, parent, title, message, action_label, on_action, keep_open=False):
+        super().__init__(parent)
+        self.title(title)
+        self._on_action = on_action
+        self._keep_open = keep_open
+        ttk.Label(self, text=message, justify=tk.LEFT, wraplength=460).pack(
+            side=tk.TOP, fill=tk.X, padx=16, pady=(14, 8))
+        btns = ttk.Frame(self)
+        btns.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 12))
+        ttk.Button(btns, text="Cancel" if not keep_open else "Done",
+                   command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text=action_label, command=self._do).pack(side=tk.RIGHT, padx=4)
+        self.bind("<Escape>", lambda e: self.destroy())
+        fit_to_content(self)
+        try:
+            self.transient(parent.winfo_toplevel())
+        except tk.TclError:
+            pass
+        self.lift()
+
+    def _do(self):
+        try:
+            ok = self._on_action()
+        except Exception as e:
+            messagebox.showerror("Failed", str(e), parent=self)
+            return
+        if ok and not self._keep_open:
+            self.destroy()
+
+
 def open_in_molden(parent, xyz_path):
     # type: (tk.Misc, str) -> None
     """First-attempt launch of molden on the Lido gateway, displayed over the
@@ -1644,31 +1941,31 @@ def open_in_molden(parent, xyz_path):
             "X-forwarded session.".format(e))
 
 
-def open_xyz_3d(parent, app, xyz_path):
-    """Open an .xyz in 3D the way the Molecules tab double-click does: launch a
-    local Avogadro if one is configured and present on THIS machine, otherwise
-    the OpenXyzDialog (which offers molden on the gateway + hands you the path).
-    Works for a single geometry or a multi-frame trajectory — molden and Avogadro
-    both animate a multi-frame .xyz as a movie. Shared by the Molecules tab and
-    the Calculations-tab right-click (open optimised geometry / trajectory)."""
+def open_xyz_3d(parent, app, xyz_path, slot="viewer_3d_path"):
+    """Open an .xyz read-only in an external program if it's present on THIS machine,
+    otherwise the OpenXyzDialog (which offers molden on the gateway + hands you the
+    path). `slot` selects which configured program: `viewer_3d_path` (default) for a
+    single geometry, `traj_viewer_path` for a multi-frame optimisation trajectory
+    (PyMOL by preference) — each falls back to the 3D viewer if unset. Shared by the
+    Molecules / Calculations / Workflow tabs."""
     abs_xyz = xyz_path
     if not os.path.isabs(abs_xyz):
         abs_xyz = os.path.join(app.project.root(), abs_xyz)
     if not os.path.isfile(abs_xyz):
         messagebox.showerror("File missing", "File not found:\n{}".format(abs_xyz))
         return
-    # Only launch directly if Avogadro is on the machine the app *runs* on (on the
-    # gateway it isn't — your Avogadro is on your Windows PC, unreachable from a
+    # Only launch directly if the program is on the machine the app *runs* on (on the
+    # gateway it isn't — the local viewer is on the Windows PC, unreachable from a
     # cluster process), in which case the dialog hands you the path / offers molden.
-    avo = config_mod.get("avogadro_path", "")
-    if avo and (os.path.isfile(avo) or _on_path(avo)):
+    viewer = extprog_mod.program_path(slot)
+    if viewer and (os.path.isfile(viewer) or _on_path(viewer)):
         try:
-            subprocess.Popen([avo, abs_xyz])
-            app.set_status("Launched Avogadro for {}.".format(os.path.basename(abs_xyz)))
+            subprocess.Popen([viewer, abs_xyz])
+            app.set_status("Opened {} in the external viewer.".format(os.path.basename(abs_xyz)))
             return
         except Exception as e:
             messagebox.showerror("Launch failed",
-                                 "Could not launch Avogadro:\n{}\n\n{}".format(avo, e))
+                                 "Could not launch the viewer:\n{}\n\n{}".format(viewer, e))
             return
     OpenXyzDialog(parent, abs_xyz)
 
@@ -1788,7 +2085,7 @@ class AvogadroPathDialog(tk.Toplevel):
             self.var.set(path)
 
     def _ok(self):
-        path = self.var.get().strip()
+        path = extprog_mod.strip_path_quotes(self.var.get())
         if not path:
             messagebox.showinfo("Empty", "Enter a path or command, or Cancel.", parent=self)
             return
