@@ -418,24 +418,28 @@ class BaseSpectrumWindow(tk.Toplevel):
                     "zoom_box": "tcross", "pan_h": "sb_h_double_arrow",
                     "pan_v": "sb_v_double_arrow", "pan_free": "fleur"}
 
+    def _bind_action(self, widget, action_id, fn):
+        """Bind a rebindable action's current key sequence(s) on `widget`. Read from the
+        keymap at window-open time (rebinds apply to newly opened plots)."""
+        from orca_workbench.core import keymap
+        for seq in keymap.sequence_variants(keymap.sequence(action_id)):
+            widget.bind(seq, lambda e, f=fn: (f(), "break")[1])
+
     def _bind_plot_keys(self):
         w = self.canvas.get_tk_widget()
         w.bind("<Enter>", lambda e: w.focus_set(), add="+")
-        # Plain keys only fire while the pointer is over the plot (so they don't
-        # interfere with typing in the top fields).
-        for key, fn in (("f", self._key_full), ("m", self._key_focus_limits),
-                        ("z", lambda: self._cycle_nav(self._ZOOM_CYCLE)),
-                        ("p", lambda: self._cycle_nav(self._PAN_CYCLE)),
-                        ("r", self._redraw)):
-            for ks in (key, key.upper()):
-                w.bind("<KeyPress-{}>".format(ks), lambda e, f=fn: (f(), "break")[1])
+        # Plain keys bind on the CANVAS so they fire only while the pointer is over the
+        # plot (not while typing in the top fields). Sequences come from the keymap.
+        self._bind_action(w, "plot.reset", self._key_full)
+        self._bind_action(w, "plot.edit_limits", self._key_focus_limits)
+        self._bind_action(w, "plot.zoom", lambda: self._cycle_nav(self._ZOOM_CYCLE))
+        self._bind_action(w, "plot.pan", lambda: self._cycle_nav(self._PAN_CYCLE))
+        self._bind_action(w, "plot.redraw", self._redraw)
         w.bind("<Escape>", lambda e: (self._set_nav_mode(None), "break")[1])
-        # Window-wide shortcuts (safe modifiers / function keys).
-        self.bind("<F5>", lambda e: self._redraw())
-        self.bind("<Control-s>", lambda e: (self._key_save(), "break")[1])
-        self.bind("<Control-S>", lambda e: (self._key_save(), "break")[1])
-        self.bind("<Control-w>", lambda e: (self.destroy(), "break")[1])
-        self.bind("<Control-W>", lambda e: (self.destroy(), "break")[1])
+        # Modifier / function-key shortcuts bind window-wide (safe to fire off-canvas).
+        self.bind("<F5>", lambda e: (self._redraw(), "break")[1])
+        self._bind_action(self, "plot.save_image", self._key_save)
+        self._bind_action(self, "plot.close", self.destroy)
         self.bind("<Return>", self._activate_focused)
 
     def _activate_focused(self, _event=None):

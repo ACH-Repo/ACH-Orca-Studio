@@ -98,7 +98,6 @@ class App(object):
                 self._build_layout()
             # App-wide Ctrl+A (select all) in every entry/text widget.
             install_global_text_shortcuts(self.root)
-            self.root.bind_all("<F5>", lambda e: self._on_f5())
             with diag.timed("startup:reload_recipes"):
                 self.reload_recipes()
             with diag.timed("startup:refresh_all_tabs"):
@@ -197,6 +196,8 @@ class App(object):
         setmenu.add_command(label="SLURM submission delay...", command=self._set_submit_delay)
         setmenu.add_command(label="SLURM submit script (template)...",
                             command=self.on_edit_slurm_template)
+        setmenu.add_separator()
+        setmenu.add_command(label="Keyboard shortcuts...", command=self.on_edit_keybindings)
         menubar.add_cascade(label="Settings", menu=setmenu)
 
         helpmenu = tk.Menu(menubar, tearoff=0)
@@ -211,13 +212,41 @@ class App(object):
         menubar.add_cascade(label="Help", menu=helpmenu)
 
         self.root.config(menu=menubar)
-        self.root.bind_all("<Control-n>", lambda e: self.on_new())
-        self.root.bind_all("<Control-o>", lambda e: self.on_open())
-        self.root.bind_all("<Control-s>", lambda e: self.on_save())
-        self.root.bind_all("<Control-Shift-N>", lambda e: self._add_by_name_shortcut())
-        # Ctrl+Shift+O = import structure files (plain Ctrl+O is Open project).
-        self.root.bind_all("<Control-Shift-O>", lambda e: self._import_files_shortcut())
+        self._install_global_shortcuts()   # app-wide keys, via the rebindable keymap
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
+
+    def _install_global_shortcuts(self):
+        """Register the app-wide shortcut actions and bind them from the keymap."""
+        self._global_actions = {
+            "app.new_project": self.on_new,
+            "app.open_project": self.on_open,
+            "app.save_project": self.on_save,
+            "app.add_by_name": self._add_by_name_shortcut,
+            "app.import_files": self._import_files_shortcut,
+            "app.refresh": self._on_f5,
+        }
+        self._bound_global = {}   # action_id -> [sequences currently bound]
+        self.apply_global_keymap()
+
+    def apply_global_keymap(self):
+        """(Re)bind the app-wide shortcuts from the current keymap — called at startup
+        and whenever the Keyboard-shortcuts dialog changes one, so rebinds apply live."""
+        from orca_workbench.core import keymap
+        for aid, cb in getattr(self, "_global_actions", {}).items():
+            for old in self._bound_global.get(aid, []):
+                try:
+                    self.root.unbind_all(old)
+                except tk.TclError:
+                    pass
+            bound = []
+            for seq in keymap.sequence_variants(keymap.sequence(aid)):
+                self.root.bind_all(seq, lambda e, c=cb: c())
+                bound.append(seq)
+            self._bound_global[aid] = bound
+
+    def on_edit_keybindings(self):
+        from orca_workbench.ui.keybindings import KeybindingsDialog
+        KeybindingsDialog(self.root, on_change=self.apply_global_keymap)
 
     def _build_layout(self):
         toolbar = ttk.Frame(self.root)

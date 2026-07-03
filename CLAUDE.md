@@ -431,7 +431,30 @@ off the core path and gracefully degradable.
   firing it right after `tk_popup`, which on X11 left the menu posted-but-ungrabbed so it
   only closed on an item click); and the structure hover border (carried into the base).
 
+- **Rebindable hotkeys** (branch `rebindable-hotkeys`, off `main` after 1.3.0) — a
+  Settings ▸ **Keyboard shortcuts…** dialog to view/rebind/reset the app's hotkeys, the
+  "why don't more programs do this" feature. Foundation is a pure registry `core/keymap.py`:
+  action_id → {category, label, default Tk sequence}, with per-user overrides persisted in
+  config under `"keymap"` (setting a value == the default clears the override, so package
+  defaults keep flowing). Helpers: `sequence(id)` (override-or-default), `set_override/reset/
+  reset_all`, `humanize` (`<Control-Shift-n>`→`Ctrl+Shift+N`), `event_to_sequence(state,
+  keysym)` (capture a keypress → Tk sequence; None for bare modifiers), `sequence_variants`
+  (a plain letter also binds its upper-case so Shift/Caps still fire), `conflicts` (same-
+  category, normalised compare — cross-category app-vs-plot overlap is allowed since they're
+  different windows). UI: `ui/keybindings.KeybindingsDialog` (scrollable, grouped, click-to-
+  capture, Reset/Reset-all). Wiring: app-wide shortcuts (New/Open/Save/Add-by-name/Import/
+  Refresh) route through `App._install_global_shortcuts`/`apply_global_keymap` — the dialog's
+  `on_change` re-binds them **live** (unbind old seq on the `all` tag, bind new). Plot-window
+  keys (`BaseSpectrumWindow._bind_action` reads the keymap in `_bind_plot_keys`) apply to
+  **newly opened** plots. Catalogue registered so far: the 6 app globals + 7 plot keys (reset/
+  limits/zoom/pan/redraw/save/close); per-tab tree keys (Ctrl+L, Delete, …) can be added to
+  the registry later. Tests `tests/test_keymap.py` (registry/override/humanize/event/variants/
+  conflicts, fake-config injected so no real `~/.orca_workbench.json` write). 241 tests.
+
 ## Open work / TODO
+- Keymap catalogue is partial — only app-globals + plot keys are registered/rebindable so far;
+  the Molecules/Calc/Workflow tab tree shortcuts still bind directly. Extend `keymap` +
+  route those through `bind_action` to make them rebindable too.
 - The SLURM `--mem` line isn't driven by the global "memory per core" default (it lives
   in the submit-script template); if per-job `--mem` should scale with cores×maxcore,
   add a MEM placeholder to the template + render_slurm.
