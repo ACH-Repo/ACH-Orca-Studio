@@ -83,6 +83,11 @@ class PlannedCalc(object):
     # makes the build inject `! ... MOREAD` + `%moinp "<that calc's .gbw>"`. The
     # recipe MUST use the same basis as that parent. None = fresh SCF guess.
     orbital_source: Optional[str] = None
+    # Geometry constraints / a relaxed surface scan for an OPT job, injected into the
+    # ORCA input's %geom block (see core/geomspec.py). None = plain optimization.
+    # Shape: {"constraints": [{type, atoms, value?}, ...], "scan": {type, atoms, start,
+    # end, steps} | None}. Atom indices are 0-based (ORCA's convention).
+    geom_spec: Optional[dict] = None
 
     @classmethod
     def from_dict(cls, d):
@@ -93,6 +98,7 @@ class PlannedCalc(object):
         d.setdefault("gate", None)
         d.setdefault("origin_node", None)
         d.setdefault("orbital_source", None)
+        d.setdefault("geom_spec", None)
         return cls(**d)
 
     def children(self, project):

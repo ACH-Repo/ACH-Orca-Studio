@@ -28,6 +28,7 @@ from typing import List, Optional, Tuple
 from orca_workbench.core import config as config_mod
 from orca_workbench.core import coords as coords_mod
 from orca_workbench.core import discovery as discovery_mod
+from orca_workbench.core import geomspec as geomspec_mod
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.ui.shortcuts import install_tree_shift_select
 from orca_workbench.core import local_runner as local_runner_mod
@@ -1209,6 +1210,11 @@ class CalculationsTab(ttk.Frame):
             else:
                 self._log("MOREAD skipped for {}: orbital parent not built yet (no rundir)."
                           .format(self._short(calc)))
+        # Geometry constraints / a relaxed surface scan (%geom) for an OPT job, if the
+        # calc carries a spec. Injected as a %geom block; the recipe supplies `! Opt`.
+        gspec = getattr(calc, "geom_spec", None)
+        if not geomspec_mod.is_empty(gspec):
+            inp_text = inputs_mod.add_geom_block(inp_text, geomspec_mod.build_geom_inner(gspec))
         # Global hardware defaults (Settings > Default cores / memory per job): if set,
         # override the recipe's %pal nprocs / %maxcore so a user changes their PC specs
         # in ONE place instead of editing every recipe. 0 = leave the recipe's own. The
@@ -2143,6 +2149,14 @@ class CalculationsTab(ttk.Frame):
         calcs = [c for c in calcs if c is not None]
         menu = tk.Menu(self, tearoff=0)
 
+        # Geometry constraints / relaxed scan (OPT jobs): a per-calc %geom spec.
+        if len(calcs) == 1:
+            c0 = calcs[0]
+            cur = geomspec_mod.describe(getattr(c0, "geom_spec", None))
+            menu.add_command(label="Geometry constraints / scan...  [{}]".format(cur),
+                             command=lambda cc=c0: self._edit_geom_spec(cc))
+            menu.add_separator()
+
         finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
         finished_nmr = [c for c in calcs if self._is_finished_type(c, "NMR")]
         finished_uvvis = [c for c in calcs if self._is_finished_type(c, "TDDFT")]
@@ -2373,6 +2387,48 @@ class CalculationsTab(ttk.Frame):
     def _open_3d(self, path, slot="viewer_3d_path"):
         from orca_workbench.ui.molecules_tab import open_xyz_3d
         open_xyz_3d(self, self.app, path, slot=slot)
+
+    def _edit_geom_spec(self, calc):
+        """Edit the calc's geometry constraints / relaxed-scan spec (injected into the
+        ORCA input's %geom block at build time). Meaningful for OPT recipes only."""
+        from orca_workbench.ui.geomspec_dialog import GeomSpecDialog
+        mol = self.app.project.molecule_by_filename(calc.molecule_filename)
+        atoms = []
+        if mol and mol.xyz_path:
+            p = mol.xyz_path
+            if not os.path.isabs(p):
+                p = os.path.join(self.app.project.root(), p)
+            try:
+                atoms, _meta = coords_mod.read_xyz(p)
+            except Exception:
+                atoms = []
+        if not atoms:
+            messagebox.showinfo(
+                "No geometry yet",
+                "Generate this molecule's XYZ first (Molecules tab > Generate XYZ) so the "
+                "atom indices are known.")
+            return
+        recipe = self.app.get_recipe(calc.recipe_name)
+        if recipe is not None and not (recipe.calctype or "").upper().startswith("OPT"):
+            if not messagebox.askyesno(
+                    "Not an optimization",
+                    "Constraints and relaxed scans only take effect during a geometry "
+                    "optimization (`! Opt`), but '{}' is a {} recipe. Set the spec anyway?"
+                    .format(calc.recipe_name, recipe.calctype)):
+                return
+
+        def _save(spec):
+            calc.geom_spec = spec
+            if calc.exported:
+                self.app.set_status("Geometry spec saved - re-Build '{}' to apply it to the "
+                                    "input.".format(self._short(calc)))
+            else:
+                self.app.set_status("Geometry spec for {}: {}".format(
+                    self._short(calc), geomspec_mod.describe(spec)))
+            self.app.mark_dirty()
+            self.refresh()
+
+        GeomSpecDialog(self, atoms, getattr(calc, "geom_spec", None), _save)
 
     # ---- post-hoc density / MO cubes (orca_plot on a finished .gbw) -----------
     def _generate_cube(self, calc):

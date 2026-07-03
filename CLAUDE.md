@@ -503,6 +503,25 @@ off the core path and gracefully degradable.
   activation wrapper that ends `... PyMOLWin.exe` with **no `%*`**, so it drops the file
   argument (opens PyMOL empty).
 
+- **Geometry constraints + relaxed surface scans** (branch `relaxed-scans-constraints`,
+  off `main`) — roadmap #2, phase 1 (Calc tab). ONE unified "geometry spec" for OPT jobs,
+  rendered into ORCA's `%geom` block: **constraints** (freeze bond/angle/dihedral `{B a b [val] C}`
+  / `{A …}` / `{D …}`, or a Cartesian position `{C a C}`, optionally pinned at a value) and/or
+  **one relaxed scan** (`Scan\n <B/A/D> a b = r1, r2, N\n end` → energy profile). Pure
+  `core/geomspec.py` (spec dict → `build_geom_inner`; `validate`/`describe`/`coord_describe`;
+  atoms 0-based) + `inputs.add_geom_block` (injects after the `!` line, or splices sub-blocks into
+  an existing `%geom`). Stored on **`PlannedCalc.geom_spec`** (+migration), injected in `_build_one`
+  after MOREAD. UI: Calc-tab **right-click ▸ "Geometry constraints / scan…"** → `GeomSpecDialog`
+  (`ui/geomspec_dialog.py`, reusable — shows the molecule's atom list for index reference; warns if
+  the recipe isn't OPT). **Chained constrained opts** come for free (Derive/Optimize→Optimize passes
+  geometry, each calc has its own spec) — incl. the carboxylate "distance floor" via freeze-at-floor
+  → release → re-opt (ORCA constraints are hard freezes, no native inequality; the chain approximates
+  it). **Verified against real local ORCA 6.0.1**: a constrained OPT held an O–H bond at exactly
+  1.1000 Å; a relaxed scan produced the expected coordinate→energy surface + `.relaxscanact.dat`.
+  Tests `tests/test_geomspec.py` (261 total). TODO phase 2: the Optimize **node** carries the same
+  spec (config panel button → same dialog → factory passes it to the calc), and a **scan-energy
+  plot** (parse `.relaxscanact.dat`).
+
 ## Open work / TODO
 - Keymap catalogue is partial — only app-globals + plot keys are registered/rebindable so far;
   the Molecules/Calc/Workflow tab tree shortcuts still bind directly. Extend `keymap` +
