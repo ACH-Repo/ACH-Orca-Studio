@@ -455,6 +455,22 @@ off the core path and gracefully degradable.
   RDKit round-trips incl. carboxylate; ChemDraw + Avogadro both launch; UI import/reload/resolve
   smoke). The human draw-and-save step wasn't automatable — needs a real ChemDraw save to
   confirm the `.cdxml`/`.mol` read-back end to end.
+- **Editor round-trips — UX pass** (same branch, from a local ChemDraw/Avogadro test) —
+  (a) **row double-click = VIEW-only** again (`_view_geometry`); the geometry **edit** round-trip
+  moved to a **right-click menu** (`_on_row_right_click`: View geometry / Edit geometry / Edit 2D
+  structure) so browsing rows never pops the never-self-closing reload dialog. (b) **double-click
+  the depiction image** opens the 2D editor (intuitive; the button stays, renamed **"Edit 2D
+  structure..."**, product-neutral). (c) **abstract program paths**: new `extprog.PROGRAM_SLOTS`
+  (`viewer_3d_path`, `editor_3d_path`, `editor_2d_path`, `text_editor_path`) with a **fallback
+  chain** (`program_path()`: view/edit-3D default to the SAME program and to legacy
+  `avogadro_path`/`structure_editor_path`) and ONE **Settings ▸ External programs** dialog
+  (`ExternalProgramsDialog`) replacing the per-program menu lines — ORCA exe kept separate. These
+  path targets are the main future-extension point (JMol/PyMOL/Marvin = just set the path). (d)
+  geometry edit now **flags SMILES as possibly stale** (can't re-derive SMILES from coords) — a
+  once-per-molecule note + a locked-coords preview caveat. (e) removed the redundant **top-level
+  Recipes menu** (Reload/Add folder/Manage folders are all buttons on the Recipes tab). Still
+  needs a real ChemDraw draw-and-save pass; ChemDraw's own "save as Original/CDXML" prompts are
+  unavoidable (non-native `.mol`).
 
 ## Open work / TODO
 - The SLURM `--mem` line isn't driven by the global "memory per core" default (it lives
