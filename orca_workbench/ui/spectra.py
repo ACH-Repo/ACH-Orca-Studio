@@ -518,8 +518,13 @@ class BaseSpectrumWindow(tk.Toplevel):
                 or event.xdata is None or event.ydata is None):
             return
         ax = self.ax
+        # Capture the press-time data->pixel transform (inverse). Pan measures the drag
+        # in PIXELS through this FIXED transform, not via event.xdata — xdata is derived
+        # from the current limits, which the pan is changing, so using it feeds back and
+        # makes the motion erratic/accelerating.
         self._drag = {"x0": event.xdata, "y0": event.ydata,
-                      "xlim": ax.get_xlim(), "ylim": ax.get_ylim(), "mode": self._nav_mode}
+                      "xlim": ax.get_xlim(), "ylim": ax.get_ylim(),
+                      "inv": ax.transData.inverted(), "mode": self._nav_mode}
         if self._nav_mode.startswith("zoom"):
             # Blitted rubber band: snapshot the plot once, then only re-blit the
             # rectangle on motion (no full redraw per event — ThinLinc-friendly).
@@ -542,7 +547,13 @@ class BaseSpectrumWindow(tk.Toplevel):
         ax = self.ax
         mode = d["mode"]
         if mode.startswith("pan"):
-            dx, dy = d["x0"] - event.xdata, d["y0"] - event.ydata
+            inv = d.get("inv")
+            if inv is None:
+                return
+            # Data coords of the cursor's CURRENT pixel under the PRESS transform, so
+            # the mapping is fixed for the whole drag (no feedback -> smooth pan).
+            cx, cy = inv.transform((event.x, event.y))
+            dx, dy = d["x0"] - cx, d["y0"] - cy
             (x0, x1), (y0, y1) = d["xlim"], d["ylim"]
             if mode in ("pan_h", "pan_free"):
                 ax.set_xlim(x0 + dx, x1 + dx)
@@ -629,7 +640,9 @@ class BaseSpectrumWindow(tk.Toplevel):
             self._home_ylim = ax.get_ylim()
             self._apply_limit_boxes(ax)
             if self._stacked:
-                ax.legend(loc="best", fontsize=8, framealpha=0.9)   # 'best' dodges the peaks
+                # Fixed location, NOT 'best': loc='best' recomputes the legend position
+                # on every draw, so it hops around (and slows redraws) during a pan.
+                ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
             else:
                 m = self.mols[0]
                 self.struct.show(0, m["name"], m.get("smiles"), m["color"])
