@@ -180,7 +180,14 @@ class App(object):
         setmenu.add_command(label="Avogadro path...",
                             command=lambda: self._set_program("avogadro_path", "Avogadro",
                                 "Path/command for Avogadro, used to open molecules on THIS machine. "
-                                "On the gateway, leave blank and use molden instead."))
+                                "On the gateway, leave blank and use molden instead. Double-clicking "
+                                "a molecule row opens it here to edit the geometry (round-trip)."))
+        setmenu.add_command(label="2D structure editor (ChemDraw/Marvin)...",
+                            command=lambda: self._set_program("structure_editor_path",
+                                "the 2D structure editor",
+                                "Path/command for a 2D editor (ChemDraw, Marvin, ...). The Molecules "
+                                "tab's 'Edit in ChemDraw...' opens the structure here to edit the "
+                                "SMILES (round-trip). ChemDraw is auto-detected if installed."))
         setmenu.add_command(label="ORCA executable...",
                             command=lambda: self._set_program("orca_path", "the ORCA executable",
                                 "Path to orca / orca.exe — used by 'Run locally' to run jobs on this machine."))

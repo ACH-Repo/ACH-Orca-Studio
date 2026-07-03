@@ -431,6 +431,31 @@ off the core path and gracefully degradable.
   firing it right after `tk_popup`, which on X11 left the menu posted-but-ungrabbed so it
   only closed on an item click); and the structure hover border (carried into the base).
 
+- **Editor round-trips** (branch `editor-roundtrips`, off `main`/1.3.0) — external-editor
+  editing launched from the **Molecules tab only** (the prepping phase; everywhere else stays
+  read-only so a finished calc can't be mutated). Two independent round-trips:
+  (a) **SMILES via a 2D editor** — the Structure panel's **"Edit in ChemDraw..."** button
+  writes the current SMILES to a temp `.mol` (`roundtrip.write_smiles_molfile`, RDKit
+  `Compute2DCoords`; empty SMILES → blank canvas to draw from scratch), launches the editor,
+  and a non-modal `EditRoundtripDialog` waits; **Import** reads back whatever the editor saved
+  (`roundtrip.newest_structure_file` picks the newest structure file in the temp dir, so it
+  copes with ChemDraw choosing `.cdxml` over the `.mol`), converts to canonical SMILES
+  (`read_structure_smiles`: RDKit for `.mol/.sdf`, OpenBabel/pybel for `.cdx/.cdxml/.mrv`),
+  and on a confirmed diff sets `smiles_var` (→ `_on_field_change`: updates the mol, redraws
+  the depiction, invalidates a generated geometry, re-fills charge/mult). **SMILES only** —
+  never the geometry. (b) **Geometry via Avogadro** — double-clicking a molecule row now opens
+  its `.xyz` in a LOCAL Avogadro to edit (`_edit_geometry`); Avogadro saves in place, and
+  **Reload** (`_reload_geometry`, dialog stays open for iterate-reload) re-reads it, refreshes
+  the preview, and **locks the coords** (`coords_locked=True` + a provenance note — a
+  hand-edited geometry mustn't be clobbered by SMILES regen). Falls back to the read-only
+  viewer (`open_xyz_3d` → OpenXyzDialog/molden) when no local Avogadro (the gateway). Editor
+  paths: `config` keys `structure_editor_path` (auto-detects ChemDraw via `_CHEMDRAW_CANDIDATES`,
+  else asks) and the existing `avogadro_path`; both settable via **Settings**. New pure module
+  `core/roundtrip.py`; tests `tests/test_roundtrip.py` (242 total). **Verified locally** (real
+  RDKit round-trips incl. carboxylate; ChemDraw + Avogadro both launch; UI import/reload/resolve
+  smoke). The human draw-and-save step wasn't automatable — needs a real ChemDraw save to
+  confirm the `.cdxml`/`.mol` read-back end to end.
+
 ## Open work / TODO
 - The SLURM `--mem` line isn't driven by the global "memory per core" default (it lives
   in the submit-script template); if per-job `--mem` should scale with cores×maxcore,
