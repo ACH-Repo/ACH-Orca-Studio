@@ -439,7 +439,11 @@ off the core path and gracefully degradable.
   defaults keep flowing). Helpers: `sequence(id)` (override-or-default), `set_override/reset/
   reset_all`, `humanize` (`<Control-Shift-n>`→`Ctrl+Shift+N`), `event_to_sequence(state,
   keysym)` (capture a keypress → Tk sequence; None for bare modifiers), `sequence_variants`
-  (a plain letter also binds its upper-case so Shift/Caps still fire), `conflicts` (same-
+  (binds BOTH cases of a single-letter key — incl. WITH modifiers: `event_to_sequence`
+  lower-cases the captured letter → `<Control-Shift-m>`, but a real Ctrl+Shift+M keypress
+  reports keysym **`M`**, so Tk only matches the upper-case pattern; the first cut skipped the
+  case-expansion for modified sequences, so any Shift+letter rebind silently did nothing —
+  now fixed + tested), `conflicts` (same-
   category, normalised compare — cross-category app-vs-plot overlap is allowed since they're
   different windows). UI: `ui/keybindings.KeybindingsDialog` (scrollable, grouped, click-to-
   capture, Reset/Reset-all). Wiring: app-wide shortcuts (New/Open/Save/Add-by-name/Import/

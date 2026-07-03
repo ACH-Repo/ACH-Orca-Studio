@@ -157,17 +157,26 @@ def event_to_sequence(state, keysym):
 
 def sequence_variants(seq):
     # type: (str) -> "list"
-    """Sequences to actually bind for `seq`. For a plain single-letter key we also
-    bind the upper-case variant so Shift/Caps-Lock still triggers it (Tk treats
-    '<KeyPress-f>' and '<KeyPress-F>' as different events)."""
+    """Sequences to actually bind for `seq`. When the key is a single letter we bind
+    BOTH cases — Tk treats '<...-f>' and '<...-F>' as different events, and with Shift
+    held the event's keysym is the UPPER-case letter. This matters even WITH modifiers:
+    a rebind to Ctrl+Shift+M is captured/stored as '<Control-Shift-m>', but the actual
+    keypress reports keysym 'M', so without the upper-case variant nothing fires."""
     if not seq:
         return []
-    variants = [seq]
     inner = seq.strip("<>").replace("KeyPress-", "").replace("Key-", "")
-    if "-" not in inner and len(inner) == 1 and inner.isalpha():
-        variants.append("<KeyPress-{}>".format(inner.upper()))
-        variants[0] = "<KeyPress-{}>".format(inner.lower())
-    return variants
+    parts = inner.split("-")
+    key = parts[-1] if parts else ""
+    if len(key) == 1 and key.isalpha():
+        mods = parts[:-1]
+        if mods:
+            lo = "<" + "-".join(mods + [key.lower()]) + ">"
+            hi = "<" + "-".join(mods + [key.upper()]) + ">"
+        else:
+            lo = "<KeyPress-{}>".format(key.lower())
+            hi = "<KeyPress-{}>".format(key.upper())
+        return [lo, hi]
+    return [seq]
 
 
 # ---------------------------------------------------------- default catalogue

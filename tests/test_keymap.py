@@ -85,8 +85,14 @@ def test_sequence_variants_letter_both_cases():
     # a shorthand "<g>" normalises to KeyPress + upper variant
     v2 = keymap.sequence_variants("<g>")
     assert "<KeyPress-g>" in v2 and "<KeyPress-G>" in v2
-    # a modified sequence is bound as-is (no case expansion)
-    assert keymap.sequence_variants("<Control-s>") == ["<Control-s>"]
+    # a MODIFIED single-letter sequence also expands to both cases — with Shift held
+    # the event keysym is upper-case, so the lower-case pattern alone would never fire
+    # (this was the 'rebind to Ctrl+Shift+M does nothing' bug).
+    v3 = keymap.sequence_variants("<Control-Shift-m>")
+    assert "<Control-Shift-m>" in v3 and "<Control-Shift-M>" in v3
+    assert keymap.sequence_variants("<Control-s>") == ["<Control-s>", "<Control-S>"]
+    # non-letter keys are bound as-is
+    assert keymap.sequence_variants("<F5>") == ["<F5>"]
 
 
 def test_conflicts_normalised_within_category():
