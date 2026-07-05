@@ -746,6 +746,21 @@ off the core path and gracefully degradable.
   extracted from `workflow_tab` into reusable `ui/csv_columns.edit_csv_columns_dialog` (the node
   now delegates too — DRY), and `report_tab.on_generate` honours format + `csv_columns` +
   `csv_missing`. Headless-smoke-tested both. 335 tests.
+- **Transform ops round 3** (branch `relaxed-scans-constraints`, v1.4.1) — two Transform-op
+  additions from Christian's butane-alignment use case. (a) **`set_plane_angle`** — the RIGID
+  planar analogue of `set_dihedral`: rotate the (i,j,k) plane to a chosen angle (0–90°) from a
+  coordinate plane (xy/yz/xz) — 0 = lies flat in it, 90 = perpendicular. Rotates about the two
+  planes' line of intersection (minimal tilt; conformation unchanged); handles the
+  already-parallel degeneracy (intersection line undefined → tilt about any in-plane axis). Plus
+  `plane_angle()` (the measure). This is what pins a molecule's remaining spin after `align_axis`
+  fixes one bond to an axis (e.g. butane: `set_dihedral` 0-1-2-3=0, `align_axis` 1-2→x,
+  `set_plane_angle` to fix the tilt, `center` on the 1-2 midpoint). (b) **fractional bond
+  anchor** — `center` on a two-atom anchor now takes a `frac` ∈ [0,1] (0 = atom i, 1 = atom j,
+  **0.5 = midpoint = default**), so the origin can sit anywhere along a bond; the op dict omits
+  `frac` at the default midpoint (back-compat). Both wired into `ui/transform_dialog.py` (new op
+  type + reference-plane combo + angle field; a fraction field on the center op). Tests in
+  `tests/test_transform.py` (plane-angle hits target for every ref plane/target + rigidity +
+  parallel start; fractional anchor 0/0.25/0.5/1 + range validation). 340 tests.
 
 ## Open work / TODO
 - `--execute_project` now expands the Workflow graph AND materialises Transform/Combine

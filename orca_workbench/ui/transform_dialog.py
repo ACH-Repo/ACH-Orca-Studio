@@ -24,6 +24,7 @@ _TYPES = [
     ("mirror", "Mirror across a plane"),
     ("align_axis", "Align 2-atom axis to x/y/z"),
     ("align_plane", "Align 3-atom plane (face) to x/y/z"),
+    ("set_plane_angle", "Set 3-atom plane angle to a coordinate plane"),
     ("align_principal", "Align principal axes"),
     ("set_dihedral", "Set a dihedral (conformation edit)"),
 ]
@@ -184,10 +185,14 @@ class TransformOpDialog(tk.Toplevel):
             self._vars["anchor"] = tk.StringVar(
                 value=" ".join(str(a) for a in atoms))
             ttk.Label(self._fields_frame, text="...or anchor on atoms (overrides the "
-                      "above):\none index 'i', or two 'i j' = their midpoint (e.g. the "
-                      "middle\nof a bond):", justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
+                      "above):\none index 'i', or two 'i j' = a point between them "
+                      "(e.g. a\nbond):", justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
             ttk.Entry(self._fields_frame, textvariable=self._vars["anchor"],
                       width=12).pack(anchor=tk.W)
+            self._field("Fraction from i to j (0=i, 0.5=midpoint, 1=j):", "frac",
+                        default="0.5", width=8,
+                        hint="Only used for a two-atom anchor. Leave at 0.5 for the "
+                             "bond midpoint.")
         elif kind == "mirror":
             ttk.Label(self._fields_frame, text="Reflect across plane:").pack(
                 anchor=tk.W, pady=(4, 0))
@@ -220,6 +225,23 @@ class TransformOpDialog(tk.Toplevel):
             self._target_combo("z")
             ttk.Label(self._fields_frame, text="The plane through the three atoms is "
                       "rotated so its NORMAL points along the target axis.",
+                      foreground="#777", wraplength=250, justify=tk.LEFT).pack(
+                          anchor=tk.W, pady=(2, 0))
+        elif kind == "set_plane_angle":
+            self._field("Atom i:", "i", default="0", width=8)
+            self._field("Atom j:", "j", default="1", width=8)
+            self._field("Atom k:", "k", default="2", width=8)
+            ttk.Label(self._fields_frame, text="Reference coordinate plane:").pack(
+                anchor=tk.W, pady=(4, 0))
+            self._vars["plane"] = tk.StringVar(value=self._op.get("plane", "xy"))
+            ttk.Combobox(self._fields_frame, textvariable=self._vars["plane"],
+                         state="readonly", values=["xy", "yz", "xz"],
+                         width=5).pack(anchor=tk.W)
+            self._field("Angle to that plane (0-90 degrees):", "angle", default="0")
+            ttk.Label(self._fields_frame, text="Rigidly tilts the (i,j,k) plane to the "
+                      "chosen angle from the coordinate plane: 0 = lies flat in it, "
+                      "90 = stands perpendicular. Rotation is about the two planes' line "
+                      "of intersection (minimal tilt); the conformation is unchanged.",
                       foreground="#777", wraplength=250, justify=tk.LEFT).pack(
                           anchor=tk.W, pady=(2, 0))
         elif kind == "align_principal":
@@ -261,6 +283,14 @@ class TransformOpDialog(tk.Toplevel):
                 anchor = self._vars["anchor"].get().replace(",", " ").split()
                 if anchor:
                     op["atoms"] = [int(a) for a in anchor]
+                # Fraction only matters for a two-atom anchor; store it only when
+                # it's non-default, so plain-midpoint ops stay clean.
+                frac_s = (self._vars.get("frac").get().strip()
+                          if self._vars.get("frac") is not None else "")
+                if frac_s and len(anchor) == 2:
+                    fr = float(frac_s)
+                    if abs(fr - 0.5) > 1e-12:
+                        op["frac"] = fr
             elif kind == "mirror":
                 op["plane"] = self._vars["plane"].get()
                 ctr = self._vars["center"].get().strip()
@@ -274,6 +304,11 @@ class TransformOpDialog(tk.Toplevel):
                 for key in ("i", "j", "k"):
                     op[key] = int(self._vars[key].get())
                 op["target"] = self._vars["target"].get()
+            elif kind == "set_plane_angle":
+                for key in ("i", "j", "k"):
+                    op[key] = int(self._vars[key].get())
+                op["plane"] = self._vars["plane"].get()
+                op["angle"] = float(self._vars["angle"].get())
             elif kind == "align_principal":
                 op["order"] = self._vars["order"].get().strip().lower()
             elif kind == "set_dihedral":

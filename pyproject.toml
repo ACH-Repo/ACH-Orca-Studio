@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # unrelated ORCA output-parsing package — unrelated to this project.)
 [project]
 name = "orca-workbench"
-version = "1.4.0"
+version = "1.4.1"
 description = "Desktop GUI for building, launching, monitoring, and analysing ORCA quantum-chemistry calculations on SLURM clusters"
 readme = "README.md"
 requires-python = ">=3.9"
