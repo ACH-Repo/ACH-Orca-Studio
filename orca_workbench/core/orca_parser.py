@@ -73,6 +73,7 @@ def parse_orca_output(text):
     rms_grads = [float(x) for x in _RMS_GRAD.findall(text)]
     max_grads = [float(x) for x in _MAX_GRAD.findall(text)]
     opt_cycles = [int(x) for x in _OPT_CYCLE.findall(text)]
+    scf_blocks = parse_scf_blocks(text)
     return {
         "final_energies": final_energies,
         "rms_grads": rms_grads,
@@ -81,35 +82,51 @@ def parse_orca_output(text):
         # correct even when only the tail of a huge .out is parsed (see the
         # tail-read in the Calculations tab). Equal to the count for a full file.
         "n_opt_cycles": max(opt_cycles) if opt_cycles else 0,
-        "scf_iterations": _parse_last_scf_block(text),
+        "scf_iterations": scf_blocks[-1] if scf_blocks else [],
+        # EVERY SCF block in file order (one per opt cycle for an OPT job) — the
+        # live plot shows the full history, not just the latest cycle.
+        "scf_blocks": scf_blocks,
         "terminated_normally": bool(_TERM_OK.search(text)),
         "has_error": bool(_ERROR.search(text)),
     }
 
 
+def parse_scf_blocks(text):
+    # type: (str) -> List[List[float]]
+    """Per-iteration energies of EVERY SCF block, in file order.
+
+    One block per SCF — for a geometry optimisation that's one per opt cycle,
+    so the live plot can show the whole SCF history instead of only the latest
+    cycle. ORCA 6 starts an SCF with a D-I-I-S table that may hand over to an
+    S-O-S-C-F table (iteration numbers continue across the handover), so a
+    S-O-S-C-F header while a block is OPEN continues it; after a stop marker it
+    starts a new block (a pure-SOSCF run). Warnings/sub-headers interleaved
+    between iteration rows are ignored, as before.
+    """
+    blocks = []   # type: List[List[float]]
+    cur = None    # the open block, or None between blocks
+    for line in text.splitlines():
+        if "D-I-I-S" in line or "S-O-S-C-F" in line:
+            if cur is None:
+                cur = []
+                blocks.append(cur)
+            continue
+        if any(marker in line for marker in _SCF_STOP_MARKERS):
+            cur = None
+            continue
+        if cur is not None:
+            m = _SCF_ITER_LINE.match(line)
+            if m:
+                cur.append(float(m.group(2)))
+    return [b for b in blocks if b]
+
+
 def _parse_last_scf_block(text):
     # type: (str) -> List[float]
-    """Pull per-iteration energies from the most recent SCF block.
-
-    ORCA 6 starts an SCF with a D-I-I-S table that may hand over to an
-    S-O-S-C-F table (iteration numbers continue across the handover). We anchor
-    on the last D-I-I-S header (falling back to S-O-S-C-F for pure-SOSCF runs)
-    and collect every iteration row until a hard stop marker — NOT stopping on
-    the warnings, separators, and sub-headers ORCA interleaves between rows.
-    """
-    anchor = text.rfind("D-I-I-S")
-    if anchor == -1:
-        anchor = text.rfind("S-O-S-C-F")
-    if anchor == -1:
-        return []
-    energies = []
-    for line in text[anchor:].splitlines():
-        if any(marker in line for marker in _SCF_STOP_MARKERS):
-            break
-        m = _SCF_ITER_LINE.match(line)
-        if m:
-            energies.append(float(m.group(2)))
-    return energies
+    """The most recent SCF block's per-iteration energies (kept for callers of
+    the old single-block API; parse_scf_blocks has the full history)."""
+    blocks = parse_scf_blocks(text)
+    return blocks[-1] if blocks else []
 
 
 def short_status(parsed):
@@ -455,6 +472,54 @@ def parse_absorption_spectrum(text):
                        "wavelength_nm": nm,
                        "fosc": fosc})
     return states
+
+
+_SCAN_HEADER = re.compile(r"(?im)^\s*The Calculated Surface using the .*energy\s*$")
+_SCAN_ROW = re.compile(r"^\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*$")
+
+
+def parse_relaxed_scan(text):
+    # type: (str) -> List[dict]
+    """Relaxed surface-scan profile from an OPT+Scan .out: a list of
+    {coordinate, energy} (energy in Hartree), in scan order.
+
+    ORCA prints a 'The Calculated Surface using the <SCF/MP2/...> energy' block of
+    `coordinate  energy` rows (the same data it writes to <base>.relaxscanact.dat).
+    We read the LAST such block. Returns [] if there's no scan surface.
+    """
+    m = None
+    for m in _SCAN_HEADER.finditer(text):
+        pass                       # keep the last header match
+    if m is None:
+        return []
+    points = []
+    for line in text[m.end():].splitlines():
+        s = line.strip()
+        if not s:
+            if points:
+                break              # blank line ends the table once rows have begun
+            continue
+        rm = _SCAN_ROW.match(line)
+        if rm:
+            points.append({"coordinate": float(rm.group(1)), "energy": float(rm.group(2))})
+        elif points:
+            break                  # a non-row line ends the table
+    return points
+
+
+def parse_relaxed_scan_dat(text):
+    # type: (str) -> List[dict]
+    """Same profile from a <base>.relaxscanact.dat file's text (2 whitespace-separated
+    columns: coordinate, energy). Returns [] if nothing parses."""
+    points = []
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                points.append({"coordinate": float(parts[0]), "energy": float(parts[1])})
+            except ValueError:
+                continue
+    return points
 
 
 def count_xyz_frames(path):

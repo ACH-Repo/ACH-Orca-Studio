@@ -305,11 +305,54 @@ _CSV_FIELDS = ["id", "label", "molecule", "calctype", "method", "terminated_norm
                "mulliken_min", "mulliken_max",
                "g_iso", "n_hyperfine_nuclei", "max_abs_A_iso_MHz"]
 
+# Human-friendly default headers for the customisable CSV, in catalogue order.
+# The Report node's CSV editor lists these; a column entry is {"key","header"}.
+_CSV_COLUMN_LABELS = {
+    "id": "Calc ID", "label": "Label", "molecule": "Molecule", "calctype": "Type",
+    "method": "Method", "terminated_normally": "Terminated OK",
+    "final_energy_Eh": "Final energy (Eh)", "gibbs_free_energy_Eh": "Gibbs G (Eh)",
+    "enthalpy_Eh": "Enthalpy H (Eh)", "zpe_Eh": "ZPE (Eh)",
+    "n_imaginary": "# imaginary freq", "lowest_freq_cm": "Lowest freq (cm-1)",
+    "dipole_debye": "Dipole (Debye)", "homo_lumo_gap_eV": "HOMO-LUMO gap (eV)",
+    "n_nmr_nuclei": "# NMR nuclei", "n_excited_states": "# excited states",
+    "lambda_max_nm": "lambda_max (nm)", "max_fosc": "Max fosc",
+    "mulliken_min": "Mulliken min", "mulliken_max": "Mulliken max",
+    "g_iso": "g_iso", "n_hyperfine_nuclei": "# hyperfine nuclei",
+    "max_abs_A_iso_MHz": "Max |A_iso| (MHz)",
+}
 
-def write_csv(report, path):
-    # type: (dict, str) -> None
+
+def available_csv_columns():
+    # type: () -> list
+    """The catalogue of picker-able CSV columns: [{"key","label"}, ...] in a
+    sensible left-to-right default order. One row per calculation."""
+    return [{"key": k, "label": _CSV_COLUMN_LABELS.get(k, k)} for k in _CSV_FIELDS]
+
+
+def default_csv_columns():
+    # type: () -> list
+    """The default column spec (every column, default headers) — used when a
+    Report node hasn't customised its CSV."""
+    return [{"key": k, "header": _CSV_COLUMN_LABELS.get(k, k)} for k in _CSV_FIELDS]
+
+
+def write_csv(report, path, columns=None, missing=""):
+    # type: (dict, str, Optional[list], str) -> None
+    """Write the flat per-calc CSV. `columns` is an ordered list of
+    {"key","header"} (defaults to every column); `missing` is what a calc that
+    lacks a value writes ("" for a blank cell, or "NaN" for pandas). Rows are
+    calculations — the canonical unit (a molecule is now ambiguous once Transform/
+    Combine can synthesise geometries)."""
+    cols = columns if columns else default_csv_columns()
+    headers = [c.get("header") or _CSV_COLUMN_LABELS.get(c["key"], c["key"]) for c in cols]
+    keys = [c["key"] for c in cols]
     with open(path, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=_CSV_FIELDS, extrasaction="ignore")
-        w.writeheader()
+        w = csv.writer(f)
+        w.writerow(headers)
         for entry in report.get("calculations", []):
-            w.writerow(_csv_row(entry))
+            row = _csv_row(entry)
+            out = []
+            for k in keys:
+                v = row.get(k)
+                out.append(missing if v is None else v)
+            w.writerow(out)

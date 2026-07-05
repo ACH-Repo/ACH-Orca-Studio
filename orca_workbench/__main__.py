@@ -42,6 +42,15 @@ def _print_usage():
     print("  --run FILE.inp      Headless, no GUI: on a SLURM login node, submit FILE.inp")
     print("                      as a proper batch job (node-local scratch + copy-back);")
     print("                      on a plain machine, run it locally (orca FILE > FILE.out).")
+    print("  --execute_project PROJECT.json")
+    print("                      Headless, no GUI: EXPAND the project's Workflow graph")
+    print("                      (materialising any Transform/Combine geometries), then build")
+    print("                      every resulting calc and submit them as a SLURM dependency")
+    print("                      chain (login node) or run them locally in order (plain")
+    print("                      machine). Design the project in the GUI, copy project.json +")
+    print("                      XYZ_INI/ to the cluster, then run this - no Generate step")
+    print("                      needed. Add --local or --slurm to force the mode, or")
+    print("                      --no-expand to run only already-generated calcs.")
     print("  --simple, --gateway_mode")
     print("                      Lightweight mode: load only the core pipeline tabs")
     print("                      (Molecules/Recipes/Calculations/Report), build them")
@@ -74,6 +83,19 @@ def _cli():
         # exit (so `--run` is scriptable like a bare `orca my.inp`).
         ok = not (msg.startswith("error") or "failed" in msg or "(exit " in msg)
         sys.exit(0 if ok else 1)
+
+    # Headless whole-project build + run/submit — no display needed.
+    if "--execute_project" in sys.argv:
+        idx = sys.argv.index("--execute_project")
+        if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith("-"):
+            print("error: --execute_project needs a path to a project .json file")
+            sys.exit(2)
+        force = "local" if "--local" in sys.argv else ("slurm" if "--slurm" in sys.argv else None)
+        from orca_workbench.core.project_runner import execute_project_file
+        msg = execute_project_file(sys.argv[idx + 1], force=force,
+                                   expand="--no-expand" not in sys.argv)
+        print(msg)
+        sys.exit(1 if msg.startswith("error") else 0)
 
     # Live diagnostics mode: instrument the GUI and write a perf log on quit.
     diag_on = ("--diagnose" in sys.argv or "-d" in sys.argv

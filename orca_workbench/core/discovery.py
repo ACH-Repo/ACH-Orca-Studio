@@ -415,6 +415,12 @@ def import_dir(project, src_dir, save_recipe=None, category="imported",
             geosrc = "initial" if prov.get("geometry_source") == "initial" \
                 else "file:" + rec["inp_rel"]
             job_id = _scan_jobid_from_files(rec["rundir_abs"], rec["base"])
+            if job_id is None and os.path.isfile(
+                    os.path.join(rec["rundir_abs"], rec["base"] + "-local.out")):
+                # The app's own local runner writes <mol>-local.out with job id
+                # "local" — restore that identity so status/harvest work as if
+                # the run had never left the project.
+                job_id = "local"
             if job_id is None and os.path.isfile(os.path.join(rec["rundir_abs"], rec["base"] + ".out")):
                 job_id = "imported"   # truthy sentinel; find_output_file globs the .out
             if job_id:

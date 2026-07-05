@@ -307,6 +307,39 @@ def set_maxcore(inp_text, mb):
     return "\n".join(out) if inserted else inp_text
 
 
+GEOM_START_RE = re.compile(r"(?im)^[ \t]*%geom\b")
+
+
+def add_geom_block(inp_text, geom_inner):
+    # type: (str, str) -> str
+    """Inject geometry constraints / a relaxed scan into an ORCA input.
+
+    `geom_inner` is the indented Constraints/Scan sub-block text from
+    `geomspec.build_geom_inner`. If the input already has a `%geom` block we insert
+    the sub-blocks right after its opening line (ORCA takes %geom sub-blocks in any
+    order); otherwise we add a fresh `%geom … end` after the first `!` keyword line.
+    Empty `geom_inner` returns the text unchanged. (A relaxed scan / constraints need
+    `! Opt`, which is the recipe's job — this only injects the block.)"""
+    if not geom_inner or not geom_inner.strip():
+        return inp_text
+    lines = inp_text.replace("\r\n", "\n").split("\n")
+    for i, ln in enumerate(lines):
+        if GEOM_START_RE.match(ln):
+            lines[i + 1:i + 1] = geom_inner.split("\n")
+            return "\n".join(lines)
+    wrapped = ["%geom"] + geom_inner.split("\n") + ["end"]
+    out = []
+    inserted = False
+    for ln in lines:
+        out.append(ln)
+        if not inserted and ln.lstrip().startswith("!"):
+            out.extend(wrapped)
+            inserted = True
+    if not inserted:
+        return "\n".join(wrapped + lines)
+    return "\n".join(out)
+
+
 XYZ_BLOCK_RE = re.compile(
     r"\*\s*xyz\s*([+-]?\d+)\s+(\d+)\s+([\s\S]*?)\*",
     re.IGNORECASE,

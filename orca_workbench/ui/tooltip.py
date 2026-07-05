@@ -31,6 +31,17 @@ def set_enabled(value):
     _ENABLED = bool(value)
 
 
+def set_colors(bg, fg):
+    # type: (str, str) -> None
+    """Set the tooltip popup colours (called by the skin/theming layer). Read at
+    show time, so it applies to every tooltip from here on."""
+    global _BG, _FG
+    if bg:
+        _BG = bg
+    if fg:
+        _FG = fg
+
+
 def is_enabled():
     # type: () -> bool
     return _ENABLED

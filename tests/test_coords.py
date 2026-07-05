@@ -331,3 +331,29 @@ def test_read_structures_heuristic_fallback(tmp_path):
     atoms, meta = structs[0]
     assert [a[0] for a in atoms] == ["O", "H", "H"]
     assert meta.get("source") == "heuristic"
+
+
+def test_write_structure_file_native_xyz(tmp_path):
+    from orca_workbench.core.coords import write_structure_file, _read_xyz_frames
+    atoms = [("O", 0.0, 0.0, 0.0), ("H", 0.96, 0.0, 0.0)]
+    p = str(tmp_path / "w.xyz")
+    assert write_structure_file(p, atoms, "water-ish") == "native"
+    frames = _read_xyz_frames(p)
+    assert len(frames) == 1 and len(frames[0][0]) == 2
+
+
+def test_write_structure_file_converted_or_clear_error(tmp_path):
+    # .mol goes through OpenBabel/RDKit when installed; otherwise the error
+    # must NAME the missing backends (never fail silently).
+    from orca_workbench.core.coords import write_structure_file
+    import pytest as _pytest
+    atoms = [("O", 0.0, 0.0, 0.0), ("H", 0.96, 0.0, 0.0)]
+    p = str(tmp_path / "w.mol")
+    try:
+        backend = write_structure_file(p, atoms, "w")
+    except ValueError as e:
+        assert "OpenBabel" in str(e) or "RDKit" in str(e)
+        return
+    assert backend in ("openbabel", "rdkit")
+    import os as _os
+    assert _os.path.getsize(p) > 0

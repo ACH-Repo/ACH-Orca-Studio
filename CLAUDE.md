@@ -503,7 +503,271 @@ off the core path and gracefully degradable.
   activation wrapper that ends `... PyMOLWin.exe` with **no `%*`**, so it drops the file
   argument (opens PyMOL empty).
 
+- **Geometry constraints + relaxed surface scans** (branch `relaxed-scans-constraints`,
+  off `main`) — roadmap #2, COMPLETE (Calc tab + Workflow node + scan plot). ONE unified
+  "geometry spec" for OPT jobs,
+  rendered into ORCA's `%geom` block: **constraints** (freeze bond/angle/dihedral `{B a b [val] C}`
+  / `{A …}` / `{D …}`, or a Cartesian position `{C a C}`, optionally pinned at a value) and/or
+  **one relaxed scan** (`Scan\n <B/A/D> a b = r1, r2, N\n end` → energy profile). Pure
+  `core/geomspec.py` (spec dict → `build_geom_inner`; `validate`/`describe`/`coord_describe`;
+  atoms 0-based) + `inputs.add_geom_block` (injects after the `!` line, or splices sub-blocks into
+  an existing `%geom`). Stored on **`PlannedCalc.geom_spec`** (+migration), injected in `_build_one`
+  after MOREAD. UI: Calc-tab **right-click ▸ "Geometry constraints / scan…"** → `GeomSpecDialog`
+  (`ui/geomspec_dialog.py`, reusable — shows the molecule's atom list for index reference; warns if
+  the recipe isn't OPT). **Chained constrained opts** come for free (Derive/Optimize→Optimize passes
+  geometry, each calc has its own spec) — incl. the carboxylate "distance floor" via freeze-at-floor
+  → release → re-opt (ORCA constraints are hard freezes, no native inequality; the chain approximates
+  it). **Verified against real local ORCA 6.0.1**: a constrained OPT held an O–H bond at exactly
+  1.1000 Å; a relaxed scan produced the expected coordinate→energy surface + `.relaxscanact.dat`.
+  Phase 2: the **Optimize node** carries the same spec (config-panel "Constraints / scan…" button →
+  same dialog, shows the FIRST molecule's atoms for reference; the expand factory reads
+  `node.config['geom_spec']` — no signature change — and sets it on each calc, unfinished calcs
+  adopt graph edits). **Scan-energy plot**: `orca_parser.parse_relaxed_scan` (the "Calculated
+  Surface" table in the .out) / `parse_relaxed_scan_dat` (the `.relaxscanact.dat`), shown by
+  `plot_window.ScanPlotWindow` (ΔE kcal/mol vs the scanned coordinate, min marked; absolute-Eh
+  toggle) via Calc-tab right-click **"Plot scan energy profile"** on a finished OPT whose .out has a
+  scan surface. Tests `tests/test_geomspec.py` (263 total, incl. scan parsers).
+- **Skins / Styles** (branch `relaxed-scans-constraints`, roadmap #3 "styling
+  intermission") — re-skin the whole app, live. NOT a notebook tab: a right-aligned
+  **Styles...** button on the top toolbar (next to "Show tooltips") opens the gallery
+  as a non-modal dialog (`App.on_open_styles`) — appearance isn't part of the
+  fundamental pipeline, and ttk can't right-align a single notebook tab. Pure
+  registry `core/theme.py`: ordered skin dicts (`id`, `label`, `tagline`, `ttk_base`,
+  flat palette) + `active_skin_id`/`set_active_skin_id` persisted in config under
+  `"skin"` (per-user, never in project files). Four skins: **Default** (native, a
+  deliberate no-op so a fresh launch is pixel-identical to before), **Dark** (neutral
+  VS-Code-ish), **Frutiger Aero** (bright glassy sky-blue + fresh green — the "make it
+  brighter" brief), **Boombox** (Winamp brushed-metal + green LCD accent). The applier
+  `ui/theming.py` solves Tkinter's two-worlds problem: **ttk** widgets restyle globally
+  by switching the base theme to `clam` and configuring styles (no tree walk needed);
+  **classic tk** widgets (Text/Listbox/Canvas/Menu) are recoloured by (a) seeding the
+  option DB for future widgets/dialogs and (b) a recursive tree walk. The walk is
+  **conservative** — a classic widget's colour is only overwritten if it's currently one
+  we "manage" (a probed native default, or a colour some skin paints), so intentionally
+  coloured widgets survive every skin: the workflow Run/Generate/Submit buttons, the red
+  DECONSTRUCT/DELETE, LCD-style fields. **Contrast rule** (from user testing): the
+  fg/selection/caret repaint is GATED on the widget's bg being managed too — a widget
+  keeping a custom pale bg (amber Run, blue Refresh set bg= but not fg=) must also keep
+  its own fg, else dark skins painted light text onto light custom buttons. `theme.TAG_NAMES` covers every Treeview lifecycle
+  row tag (Molecules/Calc/Recipes) so status rows stay legible on dark skins (re-tinted
+  per-Treeview in the walk). Tooltip colours via `tooltip.set_colors`. Wiring: `App.
+  apply_skin` (Styles tab + startup) repaints + persists; `_apply_startup_skin` runs only
+  when `not is_simple()` and skips the default (keeping the native path untouched); lazy
+  tabs re-run the applier on first build so late widgets get themed. The Styles tab shows
+  a card per skin with a live mini-preview canvas (mock window: titlebar/surface/selected-
+  row/button). **NOT built in `--simple`/gateway mode** (styling is off the low-latency
+  path, per the roadmap). Node-graph canvas + matplotlib plots keep their purpose-built
+  colours (only their backdrop themes). **Verified locally** (real ORCA-workbench GUI on
+  Windows): all four skins apply with no exception, semantic button colours preserved,
+  default stays native. Tests `tests/test_theme.py` (registry/keys/tags/roundtrip, fake
+  config; 274 total). Reference: `Ngram Game`'s CSS-variable skins (aurora=Sonique,
+  boombox=Winamp) — same idea, re-expressed for ttk. Still wants a ThinLinc visual pass.
+- **Transform + Combine workflow nodes** (branch `relaxed-scans-constraints`) — geometry
+  BUILDING in the node graph: append mol A to mol B after rigid moves. Pure
+  `core/transform.py` (numpy): translate/rotate (Rodrigues, centre = centroid/COM/atom/
+  point), `align_axis` (2-atom axis → x/y/z, atom i anchored), `align_plane` (3-atom
+  face normal → axis), `align_principal` (inertia tensor, long axis → order[0]),
+  `set_dihedral` (D a b c d → angle; covalent-radii bond graph partitions the d-side;
+  raises on ring bonds) — plus `combine` (concat fragments), and the **ops-list
+  interpreter** (`apply_ops`/`validate_ops`/`describe_op`, JSON-able dicts, 0-based
+  atoms like geomspec). Between-mol alignment is COMPOSITIONAL: align each mol's chosen
+  axis/plane to the same lab axis, then Combine — keeps every node 1-in-1-out.
+  Graph model: `compute_streams` (core/workflow.py) resolves the molecule stream each
+  node emits (filter subsets, transform/combine REPLACE it via an injected
+  `transform_apply` backend — pure/testable); `expand_to_calcs` reworked onto streams
+  (per-(node,mol) calc map; old semantics kept, 30 pre-existing tests untouched).
+  **Combine's geometry input is variadic** (`fan_in` in NODE_TYPES; can_connect allows
+  multi-wire), merge or **pairwise/zip** mode (broadcast len-1 streams — solvate n
+  solutes with the same water), charge=sum / mult=Σ(2S)+1 defaults with overrides.
+  UI (`workflow_tab`): palette + F3 entries, sand-coloured kinds, ops-list editor panel
+  (`ui/transform_dialog.TransformOpDialog`, shows the incoming molecule's atoms
+  0-based), and **Preview output (3D)** on both panels = the "run until here" debug
+  view (computes the chain IN MEMORY, writes temp xyz, opens the external viewer —
+  project untouched; no separate Debug node needed since geometry nodes are static).
+  On real expand the backend materialises derived molecules only AFTER the user
+  confirms (`_flush_geom_materialisations` → `TRANSFORM/<name>.xyz` + locked Molecule
+  rows, method="transform", stable names `<mol>_tf<node4>`/`<name>_cb<node4>` reused on
+  re-expand; skip+warn if calcs already built/submitted on the old coords).
+  **v1 placement rule** (validated): Transform/Combine read each molecule's CURRENT
+  .xyz at expand time → must sit BEFORE calc nodes (validate() blocks a calc upstream).
+  Transforming an OPTIMISED geometry = phase 2 (needs finished-calc geometry reads).
+  Tests: `tests/test_transform.py` (16, incl. dihedral round-trip + ring guard),
+  `tests/test_workflow_transform.py` (11, fake backend). Headless-smoke: full app
+  build→wire→streams→materialise→expand on real xyz files.
+- **Live progress plot overhaul** (branch `relaxed-scans-constraints`) — four user
+  pain points fixed. (1) **SCF history survives opt cycles**: new
+  `orca_parser.parse_scf_blocks` returns EVERY SCF block (D-I-I-S → S-O-S-C-F handover
+  = one block; stop-marker then new header = new block); `parse_orca_output` grows
+  `scf_blocks` (old `scf_iterations` = last block, back-compat). **Verified vs real
+  local ORCA 6.0.1** (water HF/STO-3G TightOpt: 7 blocks [11,9,7,5,4,3,2] = 6 cycles +
+  the stationary-point re-eval, block tails match the FINAL SINGLE POINT energies).
+  `LivePlotWindow` now draws up to 3 panels — opt energy / **cumulative SCF history
+  with dashed cycle boundaries** / gradients — panel set data-driven (running SP = one
+  full-height SCF panel). (2) **Navigation hotkeys** (same rebindable keymap actions as
+  the spectrum windows, read at open): Z/P cycle zoom/pan (multi-PANEL: drag acts on
+  the axes under the cursor; blitted rubber band), Esc, F two-stage reset (all-X then
+  all-Y), R/F5 refresh, Ctrl+W close — and a **manual zoom now survives auto-refresh**
+  (off-home limits are re-applied after each poll redraw). (3) **Save image** button +
+  Ctrl+S (reuses `spectra._save_figure`). (4) **Iteration timing**: a second status
+  line shows ~s/SCF iteration + ~s/opt step + "last new data Ns ago", measured from
+  poll arrivals while the window is open (ORCA doesn't timestamp iterations, so
+  pre-open history can't be timed — labelled honestly). (5) **View current geometry
+  mid-OPT**: window button + Calc-tab right-click "Open current geometry (last opt
+  step)" on an unfinished OPT — extracts the LAST `_trj.xyz` frame to a temp xyz →
+  external viewer. Works for local runs; on the cluster the trj sits on node-local
+  /scratch until copyback (the button explains). Callers pass `app`+`trj_path`
+  (`_expected_trj`). Tests `tests/test_scf_blocks.py`; window smoke-tested headless on
+  the real water .out (panel sets, zoom-persistence, F, trj extraction). 305 tests.
+
+- **Node-editor UX batch 2 + transform ops round 2** (branch `relaxed-scans-constraints`,
+  from Christian's hands-on test) —
+  (a) **Wire UX like real node editors**: dropping a wire on an occupied single input
+  REPLACES the old connection (restored if the new one would cycle); dragging a
+  CONNECTED input pin picks the wire up (re-plug to rewire, drop on empty space to
+  DELETE — never opens the add-node popup); dropping an isolated 1-in/1-out node onto
+  a wire SPLICES it in (`_maybe_splice_at_drop` + `_edge_near` polyline hit-test).
+  (b) **Keys**: J / L / K cut the selection's input / output / all wires (vim-ish);
+  **connect moved J → V**; Alt+A clears the selection; **Ctrl+C/Ctrl+V copy/paste
+  nodes** (internal wires kept, new ids, offset accumulates per paste; plain C/T/V
+  still frame/comment/connect — Tk prefers the more specific Control- bindings);
+  **Q now also distributes horizontally** (even gaps, `_distribute`), and right after
+  Q / Shift+WASD the ARROW keys tune the gaps (Left/Right horizontal, Up/Down
+  vertical, `_align_ctx`; any click ends it — deliberately NOT hold-key-based, since
+  X11 auto-repeat over ThinLinc makes hold detection unreliable). Arrows otherwise
+  still pan. (c) **F3 search aliases** — "align/rotate/mirror/..." finds Transform,
+  "merge/dimer/..." Combine. (d) **Transform ops round 2** (core/transform.py):
+  `mirror` (xy/yz/xz, optional center, improper-op caveat), **rotate about an
+  atom-pair axis** (`rotate_about_atoms`, position-invariant, `axis_atoms` in the op;
+  the dialog's axis field takes x/y/z, a vector, or 'i j'), **center anchored on an
+  atom or an i-j midpoint** (`anchor_point`, op `atoms` key) — enables the
+  align-bond→set-dihedral→center-on-bond-midpoint→shift→mirror dimer recipe (tested
+  end-to-end in test_transform.py). (e) **Combine no longer fails silently**: the
+  transform backend skips (and NAMES) molecules whose ops don't fit instead of
+  emptying the stream, compute_streams warns per empty Combine wire, and Preview
+  surfaces every warning in a dialog. (f) **Write output to file...** button beside
+  the (now bold) Preview on Transform/Combine panels → `coords.write_structure_file`
+  (.xyz native; other formats via pybel, RDKit fallback for mol/sdf/pdb; extension
+  picks the format; verified locally via OpenBabel). (g) **Ctrl+Enter on the calc
+  TABLE = the launch action** (Run locally on a PC / Submit on the cluster), a
+  rebindable keymap action (`calc.launch`, new "Calculations tab" category) — bound
+  on the tree only so a stray Ctrl+Enter in a text field can't launch; both paths
+  confirm first. NO Duplicate node: geometry outputs already fan out, so
+  "duplicate" = wire the same output into two Transforms → Combine (help updated).
+  Deferred: KNIME-style meta-nodes, saveable macros (roadmap). 315 tests.
+- **Node theming + editor UX batch 3** (branch `relaxed-scans-constraints`, Christian's
+  2026-07-05 review pt2) —
+  (a) **Node-graph is now skin-themed**: `theme.node_palette(skin_id)` returns a full
+  node colour dict (body/fg/outline/sel/ports/wires/kind title-fills/annotations/canvas),
+  built from `_NODE_DEFAULTS` + per-skin `_NODE_OVERRIDES` (dark/aero/boombox get real
+  dark/tinted node colours). `workflow_tab._np` reads it; `App.apply_skin` calls
+  `WorkflowTab.apply_theme()` to re-read + redraw live. The old module-level `_KIND_COLOR/
+  _BODY/_SEL` are gone.
+  (b) **JSON custom skins**: drop a `*.json` in `~/.orca_workbench_skins/` — it need only
+  carry `id` + `base` ("default"/"dark"/…) + the colours to change (hover/tab/selection are
+  DERIVED from the palette by `_style_ttk`, so a colours-only file gives full theming).
+  `theme.load_user_skins/reload_user_skins/write_skin_template`; Styles dialog gains **New
+  custom skin… / Open skins folder / Reload skins**. A user skin whose id matches a built-in
+  replaces it.
+  (c) **Styles window fixes**: it's now `transient(root)` so it can't hide behind the
+  maximized main window (the "can't alt-tab back" bug), and the wheel binding is applied
+  AFTER the cards exist so scrolling works over them.
+  (d) **Ctrl+PageDown/PageUp** cycle the major tabs (app-wide, `App._cycle_tab`).
+  (e) **Transform op-list reorder**: EXTENDED multi-select + move-as-a-block, drag-to-
+  reorder, and Up/Down **keep the selection** (the list refreshes in place, no full panel
+  rebuild).
+  (f) **Combine→calc demands charge/mult**: `Workflow.has_calc_downstream` +
+  `combine_needs_charge_mult`; validate() blocks, and `_expand` runs a **guided fix** —
+  popup, select the node, red-highlight the empty box(es), focus the FIRST only (then hands
+  control back), green-flash each on a valid integer (`_guide_combine_fix`; the charge/mult
+  fields are classic `tk.Entry` for bg control).
+  (g) **CSV report customisation**: Report node `format` (both/json/csv) + a **column
+  editor** (pick columns, rename headers, order = left-to-right; rows are always
+  calculations) + missing-value policy (empty cell vs `NaN`). `reporting.available_csv_columns/
+  default_csv_columns` + `write_csv(report, path, columns=, missing=)`. Pipeline report
+  writer honours the spec.
+  (h) **Splice affordances**: dragging an isolated node over a wire **highlights** it
+  (`_splice_candidate`, live in `_on_motion`), and on drop the splice **makes horizontal
+  room** by shifting the downstream subtree right (`_shift_subtree_right`).
+  Tests: `tests/test_theme.py` (+node palette/JSON skins), `tests/test_reporting.py`
+  (+CSV columns), `tests/test_workflow_transform.py` (+charge/mult), `tests/test_transform.py`
+  (mirror/atom-axis/anchor from pt1). 322 tests. Headless-smoke: skins re-theme the graph,
+  op reorder keeps selection, guided charge/mult red→green, splice+make-room, tab cycling,
+  JSON skin inheritance.
+- **Headless project execution + editor polish batch 4** (branch `relaxed-scans-constraints`,
+  Christian's 2026-07-05 pt3) —
+  (a) **`orca-workbench --execute_project PROJECT.json`** — new pure `core/project_runner.py`
+  builds every planned calc's ORCA input (reusing the exact GUI builders: render_inp / geomspec
+  / MOREAD / hardware defaults / provenance) into its run dir, then on a **login node** submits
+  them as a SLURM dependency chain (parent geometry via `* xyzfile` + `afterok`, like the GUI's
+  submit-unattended) or on a **plain machine** runs them locally in dependency order (embedding
+  each finished parent's optimised `<mol>.xyz`). `order_dependency_first` (ported topo sort),
+  `execute_project_file` saves run dirs/job ids back so the GUI can monitor/harvest. `--local`/
+  `--slurm` force the mode. Workflow **must be Generated in the GUI first** (this runs the
+  resulting planned calcs; it doesn't re-expand graphs or materialise Transform/Combine).
+  **Verified with real local ORCA 6.0.1**: OPT→NMR chain, child built from the parent's
+  optimised geometry (O z 0.30→0.232). Tests `tests/test_project_runner.py` (fake-ORCA local
+  run + ordering/target-dir/build). CLI in `__main__`.
+  (b) **CSV column dialog**: `fit_to_content` + minsize (was a fixed 560×460 that came out
+  cramped on a high-DPI local display) + **Add all / Remove all** buttons; dropped **Reset**.
+  (c) **UI scale override** — Settings ▸ *UI scale*, config `ui_scale` / env
+  `ORCA_WORKBENCH_UI_SCALE` (0.5–4.0), MULTIPLIES the auto tk-scaling AND the named-font sizes
+  (`_scale_named_fonts`) — for ThinLinc/remote desktops that report a low DPI so everything's
+  tiny. Restart to apply.
+  (d) **Transform op reorder**: a real **insertion LINE** (a placed 2px Frame) between rows
+  shows where the block lands, replacing the confusing per-row highlight; the listbox's
+  band-select is suppressed during a reorder drag; a held multi-selection is preserved.
+  (e) **Geomspec dialog**: no auto-blank bond-constraint row (an empty spec shows a "No
+  constraints" hint, not an inert default) + a **View geometry (3D)** button (the reference
+  molecule — the first when a node optimises several — via `view_xyz` callback) for reading off
+  atom indices. 327 tests.
+- **Headless workflow expansion + Report-tab CSV styling** (branch `relaxed-scans-constraints`)
+  — (a) **`--execute_project` now EXPANDS the Workflow graph itself** (roadmap: the old
+  `--expand_and_execute` idea, folded into the ONE command — expansion is the default, no
+  separate verb). New pure `core/workflow_expand.py` is the single source of truth the GUI and
+  the CLI now share: `GeometryBackend` (Transform/Combine → in-memory derived geometries),
+  `flush_materialisations` (writes `TRANSFORM/<name>.xyz` + locked Molecule rows),
+  `find_existing_calc` (calc reuse), and `expand_project_workflow(project, calc_done, log)`
+  which validates → expands → materialises → appends new PlannedCalcs (idempotent: an
+  already-generated project reuses, finished calcs kept verbatim). **`workflow_tab.py`'s
+  `_make_geom_backend`/`_read_geom`/`_flush_geom_materialisations`/`_find_existing_calc` were
+  gutted to thin delegations** to it (signatures unchanged, so every call site is untouched) —
+  so the app's Generate and the headless run expand a graph byte-identically. `ProjectRunner.
+  execute(expand=True)` runs `expand()` first (blockers → logged, run continues on any existing
+  calcs; blockers + nothing runnable → "workflow has errors" error). CLI: `--execute_project`
+  expand-by-default, `--no-expand` escape hatch to run only already-generated calcs. **Verified
+  end-to-end via the real CLI** (`--slurm` on a no-sbatch box): a Molecules→Transform→Optimize
+  graph expanded, materialised the +translated `TRANSFORM/*.xyz`, built the `.inp` (geometry
+  shifted +3 Å in x) + `.slurm`, failed only at submit. Tests `tests/test_workflow_expand.py`
+  (7, real geometries/transform: linear pipeline + parent links, idempotency, Transform/Combine
+  materialisation, missing-recipe & combine-charge/mult blockers) + a project_runner integration
+  test (expand→build→local-run with fake ORCA). (b) **Report TAB gets the Report NODE's CSV
+  styling**: format selector (JSON+CSV / JSON only / CSV only), **Customise CSV columns…**
+  (pick/rename/order), and a missing-value picker (empty vs `NaN`). The column editor was
+  extracted from `workflow_tab` into reusable `ui/csv_columns.edit_csv_columns_dialog` (the node
+  now delegates too — DRY), and `report_tab.on_generate` honours format + `csv_columns` +
+  `csv_missing`. Headless-smoke-tested both. 335 tests.
+
 ## Open work / TODO
+- `--execute_project` now expands the Workflow graph AND materialises Transform/Combine
+  geometries headlessly (see `core/workflow_expand.py`) — the old `--expand_and_execute` gap is
+  closed. Remaining headless gaps: (1) no live monitoring (reopen in the GUI to watch/harvest);
+  (2) **Report NODE outputs aren't written headlessly** — after a `--local` pipeline finishes,
+  the Report node's merged JSON/CSV isn't generated (the GUI's `_generate_pipeline_reports` walks
+  ancestor chains on the main thread). A headless port of that (local mode only; SLURM runs async)
+  would make an unattended local run fully self-contained. The Report TAB CSV styling shipped.
+- KNIME-style meta-nodes (collapse a selection into one node, reversible) and, beyond
+  that, saveable/exportable node macros (UE5-style function nodes) — both parked from
+  Christian's 2026-07-05 batch; meta-nodes are the simpler first step.
+- Transform/Combine phase 2: allow them DOWNSTREAM of a finished Optimize (read the
+  optimised .xyz at expand time, like ZPVA reads a finished FREQ's .hess — the
+  two-step Expand pattern); today validate() blocks calc-upstream placement.
+- Live plot: the M / limit-box row from the spectrum windows isn't ported (no boxes
+  in the live window); could add if wanted.
+- Skins: the **node-graph is now fully themed** (see the batch-3 entry); the matplotlib
+  spectrum/live plots still only theme their *backdrop* (line palette from the skin accent
+  is the natural next step). Wants a ThinLinc visual pass (clam theme + dark palettes render
+  differently on X than local Windows). New built-in skins = one entry in `core/theme._SKINS`;
+  users can now also drop a JSON skin in `~/.orca_workbench_skins/`.
 - Keymap catalogue is partial — only app-globals + plot keys are registered/rebindable so far;
   the Molecules/Calc/Workflow tab tree shortcuts still bind directly. Extend `keymap` +
   route those through `bind_action` to make them rebindable too.
