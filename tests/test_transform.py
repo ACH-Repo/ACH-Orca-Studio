@@ -217,8 +217,68 @@ def test_dimer_recipe_end_to_end():
     assert T.min_distance(top, bottom) > 0.5     # no atom collision
 
 
+def test_center_fraction_along_bond():
+    # frac 0 = atom i, 1 = atom j, 0.25 = a quarter of the way from i to j.
+    c = T.apply_ops(CHAIN_SYMS, CHAIN, [{"op": "center", "atoms": [1, 2], "frac": 0.0}])
+    assert np.allclose(c[1], [0.0, 0.0, 0.0], atol=1e-12)          # atom i at origin
+    c = T.apply_ops(CHAIN_SYMS, CHAIN, [{"op": "center", "atoms": [1, 2], "frac": 1.0}])
+    assert np.allclose(c[2], [0.0, 0.0, 0.0], atol=1e-12)          # atom j at origin
+    c = T.apply_ops(CHAIN_SYMS, CHAIN, [{"op": "center", "atoms": [1, 2], "frac": 0.25}])
+    # the quarter-point from atom 1 toward atom 2 now sits at the origin
+    assert np.allclose(0.75 * c[1] + 0.25 * c[2], [0.0, 0.0, 0.0], atol=1e-12)
+    # default (no frac) is still the midpoint, and rigid
+    c = T.apply_ops(CHAIN_SYMS, CHAIN, [{"op": "center", "atoms": [1, 2]}])
+    assert np.allclose((c[1] + c[2]) / 2.0, [0.0, 0.0, 0.0], atol=1e-12)
+    assert np.allclose(_dists(c), _dists(CHAIN), atol=1e-12)
+
+
+def test_center_fraction_out_of_range_is_flagged():
+    assert T.validate_ops([{"op": "center", "atoms": [1, 2], "frac": 1.5}], 4)
+    with pytest.raises(ValueError):
+        T.apply_ops(CHAIN_SYMS, CHAIN, [{"op": "center", "atoms": [1, 2], "frac": 2.0}])
+
+
+def test_set_plane_angle_hits_target_and_is_rigid():
+    # A non-planar chain; set the (0,1,2) plane's angle to each coordinate plane.
+    for ref in ("xy", "yz", "xz"):
+        for target in (0.0, 30.0, 45.0, 90.0):
+            c = T.apply_ops(CHAIN_SYMS, CHAIN,
+                            [{"op": "set_plane_angle", "i": 0, "j": 1, "k": 2,
+                              "plane": ref, "angle": target}])
+            assert T.plane_angle(c, 0, 1, 2, ref) == pytest.approx(target, abs=1e-7)
+            assert np.allclose(_dists(c), _dists(CHAIN), atol=1e-9)   # rigid
+
+
+def test_set_plane_angle_from_already_parallel():
+    # 3 atoms already in the xy-plane (normal ∥ z): tilting to 90 must still work
+    # (the intersection line is undefined in the parallel start state).
+    syms = ["C", "C", "C"]
+    flat = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    assert T.plane_angle(flat, 0, 1, 2, "xy") == pytest.approx(0.0, abs=1e-9)
+    c = T.apply_ops(syms, flat, [{"op": "set_plane_angle", "i": 0, "j": 1, "k": 2,
+                                  "plane": "xy", "angle": 90.0}])
+    assert T.plane_angle(c, 0, 1, 2, "xy") == pytest.approx(90.0, abs=1e-7)
+
+
+def test_set_plane_angle_validation():
+    ok = T.validate_ops([{"op": "set_plane_angle", "i": 0, "j": 1, "k": 2,
+                          "plane": "xy", "angle": 45}], n_atoms=4)
+    assert ok == []
+    issues = T.validate_ops([
+        {"op": "set_plane_angle", "i": 0, "j": 0, "k": 2, "plane": "xy", "angle": 45},
+        {"op": "set_plane_angle", "i": 0, "j": 1, "k": 2, "plane": "qq", "angle": 45},
+        {"op": "set_plane_angle", "i": 0, "j": 1, "k": 2, "plane": "xy", "angle": 120},
+        {"op": "set_plane_angle", "i": 0, "j": 1, "k": 9, "plane": "xy", "angle": 45},
+    ], n_atoms=4)
+    assert len(issues) == 4
+
+
 def test_describe_op_strings():
     assert "translate" in T.describe_op({"op": "translate", "vec": [1, 0, 0]})
     assert "D(0,1,2,3)" in T.describe_op({"op": "set_dihedral",
                                           "atoms": [0, 1, 2, 3], "angle": 60})
     assert "0-1" in T.describe_op({"op": "align_axis", "i": 0, "j": 1})
+    assert "0.25 along 1-2" in T.describe_op({"op": "center", "atoms": [1, 2], "frac": 0.25})
+    assert "midpoint 1-2" in T.describe_op({"op": "center", "atoms": [1, 2]})
+    assert "angle to xy" in T.describe_op({"op": "set_plane_angle", "i": 0, "j": 1,
+                                           "k": 2, "plane": "xy", "angle": 30})

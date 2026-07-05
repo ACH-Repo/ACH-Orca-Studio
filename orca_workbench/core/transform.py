@@ -8,10 +8,13 @@ Two families of operation:
 * **Rigid modifiers** — translate / rotate / center / align. They move a
   molecule as a rigid body and never alter its conformation: principal-axes
   alignment, aligning the axis defined by two atoms to x/y/z, aligning the
-  plane (face) defined by three atoms so its normal points along an axis.
-  Between-mol alignment is compositional: align each molecule's chosen
-  axis/plane to the SAME global axis and they end up mutually aligned — so
-  every transform stays a one-in-one-out operation.
+  plane (face) defined by three atoms so its normal points along an axis, or
+  tilting that plane to a chosen angle from a coordinate plane
+  (``set_plane_angle``). ``center`` moves a chosen reference point to the
+  origin — the centre of mass/centroid, an atom, or a point a fraction of the
+  way along a bond. Between-mol alignment is compositional: align each
+  molecule's chosen axis/plane to the SAME global axis and they end up mutually
+  aligned — so every transform stays a one-in-one-out operation.
 * **Internal-coordinate edits** — currently ``set_dihedral`` (D a b c d ->
   angle): rotates the atoms on the d-side of the b–c bond, which DOES change
   the conformation (deliberately — "set this dihedral to 0°").
@@ -191,10 +194,12 @@ def rotate_about_atoms(coords, i, j, angle_deg):
     return (c - c[i]).dot(R.T) + c[i]
 
 
-def anchor_point(symbols, coords, mode="com", atoms=None):
+def anchor_point(symbols, coords, mode="com", atoms=None, frac=0.5):
     """The reference point a 'center' op moves to the origin: 'com' /
-    'centroid', or — when `atoms` is given — one atom's position ([i]) or the
-    midpoint of two ([i, j], e.g. the middle of a bond)."""
+    'centroid', or — when `atoms` is given — one atom's position ([i]) or a
+    point along the segment between two ([i, j]). `frac` is the position along
+    that segment: 0 = atom i, 1 = atom j, 0.5 = the midpoint (the default, e.g.
+    the middle of a bond); any value in [0, 1] is allowed for finer control."""
     c = _coords(coords)
     if atoms:
         idx = [int(a) for a in atoms]
@@ -203,7 +208,12 @@ def anchor_point(symbols, coords, mode="com", atoms=None):
                 or not all(0 <= a < n for a in idx):
             raise ValueError("center atoms must be one index or two distinct "
                              "in-range indices")
-        return c[idx].mean(axis=0)
+        if len(idx) == 1:
+            return c[idx[0]]
+        t = float(frac)
+        if not (0.0 <= t <= 1.0):
+            raise ValueError("center fraction must be between 0 and 1")
+        return (1.0 - t) * c[idx[0]] + t * c[idx[1]]
     if mode == "centroid":
         return centroid(c)
     return center_of_mass(symbols, c)
@@ -252,6 +262,58 @@ def align_plane(coords, i, j, k, target="z"):
         raise ValueError("align_plane needs three distinct in-range atoms")
     o = (c[i] + c[j] + c[k]) / 3.0
     R = rotation_between(plane_normal(c, i, j, k), _axis_vec(target))
+    return (c - o).dot(R.T) + o
+
+
+_PLANE_NORMAL_AXIS = {"xy": "z", "yz": "x", "xz": "y"}
+
+
+def plane_angle(coords, i, j, k, ref_plane="xy"):
+    """Acute angle in degrees ([0, 90]) between the plane through atoms i, j, k
+    and a coordinate plane ('xy' / 'yz' / 'xz'). 0 = the molecular plane is
+    parallel to the coordinate plane; 90 = perpendicular to it."""
+    ax = _PLANE_NORMAL_AXIS.get((ref_plane or "xy").strip().lower())
+    if ax is None:
+        raise ValueError("reference plane must be xy, yz or xz")
+    n_mol = plane_normal(_coords(coords), i, j, k)
+    d = abs(float(np.dot(n_mol, _axis_vec(ax))))
+    return math.degrees(math.acos(max(0.0, min(1.0, d))))
+
+
+def set_plane_angle(coords, i, j, k, ref_plane="xy", angle_deg=0.0):
+    """Rigidly rotate (about the i, j, k centroid) so the angle between the
+    plane through atoms i, j, k and the coordinate plane `ref_plane`
+    ('xy'/'yz'/'xz') equals `angle_deg` (0 = parallel / lying flat in it, 90 =
+    perpendicular / standing on edge). This is the planar analogue of
+    ``set_dihedral`` but RIGID — it rotates about the two planes' line of
+    intersection, so it's the minimal tilt that achieves the requested angle
+    and never changes the conformation."""
+    c = _coords(coords)
+    n = len(c)
+    if len({i, j, k}) != 3 or not all(0 <= a < n for a in (i, j, k)):
+        raise ValueError("set_plane_angle needs three distinct in-range atoms")
+    ax = _PLANE_NORMAL_AXIS.get((ref_plane or "xy").strip().lower())
+    if ax is None:
+        raise ValueError("reference plane must be xy, yz or xz")
+    n_ref = _axis_vec(ax)
+    n_mol = plane_normal(c, i, j, k)
+    dot = max(-1.0, min(1.0, float(np.dot(n_mol, n_ref))))
+    alpha = math.degrees(math.acos(dot))          # normal-to-normal angle [0,180]
+    target = float(angle_deg)
+    # The plane-plane angle is the ACUTE one ([0,90]); aim the normal-to-normal
+    # angle at whichever equivalent (target or 180-target) is nearer the current
+    # alpha, so a small requested change is a small rotation.
+    tgt_normal = target if alpha <= 90.0 else 180.0 - target
+    cross = np.cross(n_mol, n_ref)
+    ncross = float(np.linalg.norm(cross))
+    if ncross < 1e-9:
+        # already parallel: the intersection line is undefined, so tilt about any
+        # axis lying in the reference plane (the tilt direction is arbitrary here).
+        w = _unit(np.cross(n_ref, _AXES["x"] if abs(n_ref[0]) < 0.9 else _AXES["y"]))
+    else:
+        w = cross / ncross
+    o = (c[i] + c[j] + c[k]) / 3.0
+    R = rotation_matrix(w, alpha - tgt_normal)     # +alpha about w takes n_mol onto n_ref
     return (c - o).dot(R.T) + o
 
 
@@ -390,7 +452,7 @@ def min_distance(coords_a, coords_b):
 # The ops-list interpreter (what a Transform node's config stores)
 # ---------------------------------------------------------------------------
 OP_TYPES = ("translate", "rotate", "center", "mirror", "align_axis", "align_plane",
-            "align_principal", "set_dihedral")
+            "set_plane_angle", "align_principal", "set_dihedral")
 
 
 def apply_ops(symbols, coords, ops):
@@ -417,7 +479,8 @@ def _apply_one(symbols, c, op):
         return rotate(c, op.get("axis", "z"), float(op.get("angle", 0.0)),
                       center=op.get("center", "centroid"), symbols=symbols)
     if kind == "center":
-        return c - anchor_point(symbols, c, op.get("mode", "com"), op.get("atoms"))
+        return c - anchor_point(symbols, c, op.get("mode", "com"), op.get("atoms"),
+                                op.get("frac", 0.5))
     if kind == "mirror":
         return mirror(c, op.get("plane", "xy"), center=op.get("center"),
                       symbols=symbols)
@@ -426,6 +489,9 @@ def _apply_one(symbols, c, op):
     if kind == "align_plane":
         return align_plane(c, int(op["i"]), int(op["j"]), int(op["k"]),
                            op.get("target", "z"))
+    if kind == "set_plane_angle":
+        return set_plane_angle(c, int(op["i"]), int(op["j"]), int(op["k"]),
+                               op.get("plane", "xy"), float(op.get("angle", 0.0)))
     if kind == "align_principal":
         return align_principal(symbols, c, op.get("order", "xyz"))
     if kind == "set_dihedral":
@@ -488,6 +554,14 @@ def validate_ops(ops, n_atoms=None):
                 elif n_atoms is not None and not all(
                         0 <= int(a) < n_atoms for a in atoms):
                     issues.append("op {}: center atom out of range".format(k + 1))
+            if "frac" in op:
+                try:
+                    fr = float(op.get("frac"))
+                    if not (0.0 <= fr <= 1.0):
+                        issues.append("op {}: center fraction must be between 0 and 1"
+                                      .format(k + 1))
+                except (TypeError, ValueError):
+                    issues.append("op {}: center fraction must be a number".format(k + 1))
         elif kind == "mirror":
             if (op.get("plane") or "xy").strip().lower() not in ("xy", "yz", "xz"):
                 issues.append("op {}: mirror plane must be xy, yz or xz".format(k + 1))
@@ -499,6 +573,19 @@ def validate_ops(ops, n_atoms=None):
             chk_idx(op, ("i", "j", "k"), k)
             if len({op.get("i"), op.get("j"), op.get("k")}) != 3:
                 issues.append("op {}: the three atoms must differ".format(k + 1))
+        elif kind == "set_plane_angle":
+            chk_idx(op, ("i", "j", "k"), k)
+            if len({op.get("i"), op.get("j"), op.get("k")}) != 3:
+                issues.append("op {}: the three atoms must differ".format(k + 1))
+            if (op.get("plane") or "xy").strip().lower() not in ("xy", "yz", "xz"):
+                issues.append("op {}: reference plane must be xy, yz or xz".format(k + 1))
+            try:
+                ang = float(op.get("angle", 0.0))
+                if not (0.0 <= ang <= 90.0):
+                    issues.append("op {}: plane angle must be between 0 and 90 degrees"
+                                  .format(k + 1))
+            except (TypeError, ValueError):
+                issues.append("op {}: angle must be a number".format(k + 1))
         elif kind == "align_principal":
             order = (op.get("order") or "xyz").strip().lower()
             if sorted(order) != ["x", "y", "z"]:
@@ -536,8 +623,13 @@ def describe_op(op):
         if kind == "center":
             atoms = op.get("atoms")
             if atoms:
-                where = ("atom {}".format(atoms[0]) if len(atoms) == 1
-                         else "midpoint {}-{}".format(atoms[0], atoms[1]))
+                if len(atoms) == 1:
+                    where = "atom {}".format(atoms[0])
+                else:
+                    fr = float(op.get("frac", 0.5))
+                    where = ("midpoint {}-{}".format(atoms[0], atoms[1])
+                             if abs(fr - 0.5) < 1e-9
+                             else "{:g} along {}-{}".format(fr, atoms[0], atoms[1]))
                 return "center at origin ({})".format(where)
             return "center at origin ({})".format(op.get("mode", "com"))
         if kind == "mirror":
@@ -548,6 +640,10 @@ def describe_op(op):
         if kind == "align_plane":
             return "align plane ({},{},{}) normal -> {}".format(
                 op.get("i"), op.get("j"), op.get("k"), op.get("target", "z"))
+        if kind == "set_plane_angle":
+            return "set plane ({},{},{}) angle to {} = {:g} deg".format(
+                op.get("i"), op.get("j"), op.get("k"), op.get("plane", "xy"),
+                float(op.get("angle", 0)))
         if kind == "align_principal":
             return "align principal axes -> {}".format(op.get("order", "xyz"))
         if kind == "set_dihedral":
