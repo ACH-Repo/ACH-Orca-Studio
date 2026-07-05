@@ -1,16 +1,29 @@
 """Live-progress plot window for a running (or finished) ORCA job.
 
 Embeds matplotlib in a Tk Toplevel and re-reads the job's .out file on a timer,
-re-plotting the optimisation energy trajectory and the gradient convergence.
-Because the app runs on the cluster and the SLURM .out streams to the shared
-filesystem (stdbuf wrapper in the template), this just reads a local file — no
-network, no SSH.
+re-plotting the optimisation energy trajectory, the FULL SCF-iteration history
+(every cycle, with opt-cycle boundaries — not just the latest block), and the
+gradient convergence. Because the app runs on the cluster and the SLURM .out
+streams to the shared filesystem (stdbuf wrapper in the template), this just
+reads a local file — no network, no SSH.
+
+Shares the spectrum windows' keyboard navigation (via the rebindable keymap):
+Z / P cycle zoom / pan modes (drag on whichever panel the mouse is over,
+blitted rubber band), Esc exits, F is the two-stage view reset, R / F5 refresh,
+Ctrl+S saves the figure, Ctrl+W closes. A manual zoom survives auto-refresh.
+
+Extras for a running OPT: iteration timing (s per SCF iteration / per opt step,
+measured while the window is open) and **View current geometry** — the last
+frame of the job's _trj.xyz in the 3D viewer, no need to wait for convergence.
+(On the cluster the trajectory lives on node-local /scratch until the copyback,
+so mid-run viewing is a local-runner feature; the button explains if absent.)
 
 matplotlib is a soft dependency: if it isn't installed the window explains how
 to get it instead of crashing.
 """
 
 import os
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -31,15 +44,32 @@ def _pin_device_pixel_ratio(canvas):
 
 
 class LivePlotWindow(tk.Toplevel):
-    def __init__(self, parent, title, out_path, poll_ms=2000):
+    _MODE_TEXT = {"zoom_h": "ZOOM horizontal - drag a range (Esc exits)",
+                  "zoom_v": "ZOOM vertical - drag a range (Esc exits)",
+                  "zoom_box": "ZOOM box - drag a rectangle (Esc exits)",
+                  "pan_h": "PAN horizontal - drag (Esc exits)",
+                  "pan_v": "PAN vertical - drag (Esc exits)",
+                  "pan_free": "PAN free - drag (Esc exits)"}
+    _ZOOM_CYCLE = ["zoom_h", "zoom_v", "zoom_box", None]
+    _PAN_CYCLE = ["pan_h", "pan_v", "pan_free", None]
+
+    def __init__(self, parent, title, out_path, poll_ms=2000, app=None, trj_path=None):
         super().__init__(parent)
         self.title("Progress — {}".format(title))
-        self.geometry("900x720")
+        self.geometry("900x760")
         self.out_path = out_path
         self.poll_ms = poll_ms
+        self.app = app
+        self.trj_path = trj_path       # expected _trj.xyz of an OPT (may not exist yet)
         self._after_id = None
         self._closed = False
         self._resize_after = None
+        self._axes = {}                # panel name -> axes (rebuilt per redraw)
+        self._home = {}                # panel name -> (xlim, ylim) data view
+        self._nav_mode = None
+        self._drag = None
+        self._arrivals = []            # (wall time, total SCF iters, opt steps)
+        self._last_parsed = None
 
         try:
             import matplotlib
@@ -59,17 +89,19 @@ class LivePlotWindow(tk.Toplevel):
 
         self.status_var = tk.StringVar(value="reading...")
         ttk.Label(self, textvariable=self.status_var, anchor=tk.W).pack(
-            side=tk.TOP, fill=tk.X, padx=8, pady=(6, 2))
+            side=tk.TOP, fill=tk.X, padx=8, pady=(6, 0))
+        # Iteration timing — measured from data arriving while this window is open.
+        self.rate_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.rate_var, foreground="#446", anchor=tk.W).pack(
+            side=tk.TOP, fill=tk.X, padx=8)
         ttk.Label(self, text=out_path, foreground="#666", anchor=tk.W).pack(
             side=tk.TOP, fill=tk.X, padx=8)
 
-        self.fig = Figure(figsize=(7.2, 5.0), dpi=100)
+        self.fig = Figure(figsize=(7.2, 5.4), dpi=100)
         try:
             self.fig.set_layout_engine("tight")
         except Exception:
             pass
-        self.ax_energy = self.fig.add_subplot(211)
-        self.ax_conv = self.fig.add_subplot(212)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         _pin_device_pixel_ratio(self.canvas)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -80,7 +112,18 @@ class LivePlotWindow(tk.Toplevel):
         ttk.Checkbutton(btns, text="Auto-refresh (every {}s)".format(poll_ms // 1000),
                         variable=self.auto_var).pack(side=tk.LEFT)
         ttk.Button(btns, text="Refresh now", command=self._update_once).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Save image...", command=self._save).pack(side=tk.LEFT, padx=2)
+        if self.trj_path:
+            ttk.Button(btns, text="View current geometry (3D)...",
+                       command=self._view_current_geometry).pack(side=tk.LEFT, padx=6)
+        self._mode_label = ttk.Label(btns, text="", foreground="#146")
+        self._mode_label.pack(side=tk.LEFT, padx=8)
         ttk.Button(btns, text="Close", command=self._on_close).pack(side=tk.RIGHT)
+
+        self._bind_plot_keys()
+        self.canvas.mpl_connect("button_press_event", self._drag_press)
+        self.canvas.mpl_connect("motion_notify_event", self._drag_motion)
+        self.canvas.mpl_connect("button_release_event", self._drag_release)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         from orca_workbench.ui.modal import fit_to_content
@@ -89,6 +132,160 @@ class LivePlotWindow(tk.Toplevel):
         # fitted to the window (device ratio pinned above).
         self.after(0, self._first_draw)
 
+    # ------------------------------------------------------------- keyboard
+    def _bind_action(self, widget, action_id, fn):
+        """Bind a rebindable plot action's current key sequence(s) — same
+        catalogue as the spectrum windows, read at open time."""
+        from orca_workbench.core import keymap
+        for seq in keymap.sequence_variants(keymap.sequence(action_id)):
+            widget.bind(seq, lambda e, f=fn: (f(), "break")[1])
+
+    def _bind_plot_keys(self):
+        w = self.canvas.get_tk_widget()
+        w.bind("<Enter>", lambda e: w.focus_set(), add="+")
+        self._bind_action(w, "plot.reset", self._key_full)
+        self._bind_action(w, "plot.zoom", lambda: self._cycle_nav(self._ZOOM_CYCLE))
+        self._bind_action(w, "plot.pan", lambda: self._cycle_nav(self._PAN_CYCLE))
+        self._bind_action(w, "plot.redraw", self._update_once)
+        w.bind("<Escape>", lambda e: (self._set_nav_mode(None), "break")[1])
+        self.bind("<F5>", lambda e: (self._update_once(), "break")[1])
+        self._bind_action(self, "plot.save_image", self._save)
+        self._bind_action(self, "plot.close", self._on_close)
+
+    def _cycle_nav(self, cycle):
+        cur = self._nav_mode if self._nav_mode in cycle else None
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else cycle[0]
+        self._set_nav_mode(nxt)
+
+    def _set_nav_mode(self, mode):
+        self._drag = None
+        self._nav_mode = mode
+        try:
+            self._mode_label.configure(text=self._MODE_TEXT.get(mode, ""))
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _lims_close(a, b):
+        span = abs(b[1] - b[0]) or 1.0
+        return abs(a[0] - b[0]) < span * 1e-3 and abs(a[1] - b[1]) < span * 1e-3
+
+    def _key_full(self):
+        """Two-stage reset across every panel: first all X to the data view,
+        then all Y (same convention as the spectrum windows)."""
+        xs_home = all(self._lims_close(ax.get_xlim(), self._home[k][0])
+                      for k, ax in self._axes.items() if k in self._home)
+        for k, ax in self._axes.items():
+            home = self._home.get(k)
+            if not home:
+                continue
+            if not xs_home:
+                ax.set_xlim(home[0])
+            else:
+                ax.set_ylim(home[1])
+        self.canvas.draw_idle()
+
+    def _save(self):
+        if getattr(self, "fig", None) is None:
+            return
+        from orca_workbench.ui.spectra import _save_figure
+        _save_figure(self.fig, self)
+
+    # ------------------------------------------------- zoom/pan (multi-panel)
+    def _drag_press(self, event):
+        if (not self._nav_mode or event.button != 1 or event.inaxes is None
+                or event.xdata is None or event.ydata is None):
+            return
+        ax = event.inaxes
+        self._drag = {"ax": ax, "x0": event.xdata, "y0": event.ydata,
+                      "xlim": ax.get_xlim(), "ylim": ax.get_ylim(),
+                      "inv": ax.transData.inverted(), "mode": self._nav_mode}
+        if self._nav_mode.startswith("zoom"):
+            # Blitted rubber band — one snapshot, re-blit per move (ThinLinc-safe).
+            try:
+                self.canvas.draw()
+                self._drag["bg"] = self.canvas.copy_from_bbox(self.fig.bbox)
+                from matplotlib.patches import Rectangle
+                rect = Rectangle((event.xdata, event.ydata), 0, 0, fill=False,
+                                 edgecolor="#333333", linewidth=1.0, linestyle="--")
+                rect.set_animated(True)
+                ax.add_patch(rect)
+                self._drag["rect"] = rect
+            except Exception:
+                self._drag["rect"] = None
+
+    def _drag_motion(self, event):
+        d = self._drag
+        if d is None or event.xdata is None or event.ydata is None:
+            return
+        if event.inaxes is not d["ax"]:
+            return
+        ax = d["ax"]
+        mode = d["mode"]
+        if mode.startswith("pan"):
+            inv = d.get("inv")
+            if inv is None:
+                return
+            cx, cy = inv.transform((event.x, event.y))
+            dx, dy = d["x0"] - cx, d["y0"] - cy
+            (x0, x1), (y0, y1) = d["xlim"], d["ylim"]
+            if mode in ("pan_h", "pan_free"):
+                ax.set_xlim(x0 + dx, x1 + dx)
+            if mode in ("pan_v", "pan_free"):
+                ax.set_ylim(y0 + dy, y1 + dy)
+            self.canvas.draw_idle()
+            return
+        rect = d.get("rect")
+        if rect is None:
+            return
+        x0, y0 = d["x0"], d["y0"]
+        (xa, xb), (ya, yb) = ax.get_xlim(), ax.get_ylim()
+        if mode == "zoom_h":
+            rx0, rx1, ry0, ry1 = x0, event.xdata, min(ya, yb), max(ya, yb)
+        elif mode == "zoom_v":
+            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, event.ydata
+        else:
+            rx0, rx1, ry0, ry1 = x0, event.xdata, y0, event.ydata
+        rect.set_bounds(min(rx0, rx1), min(ry0, ry1), abs(rx1 - rx0), abs(ry1 - ry0))
+        try:
+            self.canvas.restore_region(d["bg"])
+            ax.draw_artist(rect)
+            self.canvas.blit(self.fig.bbox)
+        except Exception:
+            self.canvas.draw_idle()
+
+    def _drag_release(self, event):
+        d = self._drag
+        self._drag = None
+        if d is None:
+            return
+        ax = d["ax"]
+        mode = d["mode"]
+        if mode.startswith("pan"):
+            self.canvas.draw_idle()
+            return
+        rect = d.get("rect")
+        if rect is not None:
+            try:
+                rect.remove()
+            except Exception:
+                pass
+        xe = event.xdata if event.xdata is not None else d["x0"]
+        ye = event.ydata if event.ydata is not None else d["y0"]
+        x0, y0 = d["x0"], d["y0"]
+
+        def set_lim(setter, getter, a, b):
+            lo, hi = min(a, b), max(a, b)
+            cur = getter()
+            setter((hi, lo) if cur[0] > cur[1] else (lo, hi))
+
+        if mode in ("zoom_h", "zoom_box") and abs(xe - x0) > 1e-12:
+            set_lim(ax.set_xlim, ax.get_xlim, x0, xe)
+        if mode in ("zoom_v", "zoom_box") and abs(ye - y0) > 1e-12:
+            set_lim(ax.set_ylim, ax.get_ylim, y0, ye)
+        self.canvas.draw_idle()
+
+    # ------------------------------------------------------------- polling
     def _first_draw(self):
         if self._closed:
             return
@@ -123,51 +320,159 @@ class LivePlotWindow(tk.Toplevel):
         parsed = orca_parser.parse_orca_output(text)
         self._last_parsed = parsed
         self.status_var.set(orca_parser.short_status(parsed))
+        self._note_arrival(parsed)
         self._redraw(parsed)
         # Stop auto-refreshing once the job is clearly done.
         if parsed.get("terminated_normally") or parsed.get("has_error"):
             self.auto_var.set(False)
 
+    def _note_arrival(self, parsed):
+        """Track when new iterations appear, to estimate iteration timing.
+        Only what arrives while THIS window is open can be timed — ORCA doesn't
+        timestamp iterations, so pre-existing history has no time axis."""
+        n_scf = sum(len(b) for b in parsed.get("scf_blocks") or [])
+        n_steps = len(parsed.get("final_energies") or [])
+        now = time.time()
+        if not self._arrivals or (n_scf, n_steps) != self._arrivals[-1][1:]:
+            self._arrivals.append((now, n_scf, n_steps))
+            if len(self._arrivals) > 400:
+                del self._arrivals[:200]
+        parts = []
+        a = self._arrivals
+        if len(a) >= 2:
+            t0, s0, c0 = a[0]
+            t1, s1, c1 = a[-1]
+            if s1 > s0:
+                parts.append("~{:.1f} s / SCF iteration".format((t1 - t0) / (s1 - s0)))
+            if c1 > c0:
+                parts.append("~{:.0f} s / opt step".format((t1 - t0) / (c1 - c0)))
+        if a:
+            ago = now - a[-1][0]
+            if ago >= 1.5:
+                parts.append("last new data {:.0f} s ago".format(ago))
+        done = parsed.get("terminated_normally") or parsed.get("has_error")
+        self.rate_var.set(("timing (since window opened): " + "  ·  ".join(parts))
+                          if parts and not done else "")
+
+    # ------------------------------------------------------------- drawing
     def _redraw(self, parsed):
         fe = parsed["final_energies"]
         rms = parsed["rms_grads"]
         mx = parsed["max_grads"]
-        scf = parsed["scf_iterations"]
+        blocks = parsed.get("scf_blocks") or []
 
-        self.ax_energy.clear()
-        self.ax_conv.clear()
+        # Preserve a manual zoom/pan across the auto-refresh: remember which
+        # panels were moved off their data view, restore after rebuilding.
+        keep = {}
+        for name, ax in self._axes.items():
+            home = self._home.get(name)
+            if home and (not self._lims_close(ax.get_xlim(), home[0])
+                         or not self._lims_close(ax.get_ylim(), home[1])):
+                keep[name] = (ax.get_xlim(), ax.get_ylim())
 
-        if len(fe) > 1:
-            self.ax_energy.plot(range(1, len(fe) + 1), fe, marker="o", color="#1f77b4")
-            self.ax_energy.set_xlabel("geometry step")
-            self.ax_energy.set_ylabel("energy (Eh)")
-            self.ax_energy.set_title("Optimization energy ({} steps)".format(len(fe)))
-        elif scf:
-            self.ax_energy.plot(range(1, len(scf) + 1), scf, marker=".", color="#1f77b4")
-            self.ax_energy.set_xlabel("SCF iteration")
-            self.ax_energy.set_ylabel("energy (Eh)")
-            self.ax_energy.set_title("SCF convergence (latest cycle, {} iters)".format(len(scf)))
-        elif fe:
-            self.ax_energy.axhline(fe[-1], color="#1f77b4")
-            self.ax_energy.set_title("Single-point energy: {:.8f} Eh".format(fe[-1]))
-        else:
-            self.ax_energy.set_title("(no energies parsed yet)")
-
+        # Panels, top to bottom: opt energy (when there are energies to show),
+        # the full SCF history (whenever any SCF data exists — a running SP job
+        # gets it full-height), gradients (OPT only).
+        panels = []
+        if fe or not blocks:
+            panels.append("energy")
+        if blocks:
+            panels.append("scf")
         if rms or mx:
+            panels.append("conv")
+
+        self.fig.clear()
+        self._axes = {}
+        n = len(panels)
+        for i, name in enumerate(panels):
+            self._axes[name] = self.fig.add_subplot(n, 1, i + 1)
+
+        ax = self._axes.get("energy")
+        if ax is not None:
+            if len(fe) > 1:
+                ax.plot(range(1, len(fe) + 1), fe, marker="o", color="#1f77b4")
+                ax.set_xlabel("geometry step")
+                ax.set_ylabel("energy (Eh)")
+                ax.set_title("Optimization energy ({} steps)".format(len(fe)))
+            elif len(fe) == 1:
+                ax.axhline(fe[-1], color="#1f77b4")
+                ax.set_title("Single-point energy: {:.8f} Eh".format(fe[-1]))
+            else:
+                ax.set_title("(no energies parsed yet)")
+
+        ax = self._axes.get("scf")
+        if ax is not None:
+            xs, ys, bounds = [], [], []
+            k = 0
+            for b in blocks:
+                if k:
+                    bounds.append(k + 0.5)
+                xs.extend(range(k + 1, k + len(b) + 1))
+                ys.extend(b)
+                k += len(b)
+            ax.plot(xs, ys, marker=".", ms=3, lw=0.9, color="#2ca02c")
+            for x in bounds:
+                ax.axvline(x, color="#bbbbbb", lw=0.7, linestyle="--")
+            ax.set_xlabel("SCF iteration (cumulative over {} cycle{})".format(
+                len(blocks), "" if len(blocks) == 1 else "s"))
+            ax.set_ylabel("energy (Eh)")
+            ax.set_title("SCF history — every cycle ({} iterations total)".format(k))
+
+        ax = self._axes.get("conv")
+        if ax is not None:
             if rms:
-                self.ax_conv.semilogy(range(1, len(rms) + 1), rms, marker="o",
-                                      label="RMS gradient", color="#d62728")
+                ax.semilogy(range(1, len(rms) + 1), rms, marker="o",
+                            label="RMS gradient", color="#d62728")
             if mx:
-                self.ax_conv.semilogy(range(1, len(mx) + 1), mx, marker="s",
-                                      label="MAX gradient", color="#ff7f0e")
-            self.ax_conv.set_xlabel("geometry step")
-            self.ax_conv.set_ylabel("gradient (log)")
-            self.ax_conv.legend(loc="best", fontsize=8)
-            self.ax_conv.set_title("Gradient convergence")
-        else:
-            self.ax_conv.set_title("(no gradient data — single point, or not yet at first step)")
+                ax.semilogy(range(1, len(mx) + 1), mx, marker="s",
+                            label="MAX gradient", color="#ff7f0e")
+            ax.set_xlabel("geometry step")
+            ax.set_ylabel("gradient (log)")
+            ax.legend(loc="best", fontsize=8)
+            ax.set_title("Gradient convergence")
+
+        for name, a in self._axes.items():
+            self._home[name] = (a.get_xlim(), a.get_ylim())
+        for name, lims in keep.items():
+            a = self._axes.get(name)
+            if a is not None:
+                a.set_xlim(lims[0])
+                a.set_ylim(lims[1])
 
         self.canvas.draw_idle()
+
+    # ------------------------------------------------- current geometry (OPT)
+    def _view_current_geometry(self):
+        """Open the LAST frame of the job's _trj.xyz — the current geometry of a
+        still-running optimisation — in the external 3D viewer."""
+        from tkinter import messagebox
+        p = self.trj_path
+        if not p or not os.path.isfile(p):
+            messagebox.showinfo(
+                "No trajectory yet",
+                "The trajectory file hasn't appeared:\n{}\n\nA local run writes it after "
+                "the first opt step. On the cluster the job runs on node-local /scratch "
+                "and only copies back when it ENDS — mid-run geometries aren't visible "
+                "from the gateway.".format(p or "(unknown)"), parent=self)
+            return
+        try:
+            from orca_workbench.core import coords as coords_mod
+            frames = coords_mod._read_xyz_frames(p)
+            if not frames:
+                raise ValueError("no frames in {}".format(p))
+            atoms, _meta = frames[-1]
+            import tempfile
+            tdir = tempfile.mkdtemp(prefix="orca_wb_current_")
+            cur = os.path.join(tdir, "current_step_{:03d}.xyz".format(len(frames)))
+            coords_mod.write_xyz(cur, atoms,
+                                 {"name": "current geometry",
+                                  "comment": "opt step {} (job still running)".format(
+                                      len(frames))})
+        except Exception as e:
+            messagebox.showwarning("Current geometry", str(e), parent=self)
+            return
+        from orca_workbench.ui.molecules_tab import open_xyz_3d
+        open_xyz_3d(self, self.app, cur)
 
     def _on_close(self):
         self._closed = True

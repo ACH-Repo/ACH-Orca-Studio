@@ -205,6 +205,21 @@ def test_import_dir_plain_out_gets_sentinel(tmp_path):
     assert out and os.path.basename(out) == "c.out"
 
 
+def test_import_dir_local_run_restores_local_job_id(tmp_path):
+    # The app's own local runner writes <mol>-local.out and job_id "local".
+    # Importing such a run dir must restore that identity, or a finished local
+    # calc comes back as "built, never run" and its results don't harvest.
+    proj = _project(tmp_path)
+    run = tmp_path / "calcs" / "003" / "wf" / "OPT" / "HF_STO-3G" / "debug"
+    _touch(str(run / "003.inp"), NMR_INP)
+    _touch(str(run / "003-local.out"), "ORCA TERMINATED NORMALLY")
+
+    discovery.import_dir(proj, str(tmp_path / "calcs"))
+    calc = proj.planned_calcs[0]
+    assert calc.job_id == "local"
+    assert calc.molecule_filename == "003"   # grouped by the 003/ molecule dir
+
+
 def test_import_dir_skips_already_present(tmp_path):
     proj = _project(tmp_path)
     _touch(str(tmp_path / "ext" / "m.inp"), NMR_INP)

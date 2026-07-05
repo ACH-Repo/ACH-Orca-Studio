@@ -292,6 +292,13 @@ class CalculationsTab(ttk.Frame):
         self.tree.bind("<Control-V>", lambda e: self._paste())
         self.tree.bind("<Delete>", lambda e: (self.on_remove(), "break")[1])
         self.tree.bind("<Double-1>", self._on_double_click)
+        # Ctrl+Enter (rebindable: Settings > Keyboard shortcuts) = the launch
+        # action, same as the amber button (Run locally on a PC, Submit on the
+        # cluster). Bound on the calc TABLE only, so a text field elsewhere can
+        # never launch jobs; both actions confirm before doing anything.
+        from orca_workbench.core import keymap
+        for seq in keymap.sequence_variants(keymap.sequence("calc.launch")):
+            self.tree.bind(seq, lambda e: (self._launch_shortcut(), "break")[1])
         self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.bind("<Enter>", lambda e: self.tree.focus_set(), add="+")
         tip(self.tree,
@@ -1770,6 +1777,14 @@ class CalculationsTab(ttk.Frame):
 
     # ----------------------------------------------------------- run locally
 
+    def _launch_shortcut(self):
+        """Ctrl+Enter on the calc table: the environment's launch action —
+        run locally on a PC, sbatch on the cluster (same as the amber button)."""
+        if self._local_mode:
+            self.on_run_local()
+        else:
+            self.on_submit()
+
     def on_run_local(self):
         root = self.app.project.root()
         targets = self._selected_or_all()
@@ -2072,13 +2087,23 @@ class CalculationsTab(ttk.Frame):
             keys = ekeys if ekeys is not None else [e.key for e in reporting.EXTRACTORS]
             report = reporting.assemble_report(contexts, keys)
             name = re.sub(r"[^A-Za-z0-9_.-]+", "_", (spec.get("name") or "report").strip()) or "report"
-            json_path = os.path.join(root, name + ".json")
-            reporting.write_json(report, json_path)
-            try:
-                reporting.write_csv(report, os.path.join(root, name + ".csv"))
-            except Exception:
-                pass
-            self._log("Report written: {} ({} calc(s))".format(json_path, len(contexts)))
+            fmt = spec.get("format", "both")
+            wrote = []
+            if fmt in ("both", "json"):
+                json_path = os.path.join(root, name + ".json")
+                reporting.write_json(report, json_path)
+                wrote.append(json_path)
+            if fmt in ("both", "csv"):
+                try:
+                    csv_path = os.path.join(root, name + ".csv")
+                    reporting.write_csv(report, csv_path,
+                                        columns=spec.get("csv_columns"),
+                                        missing=spec.get("csv_missing", ""))
+                    wrote.append(csv_path)
+                except Exception as e:
+                    self._log("Report CSV failed for {}: {}".format(name, e))
+            self._log("Report written: {} ({} calc(s))".format(
+                ", ".join(os.path.basename(p) for p in wrote), len(contexts)))
 
     def _pipeline_build(self, calc, mol, recipe, template):
         try:
@@ -2134,7 +2159,19 @@ class CalculationsTab(ttk.Frame):
                                 "The job's .out file hasn't appeared yet. Give it a moment after "
                                 "submission and try again.")
             return
-        LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), out_path)
+        LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), out_path,
+                       app=self.app, trj_path=self._expected_trj(calc))
+
+    def _expected_trj(self, calc):
+        """The path where an OPT job's _trj.xyz will appear (whether or not it
+        exists yet) — for mid-run current-geometry viewing. None for non-OPT."""
+        recipe = self.app.get_recipe(calc.recipe_name)
+        if recipe is None or "OPT" not in (recipe.calctype or "").upper():
+            return None
+        if not calc.rundir:
+            return None
+        return os.path.join(self.app.project.root(), calc.rundir,
+                            calc.molecule_filename + "_trj.xyz")
 
     # --------------------------------------------------- right-click: spectra
 
@@ -2218,6 +2255,16 @@ class CalculationsTab(ttk.Frame):
                                          command=lambda c=oc: self._plot_scan(c))
                 except Exception:
                     pass
+
+        # A still-RUNNING (or interrupted) OPT whose trajectory is already on
+        # disk (local runs; cluster jobs stage on node /scratch until copyback):
+        # view the current geometry without waiting for convergence.
+        if len(calcs) == 1 and not self._own_state(calcs[0])[2]:
+            trj_now = self._calc_file(calcs[0], calcs[0].molecule_filename + "_trj.xyz")
+            if trj_now:
+                menu.add_separator()
+                menu.add_command(label="Open current geometry (last opt step)",
+                                 command=lambda c=calcs[0]: self._open_current_geometry(c))
 
         # Finished FREQ: open the .out in the 3D viewer to animate the normal modes
         # (Avogadro reads ORCA output directly; a bare .xyz has no mode data).
@@ -2399,6 +2446,29 @@ class CalculationsTab(ttk.Frame):
         from orca_workbench.ui.molecules_tab import open_xyz_3d
         open_xyz_3d(self, self.app, path, slot=slot)
 
+    def _open_current_geometry(self, calc):
+        """Extract the LAST frame of a (running) OPT's _trj.xyz to a temp file
+        and open it — the job's current geometry, mid-optimisation."""
+        trj = self._calc_file(calc, calc.molecule_filename + "_trj.xyz")
+        if not trj:
+            return
+        try:
+            import tempfile
+            from orca_workbench.core import coords as coords_mod
+            frames = coords_mod._read_xyz_frames(trj)
+            if not frames:
+                raise ValueError("no frames in {}".format(trj))
+            atoms, _meta = frames[-1]
+            tdir = tempfile.mkdtemp(prefix="orca_wb_current_")
+            cur = os.path.join(tdir, "current_step_{:03d}.xyz".format(len(frames)))
+            coords_mod.write_xyz(cur, atoms, {"name": calc.molecule_filename,
+                                              "comment": "opt step {} (mid-run)".format(
+                                                  len(frames))})
+        except Exception as e:
+            messagebox.showwarning("Current geometry", str(e))
+            return
+        self._open_3d(cur)
+
     def _edit_geom_spec(self, calc):
         """Edit the calc's geometry constraints / relaxed-scan spec (injected into the
         ORCA input's %geom block at build time). Meaningful for OPT recipes only."""
@@ -2439,7 +2509,18 @@ class CalculationsTab(ttk.Frame):
             self.app.mark_dirty()
             self.refresh()
 
-        GeomSpecDialog(self, atoms, getattr(calc, "geom_spec", None), _save)
+        # Reference geometry path (the molecule whose atoms are shown), so the
+        # dialog can offer a 3D view for reading off atom indices.
+        vref = mol.xyz_path if (mol and mol.xyz_path) else None
+        if vref and not os.path.isabs(vref):
+            vref = os.path.join(self.app.project.root(), vref)
+
+        def _view():
+            if vref:
+                self._open_3d(vref)
+
+        GeomSpecDialog(self, atoms, getattr(calc, "geom_spec", None), _save,
+                       view_xyz=(_view if vref else None))
 
     def _plot_scan(self, calc):
         """Plot the relaxed-scan energy profile from a finished OPT+Scan calc's .out."""
@@ -2660,7 +2741,8 @@ class CalculationsTab(ttk.Frame):
     def _open_live(self, calc):
         op = self._out_path(calc)
         if op:
-            LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), op)
+            LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), op,
+                           app=self.app, trj_path=self._expected_trj(calc))
 
     def _plot_ir(self, calcs):
         # Accepts one or more finished FREQ calcs; stacks them as colour-matched

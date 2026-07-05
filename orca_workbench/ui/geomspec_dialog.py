@@ -42,12 +42,13 @@ def _parse_atoms(text):
 
 class GeomSpecDialog(tk.Toplevel):
     def __init__(self, parent, atoms, spec, on_save,
-                 title="Geometry constraints / scan"):
-        # type: (tk.Misc, list, dict, callable, str) -> None
+                 title="Geometry constraints / scan", view_xyz=None):
+        # type: (tk.Misc, list, dict, callable, str, callable) -> None
         super().__init__(parent)
         self.title(title)
         self._atoms = atoms or []
         self._on_save = on_save
+        self._view_xyz = view_xyz   # optional: opens the reference geometry in 3D
         self._rows = []   # [{frame, type_var, atoms_var, value_var}]
 
         ttk.Label(self, text=(
@@ -77,6 +78,13 @@ class GeomSpecDialog(tk.Toplevel):
     def _build_atom_reference(self):
         frame = ttk.LabelFrame(self, text="Atoms (index : element  x  y  z)")
         frame.pack(side=tk.TOP, fill=tk.X, padx=12, pady=4)
+        if self._view_xyz is not None:
+            bar = ttk.Frame(frame)
+            bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 0))
+            ttk.Button(bar, text="View geometry (3D)...",
+                       command=self._view_xyz).pack(side=tk.LEFT)
+            ttk.Label(bar, text="opens the reference molecule so you can read off atom "
+                      "indices", foreground="#888").pack(side=tk.LEFT, padx=6)
         cols = ("idx", "el", "x", "y", "z")
         tv = ttk.Treeview(frame, columns=cols, show="headings", height=min(7, max(3, len(self._atoms))))
         for c, w in (("idx", 50), ("el", 50), ("x", 90), ("y", 90), ("z", 90)):
@@ -102,6 +110,12 @@ class GeomSpecDialog(tk.Toplevel):
         ttk.Label(hdr, text="value (opt.)", width=14).pack(side=tk.LEFT)
         self._cons_frame = ttk.Frame(outer)
         self._cons_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
+        # Shown only while there are no constraint rows, so an empty spec doesn't
+        # look like a stray (and inert) default bond constraint.
+        self._cons_empty = ttk.Label(outer, text="No constraints — click + Add constraint "
+                                     "to freeze a bond/angle/dihedral/atom.",
+                                     foreground="#888")
+        self._cons_empty.pack(side=tk.TOP, anchor=tk.W, padx=6, pady=(0, 2))
         ttk.Button(outer, text="+ Add constraint", command=self._add_row).pack(
             side=tk.TOP, anchor=tk.W, padx=4, pady=(2, 4))
 
@@ -119,10 +133,21 @@ class GeomSpecDialog(tk.Toplevel):
         ttk.Button(row, text="X", width=3, command=lambda r=rec: self._del_row(r)).pack(
             side=tk.LEFT, padx=4)
         self._rows.append(rec)
+        self._sync_cons_empty()
 
     def _del_row(self, rec):
         rec["frame"].destroy()
         self._rows = [r for r in self._rows if r is not rec]
+        self._sync_cons_empty()
+
+    def _sync_cons_empty(self):
+        try:
+            if self._rows:
+                self._cons_empty.pack_forget()
+            else:
+                self._cons_empty.pack(side=tk.TOP, anchor=tk.W, padx=6, pady=(0, 2))
+        except (AttributeError, tk.TclError):
+            pass
 
     # ---- scan -----------------------------------------------------------
 
@@ -176,8 +201,9 @@ class GeomSpecDialog(tk.Toplevel):
             self._add_row(c.get("type", "B"),
                           " ".join(str(a) for a in (c.get("atoms") or [])),
                           "" if c.get("value") is None else c.get("value"))
-        if not self._rows:
-            self._add_row()   # start with one blank row
+        # No auto-blank row: an empty spec shows the "No constraints" hint instead
+        # of an inert default bond constraint.
+        self._sync_cons_empty()
         s = spec.get("scan")
         if s:
             self._scan_on.set(True)
@@ -191,7 +217,6 @@ class GeomSpecDialog(tk.Toplevel):
     def _clear_all(self):
         for r in list(self._rows):
             self._del_row(r)
-        self._add_row()
         self._scan_on.set(False)
         for v in (self._scan_atoms, self._scan_start, self._scan_end):
             v.set("")

@@ -184,6 +184,7 @@ def sequence_variants(seq):
 def _register_defaults():
     APP = "Application"
     PLOT = "Spectrum plots"
+    CALC = "Calculations tab"
     defs = [
         ("app.new_project",  APP,  "New project",              "<Control-n>"),
         ("app.open_project", APP,  "Open project",             "<Control-o>"),
@@ -191,6 +192,10 @@ def _register_defaults():
         ("app.add_by_name",  APP,  "Add molecule by name",     "<Control-Shift-N>"),
         ("app.import_files", APP,  "Import structure files",   "<Control-Shift-O>"),
         ("app.refresh",      APP,  "Refresh / status (F5)",    "<F5>"),
+        # Fires the tab's launch action: Run locally on a PC, Submit on the
+        # cluster. Bound on the calc table (not app-wide), so typing Ctrl+Enter
+        # in some text field elsewhere can never launch jobs.
+        ("calc.launch",      CALC, "Launch calculations (Run/Submit)", "<Control-Return>"),
         ("plot.reset",       PLOT, "Reset view (full)",        "<KeyPress-f>"),
         ("plot.edit_limits", PLOT, "Edit axis limits",         "<KeyPress-m>"),
         ("plot.zoom",        PLOT, "Zoom mode (cycle H/V/box)", "<KeyPress-z>"),

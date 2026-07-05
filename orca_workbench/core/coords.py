@@ -323,6 +323,75 @@ def _try_rdkit(smiles):
         return None, "RDKit raised {}: {}".format(type(e).__name__, e)
 
 
+def write_structure_file(path, atoms, name=""):
+    # type: (str, List[Atom], str) -> str
+    """Write atoms to `path` in the format its EXTENSION names.
+
+    .xyz is written natively. Any other extension goes through OpenBabel
+    (pybel — everything it can write: .mol, .sdf, .pdb, .mol2, .cml, ...),
+    falling back to RDKit for .mol/.sdf when OpenBabel is absent. Returns the
+    backend used ('native' / 'openbabel' / 'rdkit'); raises ValueError when no
+    installed backend can write that format."""
+    ext = os.path.splitext(path)[1].lower().lstrip(".") or "xyz"
+    if ext == "xyz":
+        write_xyz(path, atoms, {"name": name} if name else None)
+        return "native"
+
+    # Build one XYZ block in memory — the lingua franca both backends read.
+    lines = ["{}".format(len(atoms)), name or ""]
+    for symbol, x, y, z in atoms:
+        clean = "".join(ch for ch in symbol if ch.isalpha())
+        lines.append("{:<2} {:10.5f} {:10.5f} {:10.5f}".format(clean, x, y, z))
+    xyz_text = "\n".join(lines) + "\n"
+
+    errors = []
+    try:
+        try:
+            from openbabel import pybel
+        except ImportError:
+            import pybel  # type: ignore
+        if ext not in pybel.outformats:
+            errors.append("OpenBabel doesn't write '{}'".format(ext))
+        else:
+            mol = pybel.readstring("xyz", xyz_text)
+            if name:
+                mol.title = name
+            mol.write(ext, path, overwrite=True)
+            return "openbabel"
+    except ImportError as e:
+        errors.append("OpenBabel/Pybel not installed ({})".format(e))
+    except Exception as e:
+        errors.append("OpenBabel raised {}: {}".format(type(e).__name__, e))
+
+    if ext in ("mol", "sdf", "pdb"):
+        try:
+            from rdkit import Chem
+            mol = Chem.MolFromXYZBlock(xyz_text)
+            if mol is None:
+                raise ValueError("RDKit could not read the geometry")
+            try:
+                # Perceive bonds so viewers show a real structure, not a point
+                # cloud; harmless to skip if it fails (e.g. odd valences).
+                from rdkit.Chem import rdDetermineBonds
+                rdDetermineBonds.DetermineConnectivity(mol)
+            except Exception:
+                pass
+            if ext == "pdb":
+                Chem.MolToPDBFile(mol, path)
+            elif ext == "sdf":
+                with Chem.SDWriter(path) as w:
+                    w.write(mol)
+            else:
+                Chem.MolToMolFile(mol, path)
+            return "rdkit"
+        except ImportError as e:
+            errors.append("RDKit not installed ({})".format(e))
+        except Exception as e:
+            errors.append("RDKit raised {}: {}".format(type(e).__name__, e))
+
+    raise ValueError("could not write '{}': {}".format(ext, "; ".join(errors)))
+
+
 def _try_pybel(smiles):
     # type: (str) -> Tuple[Optional[List[Atom]], Optional[str]]
     """Returns (atoms, None) on success, (None, error_message) on failure."""

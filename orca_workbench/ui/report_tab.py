@@ -25,6 +25,13 @@ class ReportTab(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._ext_vars = {}  # key -> BooleanVar
+        # CSV output styling (mirrors the Workflow Report node's options):
+        # format = "both" (json+csv) | "json" | "csv"; csv_columns None = all
+        # default columns, else an ordered [{"key","header"}, ...]; csv_missing is
+        # the cell value for an absent property ("" blank, or "NaN" for pandas).
+        self._csv_format = "both"
+        self._csv_columns = None
+        self._csv_missing = ""
         self._build()
 
     def _build(self):
@@ -123,14 +130,21 @@ class ReportTab(ttk.Frame):
         name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         tip(name_entry, "Base name for the output files: <name>.json and <name>.csv, written to "
                         "the project root. Existing files with the same name are overwritten.")
+
+        # Format + CSV-styling controls (same options as the Workflow Report node).
+        # Rebuilt on a format change so the CSV rows show only in CSV/both modes.
+        self._fmt_frame = ttk.Frame(out_frame)
+        self._fmt_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
+        self._build_csv_controls()
+
         self.b_generate = tk.Button(out_frame, text="Generate report", command=self.on_generate,
                                     font=("TkDefaultFont", 10, "bold"),
                                     bg="#cfe8cf", activebackground="#bfe0bf")
         self.b_generate.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 6))
         tip(self.b_generate, "Run the selected extractors over the selected (or all) finished "
-                             "calcs and write <name>.json + <name>.csv to the project root. "
-                             "Shows a progress bar; the JSON keeps full detail, the CSV is a "
-                             "flat scalar summary for spreadsheets.")
+                             "calcs and write the report to the project root in the chosen "
+                             "format. Shows a progress bar; the JSON keeps full detail, the CSV "
+                             "is a flat scalar summary (customisable columns) for spreadsheets.")
 
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=4)
@@ -174,6 +188,53 @@ class ReportTab(ttk.Frame):
     def _paint_release(self, _event):
         self._painting = False
         return "break"
+
+    # ---- CSV output styling (format + custom columns + missing value) ----
+
+    def _build_csv_controls(self):
+        """(Re)build the output-format selector and, in CSV/both mode, the custom
+        column editor + missing-value picker. Rebuilt on a format change."""
+        f = self._fmt_frame
+        for w in f.winfo_children():
+            w.destroy()
+        ttk.Label(f, text="Output format:", font=("TkDefaultFont", 9, "bold")).pack(
+            anchor=tk.W, pady=(4, 0))
+        fmt = tk.StringVar(value=self._csv_format)
+
+        def on_fmt():
+            self._csv_format = fmt.get()
+            self._build_csv_controls()   # show/hide the CSV options
+        for val, txt in (("both", "JSON + CSV"), ("json", "JSON only"), ("csv", "CSV only")):
+            ttk.Radiobutton(f, text=txt, variable=fmt, value=val, command=on_fmt).pack(
+                anchor=tk.W, padx=12)
+
+        if fmt.get() == "json":
+            return   # no CSV options when JSON-only
+        b_cols = ttk.Button(f, text="Customise CSV columns...", command=self._edit_csv_columns)
+        b_cols.pack(anchor=tk.W, pady=(4, 0))
+        tip(b_cols, "Pick which properties become CSV columns, rename their headers, and set "
+                    "their left-to-right order. Rows are always calculations.")
+        summary = ("all default columns" if not self._csv_columns
+                   else "{} custom column(s)".format(len(self._csv_columns)))
+        ttk.Label(f, text="CSV: one row per calculation - " + summary,
+                  foreground="#777", wraplength=240, justify=tk.LEFT).pack(anchor=tk.W)
+        ttk.Label(f, text="Missing value:").pack(anchor=tk.W, pady=(4, 0))
+        miss = tk.StringVar(value=self._csv_missing)
+
+        def on_miss():
+            self._csv_missing = miss.get()
+        for val, txt in (("", "Empty cell"), ("NaN", "NaN")):
+            ttk.Radiobutton(f, text=txt, variable=miss, value=val, command=on_miss).pack(
+                anchor=tk.W, padx=12)
+
+    def _edit_csv_columns(self):
+        from orca_workbench.ui.csv_columns import edit_csv_columns_dialog
+
+        def on_save(cols):
+            self._csv_columns = cols
+            self._build_csv_controls()   # refresh the summary label
+
+        edit_csv_columns_dialog(self, self._csv_columns, "CSV columns", on_save)
 
     # ---- finished-calc discovery ----
 
@@ -242,6 +303,8 @@ class ReportTab(ttk.Frame):
         root = self.app.project.root()
         json_path = os.path.join(root, name + ".json")
         csv_path = os.path.join(root, name + ".csv")
+        want_json = self._csv_format in ("both", "json")
+        want_csv = self._csv_format in ("both", "csv")
 
         contexts = []
         for calc, recipe in finished:
@@ -264,17 +327,24 @@ class ReportTab(ttk.Frame):
 
         try:
             report = reporting.assemble_report(contexts, keys, progress=progress)
-            reporting.write_json(report, json_path)
-            reporting.write_csv(report, csv_path)
+            if want_json:
+                reporting.write_json(report, json_path)
+            if want_csv:
+                reporting.write_csv(report, csv_path, columns=self._csv_columns,
+                                    missing=self._csv_missing)
         except Exception as e:
             pd.close()
             messagebox.showerror("Report failed", str(e))
             return
         pd.close()
-        self._log("Wrote {}".format(json_path))
-        self._log("Wrote {}".format(csv_path))
+        if want_json:
+            self._log("Wrote {}".format(json_path))
+        if want_csv:
+            self._log("Wrote {}".format(csv_path))
         self._log("Extracted {} extractor(s) from {} calc(s).".format(len(keys), len(contexts)))
-        self.app.set_status("Report written: {}.json + {}.csv".format(name, name))
+        written = " + ".join([s for s, w in ((name + ".json", want_json),
+                                             (name + ".csv", want_csv)) if w])
+        self.app.set_status("Report written: {}".format(written))
 
     def _select_all(self, _event=None):
         items = self.tree.get_children("")

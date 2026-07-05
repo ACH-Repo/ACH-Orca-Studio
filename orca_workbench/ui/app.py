@@ -16,6 +16,7 @@ from orca_workbench import __version__
 from orca_workbench.core import config as config_mod
 from orca_workbench.core import diagnostics as diag
 from orca_workbench.core import features
+from orca_workbench.core import theme as theme_mod
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.core.inputs import Recipe
 from orca_workbench.core.project import Project, load_project, save_project
@@ -103,6 +104,8 @@ class App(object):
             with diag.timed("startup:refresh_all_tabs"):
                 self.refresh_all_tabs()
             self._update_title()
+            with diag.timed("startup:apply_skin"):
+                self._apply_startup_skin()
         # Now that the UI exists, snapshot display/latency info for the log.
         diag.capture_environment()
         if diag.is_enabled():
@@ -178,6 +181,8 @@ class App(object):
                             command=lambda: self._set_program("orca_path", "the ORCA executable",
                                 "Path to orca / orca.exe — used by 'Run locally' to run jobs on this machine."))
         setmenu.add_command(label="molden module name...", command=self._set_molden_module)
+        setmenu.add_command(label="UI scale (for small remote displays)...",
+                            command=self._set_ui_scale)
         setmenu.add_separator()
         setmenu.add_command(label="Default cores per job...", command=self._set_default_cores)
         setmenu.add_command(label="Default memory per core (MB)...",
@@ -238,6 +243,69 @@ class App(object):
         from orca_workbench.ui.keybindings import KeybindingsDialog
         KeybindingsDialog(self.root, on_change=self.apply_global_keymap)
 
+    def on_open_styles(self):
+        """Open the Styles (skin picker) dialog — single instance, non-modal so
+        the app stays usable while trying skins on."""
+        win = getattr(self, "_styles_win", None)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    win.lift()
+                    win.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        from orca_workbench.ui.styles_tab import StylesTab
+        win = tk.Toplevel(self.root)
+        win.title("Styles")
+        win.geometry("900x660")
+        win.minsize(620, 420)
+        # transient => the tool window stays ABOVE the (maximized) main window
+        # instead of disappearing behind it where it couldn't be alt-tabbed back.
+        win.transient(self.root)
+        StylesTab(win, self).pack(fill=tk.BOTH, expand=True)
+        win.lift()
+        win.focus_force()
+        self._styles_win = win
+
+    def _apply_startup_skin(self):
+        """Apply the saved skin at launch. Styling is off in --simple mode, and
+        the default skin is a deliberate no-op (the app stays pixel-identical to
+        the unthemed native look until the user actively picks a coloured skin)."""
+        self._current_skin = theme_mod.DEFAULT_SKIN_ID
+        if features.is_simple():
+            return
+        try:
+            from orca_workbench.ui import theming
+            theming.init(self.root)          # capture native theme + managed colours
+        except Exception:
+            return
+        skin = theme_mod.active_skin_id()
+        if skin != theme_mod.DEFAULT_SKIN_ID:
+            self.apply_skin(skin)
+
+    def apply_skin(self, skin_id):
+        # type: (str) -> None
+        """Repaint the whole app in `skin_id` and remember the choice. Called by
+        the Styles tab (and at startup for a non-default saved skin)."""
+        from orca_workbench.ui import theming
+        try:
+            theming.apply_skin(self.root, skin_id)
+        except Exception as e:
+            self.set_status("Could not apply skin: {}".format(e))
+            return
+        self._current_skin = skin_id
+        theme_mod.set_active_skin_id(skin_id)
+        # The node-graph canvas paints itself (not ttk), so tell it to re-read
+        # the skin's node palette and redraw.
+        wt = getattr(self, "workflow_tab", None)
+        if wt is not None and hasattr(wt, "apply_theme"):
+            try:
+                wt.apply_theme()
+            except Exception:
+                pass
+        self.set_status("Applied the '{}' skin.".format(theme_mod.get_skin(skin_id)["label"]))
+
     def _build_layout(self):
         toolbar = ttk.Frame(self.root)
         toolbar.pack(side=tk.TOP, fill=tk.X)
@@ -255,7 +323,15 @@ class App(object):
         tip(email_label, _email_tip)
         tip(email_entry, _email_tip)
 
-        # Tooltips on/off, far right on the same row as the email box.
+        # Far right of the toolbar row: Styles (appearance) then tooltips on/off.
+        # Styles lives HERE, not in the notebook — it's not part of the fundamental
+        # pipeline (Molecules → … → Workflow), so it sits off to the right.
+        # (ttk can't right-align a single notebook tab, hence a toolbar button.)
+        if not features.is_simple():
+            styles_btn = ttk.Button(toolbar, text="Styles...", command=self.on_open_styles)
+            styles_btn.pack(side=tk.RIGHT, padx=(4, 10), pady=4)
+            tip(styles_btn, "Re-skin the app (Default / Dark / Frutiger Aero / Boombox). "
+                            "Applies immediately; remembered between sessions.")
         self.tooltips_var = tk.BooleanVar(value=tooltip_mod.is_enabled())
         tt_cb = ttk.Checkbutton(toolbar, text="Show tooltips", variable=self.tooltips_var,
                                 command=self._on_tooltips_toggle)
@@ -325,6 +401,10 @@ class App(object):
                                "orca_workbench.ui.workflow_tab", "WorkflowTab")
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        # Ctrl+PageDown / Ctrl+PageUp cycle the major tabs right / left (the
+        # convention in browsers, editors, and most notebooks). Bound app-wide.
+        self.root.bind_all("<Control-Next>", lambda e: self._cycle_tab(1))
+        self.root.bind_all("<Control-Prior>", lambda e: self._cycle_tab(-1))
 
         self.status_var = tk.StringVar(value="Ready.")
         status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, relief=tk.SUNKEN)
@@ -421,7 +501,29 @@ class App(object):
             real.pack(fill=tk.BOTH, expand=True)
         spec["real"] = real
         setattr(self, spec["attr"], real)        # e.g. self.workflow_tab -> real
+        # A tab built after a coloured skin was applied needs its (freshly created)
+        # classic tk widgets recoloured too — re-run the applier over the new subtree.
+        if getattr(self, "_current_skin", theme_mod.DEFAULT_SKIN_ID) != theme_mod.DEFAULT_SKIN_ID:
+            try:
+                from orca_workbench.ui import theming
+                theming.apply_skin(self.root, self._current_skin)
+            except Exception:
+                pass
         return real
+
+    def _cycle_tab(self, step):
+        """Move the major-tab selection by `step` (wrapping). Ctrl+PageDown = +1
+        (right), Ctrl+PageUp = -1 (left)."""
+        try:
+            tabs = self.notebook.tabs()
+            if not tabs:
+                return "break"
+            cur = self.notebook.select()
+            i = tabs.index(cur) if cur in tabs else 0
+            self.notebook.select(tabs[(i + step) % len(tabs)])
+        except Exception:
+            pass
+        return "break"
 
     def _on_tab_changed(self, _event):
         sel = self.notebook.select()
@@ -500,6 +602,24 @@ class App(object):
         dlg = _SlurmTemplateDialog(self.root, slurm_mod)
         if dlg.saved:
             self.set_status("SLURM submit template updated — applies to newly built jobs.")
+
+    def _set_ui_scale(self):
+        from tkinter import simpledialog
+        cur = 1.0
+        try:
+            cur = float(config_mod.get("ui_scale", 1.0))
+        except (TypeError, ValueError):
+            pass
+        val = simpledialog.askfloat(
+            "UI scale",
+            "Multiplier for all widget/font sizes (0.5–4.0).\n\n"
+            "Bump this above 1.0 if everything looks too small over ThinLinc / a "
+            "remote desktop that reports a low screen DPI. 1.0 = automatic.\n\n"
+            "Takes effect on the next launch.",
+            initialvalue=cur, minvalue=0.5, maxvalue=4.0, parent=self.root)
+        if val is not None:
+            config_mod.set_value("ui_scale", round(val, 2))
+            self.set_status("UI scale set to {}× — restart to apply.".format(round(val, 2)))
 
     def _set_molden_module(self):
         from tkinter import simpledialog
@@ -709,19 +829,31 @@ class App(object):
                        "chronologically from left to right: each node's output geometry / results "
                        "feed the node(s) it connects to.").pack(anchor=tk.W, padx=4, pady=(4, 2))
         section("Adding & wiring")
-        bullet("Palette buttons / F3: add a node (F3 searches every type).")
-        bullet("Drag output pin -> input pin: wire them.")
-        bullet("Drop a wire on empty space: pick a new node to connect.")
-        bullet('"J": connect the two selected nodes.')
+        bullet("Palette buttons / F3: add a node (F3 searches every type; try "
+               "typing what you want to DO, e.g. 'align').")
+        bullet("Drag output pin -> input pin: wire them. Dropping on an occupied "
+               "input REPLACES its old wire.")
+        bullet("Drag a CONNECTED input pin: pick the wire up — re-plug it "
+               "elsewhere, or drop it on empty space to delete it.")
+        bullet("Drop an unconnected node onto a wire: splice it in between.")
+        bullet("Drop a new wire on empty space: pick a new node to connect.")
+        bullet('"V": connect the two selected nodes.')
+        bullet('"J" / "L" / "K": cut the selection\'s input / output / all wires.')
         section("Selecting & moving")
         bullet("Click / Ctrl+click: select / multi-select.")
-        bullet("Drag empty space: box-select.   Ctrl+A: select all.")
+        bullet("Drag empty space: box-select.   Ctrl+A: select all.   Alt+A: "
+               "clear the selection.")
+        bullet("Ctrl+C / Ctrl+V: copy / paste the selected nodes (with their "
+               "internal wires).")
         bullet("Drag a node: move it.")
         bullet('Scroll: zoom.   Middle/right-drag: pan.   "0": reset view.')
         section("Tidying (Blueprint-style)")
-        bullet('"Q": straighten the selection (wires run straight).')
+        bullet('"Q": straighten the selection (wires run straight) AND space it '
+               "evenly left-to-right.")
         bullet("Shift+W / Shift+S: align top / bottom edges.")
         bullet("Shift+A / Shift+D: align left / right edges.")
+        bullet("Right after Q / Shift+WASD: the ARROW keys tune the spacing "
+               "(Left/Right = horizontal gap, Up/Down = vertical) until you click.")
         bullet('"C": frame the selection.   "T": add a comment note.')
         section("Running")
         bullet("Generate only (grey): expand to calcs, don't launch.")
@@ -1082,7 +1214,11 @@ class _SlurmTemplateDialog(tk.Toplevel):
 
 def _apply_ui_scaling(root):
     """Pick a Tk scaling factor that matplotlib and Tk agree on, so fonts are a
-    sensible size and embedded figures render once at the right size."""
+    sensible size and embedded figures render once at the right size.
+
+    A user override (config `ui_scale`, or env `ORCA_WORKBENCH_UI_SCALE`) MULTIPLIES
+    the auto-picked factor — handy on ThinLinc/remote desktops that report a low
+    DPI so everything comes out small (set e.g. 1.3 to enlarge everything)."""
     try:
         if sys.platform == "win32":
             # Now that we're DPI-aware, scale by the real display density. An
@@ -1093,9 +1229,15 @@ def _apply_ui_scaling(root):
             # affects widget/font size, not plot rendering.
             dpi = float(root.winfo_fpixels("1i")) or 96.0
             scaling = min(2.1, max(1.0, dpi / 84.0))
-            root.tk.call("tk", "scaling", scaling)
         else:
-            root.tk.call("tk", "scaling", 1.2)
+            scaling = 1.2
+        scaling *= _ui_scale_override()
+        root.tk.call("tk", "scaling", scaling)
+        # Also scale the named fonts by the override, since `tk scaling` alone
+        # doesn't resize fonts whose size is given in points on some X servers.
+        mult = _ui_scale_override()
+        if abs(mult - 1.0) > 0.01:
+            _scale_named_fonts(root, mult)
         # Keep Treeview rows tall enough for the (now scaled) font.
         import tkinter.font as tkfont
         fnt = tkfont.nametofont("TkDefaultFont")
@@ -1103,6 +1245,32 @@ def _apply_ui_scaling(root):
                                   rowheight=int(fnt.metrics("linespace") * 1.35) + 2)
     except tk.TclError:
         pass
+
+
+def _ui_scale_override():
+    # type: () -> float
+    """User UI-scale multiplier (>0). config `ui_scale`, or the env var; 1.0 off."""
+    val = os.environ.get("ORCA_WORKBENCH_UI_SCALE") or config_mod.get("ui_scale", 1.0)
+    try:
+        f = float(val)
+        return f if 0.5 <= f <= 4.0 else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _scale_named_fonts(root, mult):
+    """Multiply every standard Tk named font's size by `mult` (once, at startup)."""
+    import tkinter.font as tkfont
+    for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont",
+                 "TkHeadingFont", "TkTooltipFont", "TkIconFont", "TkSmallCaptionFont"):
+        try:
+            f = tkfont.nametofont(name)
+            size = f.actual("size")
+            if size:   # points (>0) or pixels (<0) — scale the magnitude, keep sign
+                f.configure(size=int(round(size * mult)) if size > 0
+                            else -int(round(-size * mult)))
+        except tk.TclError:
+            pass
 
 
 def main(project_path=None):

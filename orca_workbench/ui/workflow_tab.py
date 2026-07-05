@@ -21,6 +21,7 @@ from typing import Optional
 
 from orca_workbench.core import diagnostics as diag
 from orca_workbench.core import workflow as wf_mod
+from orca_workbench.core import workflow_expand
 from orca_workbench.core.inputs import safe_path_component
 from orca_workbench.core.project import Molecule, PlannedCalc, new_calc_id
 from orca_workbench.ui.modal import make_modal
@@ -34,10 +35,8 @@ SUMMARY_H = 20   # band under the title for the config summary (recipe / mode / 
 PORT_H = 20
 PORT_R = 5
 
-_KIND_COLOR = {"source": "#cfe8cf", "calc": "#d3e6f5", "sink": "#f0dcc0", "gate": "#ede0c8",
-               "builder": "#e6d6f2", "filter": "#cfe6e0"}
-_BODY = "#fbfbfb"
-_SEL = "#1f6fb2"
+# Node-graph colours are now data-driven from the active skin — see
+# theme.node_palette() and WorkflowTab._np / _load_node_colors / apply_theme.
 
 # Live execution status → accent colour (border + badge) for a node.
 _STATE_COLOR = {
@@ -76,7 +75,32 @@ class WorkflowTab(ttk.Frame):
         self._undo_stack = []      # type: list
         self._redo_stack = []      # type: list
         self._undo_baseline = None
+        # Node-graph colours from the active skin (see theme.node_palette); refreshed
+        # by apply_theme() when the user switches skins. Seeded before _build so the
+        # first draw is themed.
+        self._load_node_colors()
         self._build()
+
+    def _load_node_colors(self):
+        """(Re)read the node-graph colour palette from the active skin."""
+        from orca_workbench.core import theme as theme_mod
+        sid = theme_mod.active_skin_id()
+        try:
+            self._np = theme_mod.node_palette(sid)
+        except Exception:
+            sid = theme_mod.DEFAULT_SKIN_ID
+            self._np = theme_mod.node_palette(sid)
+        self._np["canvas"] = theme_mod.get_skin(sid).get("node_canvas", "#eef1f4")
+
+    def apply_theme(self):
+        """Called by App.apply_skin: re-read the node colours + recolour the
+        canvas backdrop, then redraw the graph in the new skin."""
+        self._load_node_colors()
+        try:
+            self.canvas.configure(background=self._np["canvas"])
+        except tk.TclError:
+            pass
+        self._redraw()
 
     # ---- world <-> screen transform (for zoom + pan) ----
 
@@ -113,9 +137,12 @@ class WorkflowTab(ttk.Frame):
         ttk.Label(bar, text="Add node:").pack(side=tk.LEFT, padx=(2, 4))
         # Palette = the common pipeline nodes only. Niche/utility nodes (Filter,
         # ZPVA) stay one keystroke away via the F3 / drag-on-empty search popup,
-        # which is registry-driven so it lists every node type.
-        for ntype in ("molecules", "optimize", "frequencies", "property",
-                      "condition", "report"):
+        # which is registry-driven so it lists every node type. Transform/Combine
+        # (geometry building: shift/rotate/align fragments, then merge) earned a
+        # palette spot — they're the front of the pipeline when constructing
+        # complexes/dimers by hand.
+        for ntype in ("molecules", "transform", "combine", "optimize", "frequencies",
+                      "property", "condition", "report"):
             label = wf_mod.NODE_TYPES[ntype]["label"]
             ttk.Button(bar, text=label, width=max(8, len(label) + 1),
                        command=lambda t=ntype: self._add_node(t)).pack(side=tk.LEFT, padx=1)
@@ -166,7 +193,7 @@ class WorkflowTab(ttk.Frame):
 
         cframe = ttk.Frame(paned)
         paned.add(cframe, weight=4)
-        self.canvas = tk.Canvas(cframe, background="#eef1f4", highlightthickness=0,
+        self.canvas = tk.Canvas(cframe, background=self._np["canvas"], highlightthickness=0,
                                 scrollregion=(0, 0, 4000, 3000))
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.bind("<Button-1>", self._on_press)
@@ -193,11 +220,13 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<Shift-Button-5>", lambda e: self._pan_by(-60, 0))
         self.canvas.bind("<Control-Button-4>", lambda e: self._zoom_at(e.x, e.y, 1.1))
         self.canvas.bind("<Control-Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / 1.1))
-        # Arrow keys pan; +/- zoom; 0 resets the view.
-        self.canvas.bind("<Up>", lambda e: self._pan_by(0, 60))
-        self.canvas.bind("<Down>", lambda e: self._pan_by(0, -60))
-        self.canvas.bind("<Left>", lambda e: self._pan_by(60, 0))
-        self.canvas.bind("<Right>", lambda e: self._pan_by(-60, 0))
+        # Arrow keys pan — except right after an align/straighten (Q / Shift+WASD),
+        # where they tune the selection's spacing instead (Left/Right = horizontal
+        # gap, Up/Down = vertical gap) until you click or change the selection.
+        self.canvas.bind("<Up>", lambda e: self._arrow_key("up"))
+        self.canvas.bind("<Down>", lambda e: self._arrow_key("down"))
+        self.canvas.bind("<Left>", lambda e: self._arrow_key("left"))
+        self.canvas.bind("<Right>", lambda e: self._arrow_key("right"))
         for k in ("<plus>", "<KP_Add>", "<equal>"):
             self.canvas.bind(k, lambda e: self._zoom_center(1.1))
         for k in ("<minus>", "<KP_Subtract>"):
@@ -207,8 +236,25 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<Delete>", lambda e: self._delete_selected())
         self.canvas.bind("<Control-a>", self._on_select_all)
         self.canvas.bind("<Control-A>", self._on_select_all)
-        self.canvas.bind("<j>", lambda e: self._connect_selected())
-        self.canvas.bind("<J>", lambda e: self._connect_selected())
+        # V connects the two selected nodes (was J — J/K/L are now the vim-style
+        # cut keys: J cuts a node's INPUT wires, L its OUTPUT wires, K all).
+        self.canvas.bind("<v>", lambda e: self._connect_selected())
+        self.canvas.bind("<V>", lambda e: self._connect_selected())
+        self.canvas.bind("<j>", lambda e: self._cut_selected("in"))
+        self.canvas.bind("<J>", lambda e: self._cut_selected("in"))
+        self.canvas.bind("<l>", lambda e: self._cut_selected("out"))
+        self.canvas.bind("<L>", lambda e: self._cut_selected("out"))
+        self.canvas.bind("<k>", lambda e: self._cut_selected("both"))
+        self.canvas.bind("<K>", lambda e: self._cut_selected("both"))
+        # Blender-style deselect-all; Ctrl+C/V copy-paste the selected nodes
+        # (Ctrl bindings are more specific than the plain <c>/<v> ones, so Tk
+        # routes them here, not to frame/connect).
+        self.canvas.bind("<Alt-a>", lambda e: (self._clear_selection(), "break")[1])
+        self.canvas.bind("<Alt-A>", lambda e: (self._clear_selection(), "break")[1])
+        self.canvas.bind("<Control-c>", self._copy_selection)
+        self.canvas.bind("<Control-C>", self._copy_selection)
+        self.canvas.bind("<Control-v>", self._paste_clipboard)
+        self.canvas.bind("<Control-V>", self._paste_clipboard)
         self.canvas.bind("<F3>", lambda e: self._on_search_add())
         # Annotations (canvas-scoped, so they only fire in the node editor):
         # C frames the selected nodes (Unreal-style), T drops a comment note.
@@ -282,7 +328,7 @@ class WorkflowTab(ttk.Frame):
             w.destroy()
         if len(self._sel_nodes) > 1:
             ttk.Label(self.cfg_frame,
-                      text="{} nodes selected.\n\nPress J to connect two of them, drag to move "
+                      text="{} nodes selected.\n\nPress V to connect two of them, drag to move "
                            "them together, or Delete to remove.".format(len(self._sel_nodes)),
                       foreground="#666", wraplength=200, justify=tk.LEFT).pack(padx=8, pady=8)
             return
@@ -343,11 +389,16 @@ class WorkflowTab(ttk.Frame):
             ent = ttk.Entry(self.cfg_frame, textvariable=var, width=26)
             ent.pack(anchor=tk.W, padx=8, pady=2)
             var.trace_add("write", lambda *_a, n=node, v=var: self._set_cfg(n, "name", v.get()))
+            self._build_report_format(node)
             self._build_report_extractors(node)
         elif node.type == "zpva":
             self._build_zpva_panel(node)
         elif node.type == "filter":
             self._build_filter_panel(node)
+        elif node.type == "transform":
+            self._build_transform_panel(node)
+        elif node.type == "combine":
+            self._build_combine_panel(node)
         elif self._is_annotation(node):
             what = "title" if node.type == "frame" else "text"
             ttk.Label(self.cfg_frame, text="A {} annotation (not part of the run).".format(
@@ -445,8 +496,18 @@ class WorkflowTab(ttk.Frame):
             self.app.mark_dirty()
             self._build_config_panel()   # refresh the summary
 
+        vref = mols[0].xyz_path if (mols and mols[0].xyz_path) else None
+        if vref and not _os.path.isabs(vref):
+            vref = _os.path.join(self.app.project.root(), vref)
+
+        def _view():
+            if vref:
+                from orca_workbench.ui.molecules_tab import open_xyz_3d
+                open_xyz_3d(self, self.app, vref)
+
         GeomSpecDialog(self, atoms, node.config.get("geom_spec"), _save,
-                       title="Optimize node: geometry constraints / scan")
+                       title="Optimize node: geometry constraints / scan (first molecule shown)",
+                       view_xyz=(_view if vref else None))
 
     def _build_results_section(self, node):
         """List this calc node's expanded calculations with one-click launchers
@@ -558,6 +619,53 @@ class WorkflowTab(ttk.Frame):
         node.config[key] = value
         self._commit()
         self._redraw()
+
+    def _build_report_format(self, node):
+        """Output-format selector for a Report node + (in CSV mode) a custom
+        column editor. Rows are always calculations; columns are user-chosen
+        properties with custom headers and left-to-right order."""
+        f = self.cfg_frame
+        ttk.Separator(f, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=(6, 2))
+        ttk.Label(f, text="Output format:", font=("TkDefaultFont", 9, "bold")).pack(
+            anchor=tk.W, padx=8)
+        fmt = tk.StringVar(value=node.config.get("format", "both"))
+
+        def on_fmt():
+            self._set_cfg(node, "format", fmt.get())
+            self._build_config_panel()   # show/hide the CSV editor
+        for val, txt in (("both", "JSON + CSV"), ("json", "JSON only"), ("csv", "CSV only")):
+            ttk.Radiobutton(f, text=txt, variable=fmt, value=val, command=on_fmt).pack(
+                anchor=tk.W, padx=16)
+
+        if fmt.get() == "json":
+            return   # no CSV options when JSON-only
+        ttk.Button(f, text="Customise CSV columns...",
+                   command=lambda: self._edit_csv_columns(node)).pack(anchor=tk.W, padx=8, pady=(4, 0))
+        cols = node.config.get("csv_columns")
+        summary = ("all default columns" if not cols
+                   else "{} custom column(s)".format(len(cols)))
+        ttk.Label(f, text="CSV: one row per calculation · " + summary,
+                  foreground="#777", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+        ttk.Label(f, text="Missing value:").pack(anchor=tk.W, padx=8, pady=(4, 0))
+        miss = tk.StringVar(value=node.config.get("csv_missing", ""))
+        for val, txt in (("", "Empty cell"), ("NaN", "NaN")):
+            ttk.Radiobutton(f, text=txt, variable=miss, value=val,
+                            command=lambda v=miss: self._set_cfg(node, "csv_missing", v.get())
+                            ).pack(anchor=tk.W, padx=16)
+
+    def _edit_csv_columns(self, node):
+        """Dialog to pick CSV columns, rename their headers, and order them
+        left-to-right. Stored as node.config['csv_columns'] (None = all). Uses the
+        shared editor so the Report tab and Report node behave identically."""
+        from orca_workbench.ui.csv_columns import edit_csv_columns_dialog
+
+        def on_save(cols):
+            self._set_cfg(node, "csv_columns", cols)
+            self._build_config_panel()
+
+        edit_csv_columns_dialog(self, node.config.get("csv_columns"),
+                                "CSV columns — " + node.config.get("name", "report"),
+                                on_save)
 
     def _build_report_extractors(self, node):
         """Property checkboxes for a Report node — the same selection the Report tab
@@ -761,8 +869,13 @@ class WorkflowTab(ttk.Frame):
         for n in self.wf.nodes:
             if n.type == "comment":
                 self._draw_comment(n)
+        detached = (self._drag or {}).get("detach") if self._mode == "wire" else None
+        # Wire under a dragged isolated node (would splice) — drawn highlighted.
+        splice_eid = (self._drag or {}).get("splice_edge") if self._mode == "drag" else None
         for e in self.wf.edges:
-            self._draw_edge(e)
+            if e.id == detached:
+                continue   # being re-dragged; shown as the temp wire instead
+            self._draw_edge(e, highlight=(e.id == splice_eid))
         for n in self.wf.nodes:
             if not self._is_annotation(n):
                 self._draw_node(n)
@@ -770,13 +883,13 @@ class WorkflowTab(ttk.Frame):
         if self._mode == "wire" and self._drag and self._drag.get("temp"):
             x0, y0 = self._w2s(*self._drag["from_xy"])
             x1, y1 = self._w2s(*self._drag["cur"])
-            self.canvas.create_line(x0, y0, x1, y1, fill="#888", width=2, dash=(3, 2),
+            self.canvas.create_line(x0, y0, x1, y1, fill=self._np["wire"], width=2, dash=(3, 2),
                                     tags=("temp",))
         # transient rubber-band rectangle while box-selecting
         if self._mode == "box" and self._drag:
             x0, y0 = self._w2s(self._drag["x0"], self._drag["y0"])
             x1, y1 = self._w2s(*self._drag["cur"])
-            self.canvas.create_rectangle(x0, y0, x1, y1, outline=_SEL, width=1,
+            self.canvas.create_rectangle(x0, y0, x1, y1, outline=self._np["sel"], width=1,
                                          dash=(4, 3), tags=("temp",))
 
     def _draw_node(self, node):
@@ -788,19 +901,21 @@ class WorkflowTab(ttk.Frame):
         sh = SUMMARY_H * z
         selected = node.id in self._sel_nodes
         ntag = "N:" + node.id
+        np = self._np
         live = self._node_live_state(node)
         if selected:
-            outline, width = _SEL, 3
+            outline, width = np["sel"], 3
         elif live:
-            outline, width = _STATE_COLOR.get(live, "#7a8a99"), 3
+            outline, width = _STATE_COLOR.get(live, np["outline"]), 3
         else:
-            outline, width = "#7a8a99", 1
-        self.canvas.create_rectangle(x, y, x + w, y + h, fill=_BODY, outline=outline,
+            outline, width = np["outline"], 1
+        self.canvas.create_rectangle(x, y, x + w, y + h, fill=np["body"], outline=outline,
                                      width=width, tags=(ntag, "nodebody"))
         self.canvas.create_rectangle(x, y, x + w, y + th,
-                                     fill=_KIND_COLOR.get(node.kind, "#ddd"),
+                                     fill=np["kinds"].get(node.kind, np["body"]),
                                      outline=outline, width=width, tags=(ntag,))
         self.canvas.create_text(x + 8 * z, y + th / 2, anchor=tk.W, text=node.label,
+                                fill=np["fg"],
                                 font=("TkDefaultFont", self._fs(9), "bold"), tags=(ntag,))
         if live:
             # status badge — a filled dot at the title's right edge
@@ -808,7 +923,7 @@ class WorkflowTab(ttk.Frame):
             by = y + th / 2
             r = 5 * z
             self.canvas.create_oval(bx - r, by - r, bx + r, by + r,
-                                    fill=_STATE_COLOR.get(live, "#888"), outline="#333",
+                                    fill=_STATE_COLOR.get(live, "#888"), outline=np["port_ring"],
                                     tags=(ntag,))
         # config summary — in its own band under the title (above the ports, so
         # it never overlaps the port labels), centred and single-line-clipped.
@@ -816,7 +931,8 @@ class WorkflowTab(ttk.Frame):
         if summ:
             self.canvas.create_text(x + w / 2, y + th + sh / 2,
                                     anchor=tk.CENTER, text=self._fit_summary(summ),
-                                    font=("TkDefaultFont", self._fs(8)), fill="#555", tags=(ntag,))
+                                    font=("TkDefaultFont", self._fs(8)), fill=np["summary_fg"],
+                                    tags=(ntag,))
         # ports (below the summary band)
         py0 = y + th + sh
         step = PORT_H * z
@@ -852,18 +968,25 @@ class WorkflowTab(ttk.Frame):
                     "terminated_ok": "if terminated OK"}.get(pred, pred)
         if node.type == "report":
             return node.config.get("name", "report") + ".json"
+        if node.type == "transform":
+            n = len(node.config.get("ops") or [])
+            return "{} op{}".format(n, "" if n == 1 else "s") if n else "(no ops yet)"
+        if node.type == "combine":
+            mode = node.config.get("mode", "merge")
+            return "pairwise" if mode == "pairwise" else "merge all inputs"
         return ""
 
     def _draw_port(self, node_id, name, is_input, x, y, ptype):
         z = self._zoom
         r = PORT_R * z
-        color = "#2a8a2a" if ptype == "geometry" else "#b06000"
+        np = self._np
+        color = np["port_geom"] if ptype == "geometry" else np["port_results"]
         tag = "P:{}:{}:{}".format(node_id, "in" if is_input else "out", name)
         self.canvas.create_oval(x - r, y - r, x + r, y + r,
-                                fill=color, outline="#333", tags=(tag, "port"))
+                                fill=color, outline=np["port_ring"], tags=(tag, "port"))
         lx = x + (r + 3 * z) if is_input else x - (r + 3 * z)
         self.canvas.create_text(lx, y, anchor=(tk.W if is_input else tk.E), text=name,
-                                font=("TkDefaultFont", self._fs(7)), fill="#444",
+                                font=("TkDefaultFont", self._fs(7)), fill=np["port_label"],
                                 tags=("P:" + node_id,))
 
     def _draw_resize_handle(self, x, y, w, h, ntag, color):
@@ -879,12 +1002,14 @@ class WorkflowTab(ttk.Frame):
         w, h = ww * z, hh * z
         sel = node.id in self._sel_nodes
         ntag = "N:" + node.id
-        outline = _SEL if sel else "#d4b94a"
-        self.canvas.create_rectangle(x, y, x + w, y + h, fill="#fdf6d8", outline=outline,
+        np = self._np
+        outline = np["sel"] if sel else np["comment_outline"]
+        self.canvas.create_rectangle(x, y, x + w, y + h, fill=np["comment_bg"], outline=outline,
                                      width=2 if sel else 1, tags=(ntag, "nodebody"))
         self.canvas.create_text(x + 7 * z, y + 6 * z, anchor=tk.NW, width=max(10.0, w - 14 * z),
                                 text=node.config.get("text", ""),
-                                font=("TkDefaultFont", self._fs(9)), fill="#5a4a00", tags=(ntag,))
+                                font=("TkDefaultFont", self._fs(9)), fill=np["comment_fg"],
+                                tags=(ntag,))
         self._draw_resize_handle(x, y, w, h, ntag, outline)
 
     def _draw_frame(self, node):
@@ -894,20 +1019,21 @@ class WorkflowTab(ttk.Frame):
         w, h = ww * z, hh * z
         sel = node.id in self._sel_nodes
         ntag = "N:" + node.id
-        outline = _SEL if sel else "#b9a24a"
         th = 20 * z
         # transparent body so contained nodes show through; coloured title bar
+        np = self._np
+        outline = np["sel"] if sel else np["frame_outline"]
         self.canvas.create_rectangle(x, y, x + w, y + h, fill="", outline=outline,
                                      width=2 if sel else 1, tags=(ntag, "nodebody"))
-        self.canvas.create_rectangle(x, y, x + w, y + th, fill="#f0e6c2", outline=outline,
+        self.canvas.create_rectangle(x, y, x + w, y + th, fill=np["frame_bg"], outline=outline,
                                      width=1, tags=(ntag,))
         self.canvas.create_text(x + 7 * z, y + th / 2, anchor=tk.W,
                                 text=node.config.get("title", "Group"),
-                                font=("TkDefaultFont", self._fs(9), "bold"), fill="#5a4a20",
+                                font=("TkDefaultFont", self._fs(9), "bold"), fill=np["frame_fg"],
                                 tags=(ntag,))
         self._draw_resize_handle(x, y, w, h, ntag, outline)
 
-    def _draw_edge(self, e):
+    def _draw_edge(self, e, highlight=False):
         src = self.wf.node(e.src_node)
         dst = self.wf.node(e.dst_node)
         if src is None or dst is None:
@@ -919,8 +1045,13 @@ class WorkflowTab(ttk.Frame):
         a = self._w2s(*a)
         b = self._w2s(*b)
         selected = self._sel_edge == e.id
-        col = _SEL if selected else "#5a6b7a"
-        w = 3 if selected else 2
+        np = self._np
+        if highlight:                       # a dropped node would splice HERE
+            col, w = np["splice"], 4
+        elif selected:
+            col, w = np["wire_sel"], 3
+        else:
+            col, w = np["wire"], 2
         dx = max(30 * self._zoom, abs(b[0] - a[0]) * 0.4)
         self.canvas.create_line(a[0], a[1], a[0] + dx, a[1], b[0] - dx, b[1], b[0], b[1],
                                 smooth=True, width=w, fill=col, tags=("E:" + e.id, "edge"))
@@ -948,6 +1079,7 @@ class WorkflowTab(ttk.Frame):
 
     def _on_press(self, event):
         self.canvas.focus_set()
+        self._align_ctx = None      # any click ends the arrows-tune-spacing mode
         cx, cy = self._cxy(event)
         ctrl = bool(event.state & 0x0004)
         # resize handle of a comment / frame takes priority over everything
@@ -993,7 +1125,19 @@ class WorkflowTab(ttk.Frame):
             self._mode = None
             self._drag = None
             return
-        if hit[0] == "port" and hit[3]:       # input port → select its node
+        if hit[0] == "port" and hit[3]:       # input port
+            ein = self.wf.edges_into(hit[1], hit[2])
+            if ein and not ctrl:
+                # A CONNECTED input: pick the wire up — drag it to another
+                # input to rewire, or drop it on empty space to delete it.
+                e = ein[-1]
+                src = self.wf.node(e.src_node)
+                self._mode = "wire"
+                self._drag = {"src": (e.src_node, e.src_port),
+                              "from_xy": self._port_xy(src, e.src_port, False),
+                              "cur": (cx, cy), "temp": True, "detach": e.id}
+                self._redraw()
+                return
             if ctrl:
                 self._toggle_node(hit[1])
             else:
@@ -1034,6 +1178,9 @@ class WorkflowTab(ttk.Frame):
                 n = self.wf.node(nid)
                 if n is not None:
                     n.x, n.y = ox + dx, oy + dy
+            # Live splice affordance: a single isolated node dragged over a wire
+            # highlights that wire, so the user sees where a drop would insert it.
+            self._drag["splice_edge"] = self._splice_candidate(self._drag)
             self._redraw()
             return
         if self._mode == "wire" and self._drag:
@@ -1055,7 +1202,10 @@ class WorkflowTab(ttk.Frame):
             return
         if mode == "drag" and drag:
             if drag.get("moved"):
+                # Dropping a lone, unconnected node onto a wire splices it in.
+                self._maybe_splice_at_drop(cx, cy, drag)
                 self._commit()
+                self._redraw()
             elif drag.get("collapse_to"):
                 self._select_only(drag["collapse_to"])
             return
@@ -1083,6 +1233,26 @@ class WorkflowTab(ttk.Frame):
                 dp = self._compatible_input_port(sn, sp, nid)
                 if dp is not None:
                     target = (nid, dp)
+        # A wire PICKED UP from a connected input (detach-drag): re-plug it on a
+        # target, or delete the connection on an empty drop — never the add-node
+        # popup (that's for drawing NEW wires from an output).
+        detach = drag.get("detach")
+        if detach is not None:
+            old = self.wf.edge(detach)
+            if old is not None and target == (old.dst_node, old.dst_port):
+                self._redraw()                      # dropped back where it was
+                return
+            if old is not None:
+                self.wf.remove_edge(detach)
+            if target is None:
+                self._commit()
+                self._redraw()
+                self.app.set_status("Connection removed.")
+                return
+            if not self._try_add_edge(sn, sp, target[0], target[1]) and old is not None:
+                self.wf.edges.append(old)           # invalid target: keep the old wire
+            self._redraw()
+            return
         if target is not None:
             self._try_add_edge(sn, sp, target[0], target[1])
             self._redraw()
@@ -1104,11 +1274,133 @@ class WorkflowTab(ttk.Frame):
 
     def _try_add_edge(self, sn, sp, dn, dp):
         edge, why = self.wf.add_edge(sn, sp, dn, dp)
+        if edge is None and why == "input already connected":
+            # Standard node-editor behaviour: dropping a wire on an occupied
+            # single input REPLACES the old connection (put back if the new
+            # one turns out invalid, e.g. it would make a cycle).
+            old = list(self.wf.edges_into(dn, dp))
+            for oe in old:
+                self.wf.remove_edge(oe.id)
+            edge, why = self.wf.add_edge(sn, sp, dn, dp)
+            if edge is None:
+                self.wf.edges.extend(old)
         if edge is None and why:
             self.app.set_status("Can't connect: " + why)
             return False
         self._commit()
         return True
+
+    # ---- splice a dropped node into a wire ----
+
+    def _splice_candidate(self, drag):
+        """The edge id a currently-dragged single isolated node would splice
+        into (its centre is over the wire and the ports are type-compatible), or
+        None. Shared by the live hover-highlight and the drop handler."""
+        if len(drag.get("orig", {})) != 1:
+            return None
+        nid = next(iter(drag["orig"]))
+        node = self.wf.node(nid)
+        if node is None or self._is_annotation(node):
+            return None
+        if self.wf.edges_into(nid) or self.wf.edges_out(nid):
+            return None                             # only an isolated node splices
+        cx = node.x + self._node_width(node) / 2.0
+        cy = node.y + self._node_height(node) / 2.0
+        eid = self._edge_near(cx, cy)
+        if eid is None:
+            return None
+        e = self.wf.edge(eid)
+        if e is None or e.src_node == nid or e.dst_node == nid:
+            return None
+        etype = self._out_port_type(e.src_node, e.src_port)
+        in_port = self._compatible_input_port(e.src_node, e.src_port, nid)
+        out_port = next((name for name, t in node.outputs() if t == etype), None)
+        if in_port is None or out_port is None:
+            return None
+        return eid
+
+    def _maybe_splice_at_drop(self, cx, cy, drag):
+        """Standard node-editor move: dropping an ISOLATED node onto a connection
+        splices it in — old src feeds the node, the node feeds the old
+        destination — and pushes the downstream nodes right to make room."""
+        eid = drag.get("splice_edge") or self._splice_candidate(drag)
+        if eid is None:
+            return
+        nid = next(iter(drag["orig"]))
+        node = self.wf.node(nid)
+        e = self.wf.edge(eid)
+        if e is None:
+            return
+        etype = self._out_port_type(e.src_node, e.src_port)
+        in_port = self._compatible_input_port(e.src_node, e.src_port, nid)
+        out_port = next((name for name, t in node.outputs() if t == etype), None)
+        if in_port is None or out_port is None:
+            return
+        src_node, dst_node, dst_port = e.src_node, e.dst_node, e.dst_port
+        self.wf.remove_edge(eid)
+        e1, _w1 = self.wf.add_edge(src_node, e.src_port, nid, in_port)
+        e2, _w2 = self.wf.add_edge(nid, out_port, dst_node, dst_port)
+        if e1 is None or e2 is None:                # shouldn't happen — restore
+            if e1 is not None:
+                self.wf.remove_edge(e1.id)
+            if e2 is not None:
+                self.wf.remove_edge(e2.id)
+            self.wf.edges.append(e)
+            return
+        # Sit the new node on the wire (between src and dst) and push the dst
+        # side right so it doesn't overlap the inserted node.
+        s, d = self.wf.node(src_node), self.wf.node(dst_node)
+        if s is not None and d is not None:
+            node.x = s.x + self._node_width(s) + 40.0
+            node.y = (s.y + d.y) / 2.0
+            need = node.x + self._node_width(node) + 40.0 - d.x
+            if need > 0:
+                self._shift_subtree_right(dst_node, need)
+        self.app.set_status("Spliced {} into the connection.".format(node.label))
+
+    def _shift_subtree_right(self, start_id, dx):
+        """Move `start_id` and everything reachable downstream of it right by dx
+        (to make room for a spliced-in node). Skips the node being inserted."""
+        seen = set()
+        stack = [start_id]
+        while stack:
+            nid = stack.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            n = self.wf.node(nid)
+            if n is not None and not self._is_annotation(n):
+                n.x += dx
+            stack.extend(e.dst_node for e in self.wf.edges_out(nid))
+
+    def _edge_near(self, cx, cy, tol=16.0):
+        """The edge whose wire runs within `tol` world units of (cx, cy), or
+        None. Distance is measured to the polyline through the same control
+        points the smooth bezier is drawn with — close enough for hit-testing."""
+        def seg_dist(px, py, a, b):
+            ax, ay = a
+            bx, by = b
+            vx, vy = bx - ax, by - ay
+            L2 = vx * vx + vy * vy
+            t = 0.0 if L2 <= 1e-12 else max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / L2))
+            qx, qy = ax + t * vx, ay + t * vy
+            return ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
+
+        best = None
+        for e in self.wf.edges:
+            src, dst = self.wf.node(e.src_node), self.wf.node(e.dst_node)
+            if src is None or dst is None:
+                continue
+            a = self._port_xy(src, e.src_port, is_input=False)
+            b = self._port_xy(dst, e.dst_port, is_input=True)
+            if not a or not b:
+                continue
+            dx = max(30.0, abs(b[0] - a[0]) * 0.4)
+            pts = [a, (a[0] + dx, a[1]), (b[0] - dx, b[1]), b]
+            d = min(seg_dist(cx, cy, pts[k], pts[k + 1]) for k in range(3))
+            if d <= tol and (best is None or d < best[0]):
+                best = (d, e.id)
+        return best[1] if best else None
 
     # ---- hit-testing in canvas coords (robust to the temp wire on top) ----
 
@@ -1220,6 +1512,9 @@ class WorkflowTab(ttk.Frame):
             b = max(n.y + h(n) for n in nodes)
             for n in nodes:
                 n.y = b - h(n)
+        # A/D leave a vertical stack, W/S a horizontal row — arrows now tune
+        # the gaps (see _arrow_key).
+        self._set_align_ctx()
         self.app.mark_dirty()
         self._redraw()
         return "break"
@@ -1239,24 +1534,146 @@ class WorkflowTab(ttk.Frame):
             cy = sum(n.y + self._node_height(n) / 2.0 for n in nodes) / len(nodes)
             for n in nodes:
                 n.y = cy - self._node_height(n) / 2.0
-            self.app.mark_dirty()
-            self._redraw()
-            return "break"
-        edges.sort(key=lambda e: self.wf.node(e.src_node).x)   # upstream first
-        for e in edges:
-            src, dst = self.wf.node(e.src_node), self.wf.node(e.dst_node)
-            sp = self._port_xy(src, e.src_port, is_input=False)
-            dp = self._port_xy(dst, e.dst_port, is_input=True)
-            if sp is None or dp is None:
-                continue
-            dst.y = sp[1] - (dp[1] - dst.y)   # dst input pin height := src output pin height
+        else:
+            edges.sort(key=lambda e: self.wf.node(e.src_node).x)   # upstream first
+            for e in edges:
+                src, dst = self.wf.node(e.src_node), self.wf.node(e.dst_node)
+                sp = self._port_xy(src, e.src_port, is_input=False)
+                dp = self._port_xy(dst, e.dst_port, is_input=True)
+                if sp is None or dp is None:
+                    continue
+                dst.y = sp[1] - (dp[1] - dst.y)   # dst input pin := src output pin height
+        # ...and distribute horizontally with even gaps so nothing overlaps;
+        # arrow keys then fine-tune the spacing (see _arrow_key).
+        self._set_align_ctx()
+        self._distribute("x")
         self.app.mark_dirty()
         self._redraw()
+        return "break"
+
+    # ---- spacing / distribution (arrow keys after an align) ----
+
+    def _set_align_ctx(self):
+        """Arm the arrow keys as spacing tuners for the just-aligned selection
+        (cleared by the next canvas click or selection change)."""
+        self._align_ctx = {"nodes": list(self._sel_nodes)}
+
+    def _distribute(self, axis):
+        """Evenly space the align-context nodes along `axis` with the current
+        gap, preserving their order (first node stays put)."""
+        ctx = getattr(self, "_align_ctx", None)
+        nodes = [self.wf.node(nid) for nid in (ctx or {}).get("nodes", [])]
+        nodes = [n for n in nodes if n is not None]
+        if len(nodes) < 2:
+            return
+        if axis == "x":
+            gap = getattr(self, "_gap_x", 60.0)
+            nodes.sort(key=lambda n: n.x)
+            x = nodes[0].x
+            for n in nodes:
+                n.x = x
+                x += self._node_width(n) + gap
+        else:
+            gap = getattr(self, "_gap_y", 30.0)
+            nodes.sort(key=lambda n: n.y)
+            y = nodes[0].y
+            for n in nodes:
+                n.y = y
+                y += self._node_height(n) + gap
+        self.app.mark_dirty()
+        self._redraw()
+
+    def _arrow_key(self, direction):
+        ctx = getattr(self, "_align_ctx", None)
+        if ctx and ctx.get("nodes") == self._sel_nodes and len(self._sel_nodes) > 1:
+            if direction in ("left", "right"):
+                self._gap_x = max(4.0, getattr(self, "_gap_x", 60.0)
+                                  + (10.0 if direction == "right" else -10.0))
+                self._distribute("x")
+            else:
+                self._gap_y = max(4.0, getattr(self, "_gap_y", 30.0)
+                                  + (10.0 if direction == "down" else -10.0))
+                self._distribute("y")
+            return "break"
+        pan = {"left": (60, 0), "right": (-60, 0),
+               "up": (0, 60), "down": (0, -60)}[direction]
+        self._pan_by(*pan)
+        return "break"
+
+    # ---- cut connections (vim-style J/K/L) ----
+
+    def _cut_selected(self, which):
+        """J: cut every wire INTO the selected node(s); L: every wire OUT;
+        K: all of them."""
+        sel = set(self._sel_nodes)
+        if not sel:
+            self.app.set_status("Select node(s) first (J = cut inputs, L = outputs, "
+                                "K = all).")
+            return "break"
+        drop = set()
+        for nid in sel:
+            if which in ("in", "both"):
+                drop.update(e.id for e in self.wf.edges_into(nid))
+            if which in ("out", "both"):
+                drop.update(e.id for e in self.wf.edges_out(nid))
+        if not drop:
+            self.app.set_status("No connections to cut on the selection.")
+            return "break"
+        self.wf.edges = [e for e in self.wf.edges if e.id not in drop]
+        self._commit()
+        self._redraw()
+        self.app.set_status("Cut {} connection(s).".format(len(drop)))
+        return "break"
+
+    # ---- copy / paste nodes ----
+
+    def _copy_selection(self, _event=None):
+        import copy
+        nodes = [self.wf.node(nid) for nid in self._sel_nodes]
+        nodes = [n for n in nodes if n is not None]
+        if not nodes:
+            return "break"
+        ids = {n.id for n in nodes}
+        self._node_clipboard = {
+            "nodes": [copy.deepcopy(n.to_dict()) for n in nodes],
+            # only the wires INTERNAL to the copied set travel along
+            "edges": [e.to_dict() for e in self.wf.edges
+                      if e.src_node in ids and e.dst_node in ids],
+        }
+        self._paste_count = 0
+        self.app.set_status("Copied {} node(s).".format(len(nodes)))
+        return "break"
+
+    def _paste_clipboard(self, _event=None):
+        import copy
+        clip = getattr(self, "_node_clipboard", None)
+        if not clip:
+            self.app.set_status("Nothing copied yet (Ctrl+C on selected nodes first).")
+            return "break"
+        self._paste_count = getattr(self, "_paste_count", 0) + 1
+        off = 40.0 * self._paste_count
+        idmap = {}
+        new_ids = []
+        for nd in clip["nodes"]:
+            node = self.wf.add_node(nd["type"], nd["x"] + off, nd["y"] + off,
+                                    copy.deepcopy(nd.get("config")))
+            idmap[nd["id"]] = node.id
+            new_ids.append(node.id)
+        for ed in clip["edges"]:
+            self.wf.add_edge(idmap[ed["src_node"]], ed["src_port"],
+                             idmap[ed["dst_node"]], ed["dst_port"])
+        self._commit()
+        self._sel_nodes = new_ids
+        self._sel_edge = None
+        self._redraw()
+        self._build_config_panel()
+        self.app.set_status("Pasted {} node(s).".format(len(new_ids)))
         return "break"
 
     def _clear_selection(self):
         self._sel_nodes = []
         self._sel_edge = None
+        self._align_ctx = None
         self._redraw()
         self._build_config_panel()
 
@@ -1394,7 +1811,7 @@ class WorkflowTab(ttk.Frame):
 
     def _connect_selected(self):
         if len(self._sel_nodes) != 2:
-            self.app.set_status("Select exactly two nodes (Ctrl+click), then press J to connect.")
+            self.app.set_status("Select exactly two nodes (Ctrl+click), then press V to connect.")
             return "break"
         a, b = self._sel_nodes[0], self._sel_nodes[1]
         pair = self._find_connectable(a, b) or self._find_connectable(b, a)
@@ -1498,8 +1915,8 @@ class WorkflowTab(ttk.Frame):
         port's owner) lets us refine further by chemical prerequisite."""
         # Canonical ordering, but derived from the registry so every node type
         # (including new ones like ZPVA / Filter) shows up automatically.
-        canonical = ["molecules", "optimize", "frequencies", "property",
-                     "condition", "filter", "zpva", "report"]
+        canonical = ["molecules", "transform", "combine", "optimize", "frequencies",
+                     "property", "condition", "filter", "zpva", "report"]
         order = ([t for t in canonical if t in wf_mod.NODE_TYPES]
                  + [t for t in wf_mod.NODE_TYPES if t not in canonical])
         # Annotations (Comment/Frame) are spawned by their own keys (T / C), not the
@@ -1526,6 +1943,15 @@ class WorkflowTab(ttk.Frame):
         # Unprompted (F3 / right-click, no out_type) shows everything.
         types = [t for t in order if offer(t)] if out_type else order
         all_items = [(wf_mod.NODE_TYPES[t]["label"], t) for t in types]
+        # Search aliases: typing what you want to DO finds the node that does it
+        # (e.g. "align" -> Transform, which owns the alignment ops).
+        aliases = {
+            "transform": ("align", "rotate", "translate", "mirror", "move", "shift",
+                          "center", "dihedral", "flip"),
+            "combine": ("merge", "append", "join", "dimer", "assemble"),
+            "filter": ("subset", "select"),
+            "molecules": ("source", "input"),
+        }
 
         top = tk.Toplevel(self)
         top.title("Add node")
@@ -1546,7 +1972,8 @@ class WorkflowTab(ttk.Frame):
             q = ent.get().strip().lower()
             lb.delete(0, tk.END)
             items = [(lbl, nt) for (lbl, nt) in all_items
-                     if q in lbl.lower() or q in nt.lower()]
+                     if q in lbl.lower() or q in nt.lower()
+                     or any(q in a for a in aliases.get(nt, ()))]
             state["items"] = items
             for lbl, _nt in items:
                 lb.insert(tk.END, lbl)
@@ -1735,6 +2162,470 @@ class WorkflowTab(ttk.Frame):
                   "(e.g. 'fluoro, _opt'). Index range: like 0-3,5 over the molecules feeding "
                   "this network. Empty = keep all.", foreground="#777", wraplength=220,
                   justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+    # ---------------------------------------- Transform / Combine (geometry prep)
+    def _build_transform_panel(self, node):
+        from orca_workbench.core import transform as transform_mod
+        f = self.cfg_frame
+        ttk.Label(f, text="Rigid moves / alignments / dihedral edits, applied IN ORDER "
+                  "to every molecule flowing through. Atom indices are 0-based. Outputs "
+                  "become new locked molecules when the pipeline is generated.",
+                  foreground="#555", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        # EXTENDED select: multi-select a block and move it as one; reorder by
+        # drag OR the Up/Down buttons. The listbox is refreshed in place (NOT via
+        # _build_config_panel), so reordering keeps the current selection.
+        lb = tk.Listbox(f, height=6, exportselection=False, selectmode=tk.EXTENDED,
+                        activestyle="dotbox")
+        lb.pack(fill=tk.X, padx=8, pady=4)
+        self._op_listbox = lb
+        drag = {"from": None, "moved": False}
+
+        def ops():
+            return list(node.config.get("ops") or [])
+
+        def refill(select_indices):
+            lb.delete(0, tk.END)
+            for op in ops():
+                lb.insert(tk.END, transform_mod.describe_op(op))
+            for i in select_indices:
+                if 0 <= i < lb.size():
+                    lb.selection_set(i)
+            if select_indices:
+                lb.activate(select_indices[0])
+                lb.see(select_indices[0])
+
+        def sel_indices():
+            return list(lb.curselection())
+
+        def commit(new_ops, select_indices):
+            self._set_cfg(node, "ops", new_ops)   # marks dirty + redraws canvas
+            refill(select_indices)
+
+        def on_add():
+            op = self._edit_op_dialog(node, None)
+            if op is not None:
+                new = ops() + [op]
+                commit(new, [len(new) - 1])
+
+        def on_edit(_e=None):
+            idx = sel_indices()
+            if len(idx) != 1:
+                return
+            i = idx[0]
+            op = self._edit_op_dialog(node, ops()[i])
+            if op is not None:
+                lst = ops()
+                lst[i] = op
+                commit(lst, [i])
+
+        def on_remove():
+            idx = set(sel_indices())
+            if not idx:
+                return
+            lst = [op for k, op in enumerate(ops()) if k not in idx]
+            commit(lst, [min(idx)] if lst else [])
+
+        def move_block(delta):
+            """Move the selected (possibly non-contiguous) rows by delta, as a
+            block, preserving their internal order and the selection."""
+            idx = sorted(sel_indices())
+            if not idx:
+                return "break"
+            lst = ops()
+            n = len(lst)
+            lo, hi = idx[0], idx[-1]
+            if delta < 0 and lo == 0:
+                return "break"
+            if delta > 0 and hi == n - 1:
+                return "break"
+            block = [lst[i] for i in idx]
+            rest = [op for k, op in enumerate(lst) if k not in set(idx)]
+            insert_at = lo + delta
+            # position among `rest`: count rest-items before the insert point
+            new = rest[:insert_at] + block + rest[insert_at:]
+            commit(new, list(range(insert_at, insert_at + len(block))))
+            return "break"
+
+        # A thin insertion line (a 2px Frame placed over the listbox) shows WHERE a
+        # dragged block will land — between two rows — instead of highlighting every
+        # row the cursor passes over.
+        line = tk.Frame(lb, height=2, bg=self._np.get("sel", "#1f6fb2"))
+
+        def insert_pos(y):
+            """0..size — the gap the drop would insert before."""
+            idx = lb.nearest(y)
+            bbox = lb.bbox(idx)
+            if bbox is None:
+                return lb.size()
+            _bx, by, _bw, bh = bbox
+            return idx if y < by + bh / 2 else idx + 1
+
+        def show_line(p):
+            if p >= lb.size():
+                bb = lb.bbox(max(0, lb.size() - 1))
+                ly = (bb[1] + bb[3]) if bb else 0
+            else:
+                bb = lb.bbox(p)
+                ly = bb[1] if bb else 0
+            line.place(in_=lb, x=0, relwidth=1.0, y=max(0, ly - 1))
+
+        def on_press(e):
+            idx = lb.nearest(e.y)
+            drag["from"] = idx
+            drag["moved"] = False
+            sel = list(lb.curselection())
+            if idx in sel and len(sel) > 1:
+                # Grabbing an existing multi-selection: keep it (suppress the
+                # listbox's own press-select that would collapse it to one row).
+                drag["block"] = sel
+                return "break"
+            drag["block"] = None      # a fresh single-row drag; normal select runs
+
+        def on_drag_motion(e):
+            if drag["from"] is None:
+                return
+            drag["moved"] = True
+            show_line(insert_pos(e.y))
+            return "break"            # suppress the listbox's drag band-select
+
+        def on_drop(e):
+            frm = drag["from"]
+            block = drag.get("block")
+            moved = drag.get("moved")
+            drag["from"] = None
+            drag["block"] = None
+            line.place_forget()
+            if frm is None or not moved:
+                return
+            p = insert_pos(e.y)
+            lst = ops()
+            bidx = sorted(block if block else [frm])
+            bidx = [i for i in bidx if 0 <= i < len(lst)]
+            if not bidx:
+                return
+            blk = [lst[i] for i in bidx]
+            rest = [op for k, op in enumerate(lst) if k not in set(bidx)]
+            before = sum(1 for i in bidx if i < p)
+            p2 = max(0, p - before)
+            new = rest[:p2] + blk + rest[p2:]
+            if new != lst:
+                commit(new, list(range(p2, p2 + len(blk))))
+
+        refill([])
+        lb.bind("<Double-1>", on_edit)
+        lb.bind("<ButtonPress-1>", on_press, add="+")
+        lb.bind("<B1-Motion>", on_drag_motion, add="+")
+        lb.bind("<ButtonRelease-1>", on_drop, add="+")
+
+        row1 = ttk.Frame(f)
+        row1.pack(fill=tk.X, padx=8)
+        ttk.Button(row1, text="Add...", width=7, command=on_add).pack(side=tk.LEFT, padx=1)
+        ttk.Button(row1, text="Edit...", width=7, command=on_edit).pack(side=tk.LEFT, padx=1)
+        ttk.Button(row1, text="Remove", width=8, command=on_remove).pack(side=tk.LEFT, padx=1)
+        row2 = ttk.Frame(f)
+        row2.pack(fill=tk.X, padx=8, pady=(2, 0))
+        ttk.Button(row2, text="Up", width=5, command=lambda: move_block(-1)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(row2, text="Down", width=6, command=lambda: move_block(1)).pack(side=tk.LEFT, padx=1)
+
+        self._add_preview_button(node)
+        ttk.Label(f, text="Tip: multi-select ops (Shift/Ctrl-click) and move them as a block, "
+                  "or drag a row to reorder. To align two molecules to EACH OTHER, give each "
+                  "its own Transform aligning the chosen axis/plane to the same lab axis — then "
+                  "Combine.", foreground="#777", wraplength=220, justify=tk.LEFT).pack(
+                      anchor=tk.W, padx=8, pady=(4, 0))
+
+    def _edit_op_dialog(self, node, op):
+        """Open the op editor, with the first input molecule's atoms as reference."""
+        from orca_workbench.ui.transform_dialog import TransformOpDialog
+        ref = None
+        try:
+            geoms = self._node_input_geoms(node, limit=1)
+            if geoms:
+                ref = geoms[0]
+        except Exception:
+            ref = None
+        dlg = TransformOpDialog(self, op=op, ref_geom=ref)
+        return dlg.result
+
+    def _build_combine_panel(self, node):
+        f = self.cfg_frame
+        ttk.Label(f, text="Appends every geometry arriving on its wires (in connection "
+                  "order) into ONE structure. Position the fragments with Transform "
+                  "nodes FIRST — Combine is a pure append.", foreground="#555",
+                  wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        ttk.Label(f, text="Output molecule name:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        nm = tk.StringVar(value=node.config.get("name", ""))
+        ent = ttk.Entry(f, textvariable=nm, width=24)
+        ent.pack(anchor=tk.W, padx=8, pady=2)
+        nm.trace_add("write", lambda *_a: self._set_cfg(node, "name", nm.get().strip()))
+
+        mode = tk.StringVar(value=node.config.get("mode", "merge"))
+        ttk.Label(f, text="Mode:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        ttk.Radiobutton(f, text="Merge ALL incoming molecules into one", variable=mode,
+                        value="merge", command=lambda: self._set_cfg(node, "mode", mode.get())
+                        ).pack(anchor=tk.W, padx=16)
+        ttk.Radiobutton(f, text="Pairwise: combine row-by-row across inputs", variable=mode,
+                        value="pairwise", command=lambda: self._set_cfg(node, "mode", mode.get())
+                        ).pack(anchor=tk.W, padx=16)
+        ttk.Label(f, text="Pairwise: input i of wire 1 merges with input i of wire 2, … "
+                  "(a single-molecule wire repeats for every row — e.g. add the same water "
+                  "to each of n solutes).", foreground="#777", wraplength=220,
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        # Charge / multiplicity — classic tk.Entry so we can flash their bg red
+        # (missing but required) / green (a valid integer just entered). References
+        # are stashed in self._combine_fields so the guided-fix flow can highlight
+        # + focus them (see _guide_combine_fix).
+        self._combine_fields = {}
+        _RED, _GREEN = "#e57373", "#66bb6a"
+
+        def int_or_none_entry(label, key, hint):
+            ttk.Label(f, text=label).pack(anchor=tk.W, padx=8, pady=(6, 0))
+            cur = node.config.get(key)
+            var = tk.StringVar(value="" if cur is None else str(cur))
+            e = tk.Entry(f, textvariable=var, width=10)
+            e.pack(anchor=tk.W, padx=8, pady=1)
+            self._combine_fields[key] = (e, var)
+            normal_bg, normal_fg = e.cget("bg"), e.cget("fg")
+
+            def commit(*_a):
+                txt = var.get().strip()
+                required = key in getattr(self, "_combine_required", set())
+                if not txt:
+                    self._set_cfg(node, key, None)
+                    e.configure(bg=(_RED if required else normal_bg),
+                                fg=("#000000" if required else normal_fg))
+                    return
+                try:
+                    val = int(txt)
+                except ValueError:
+                    e.configure(bg=_RED, fg="#000000")     # not an integer yet
+                    return
+                self._set_cfg(node, key, val)
+                getattr(self, "_combine_required", set()).discard(key)
+                # brief green confirmation, then back to the themed default
+                e.configure(bg=_GREEN, fg="#000000")
+                e.after(800, lambda: e.winfo_exists() and e.configure(
+                    bg=normal_bg, fg=normal_fg))
+            var.trace_add("write", commit)
+            ttk.Label(f, text=hint, foreground="#777", wraplength=220,
+                      justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        int_or_none_entry("Charge (blank = sum of fragments):", "charge", "")
+        int_or_none_entry("Multiplicity (blank = couple all unpaired spins "
+                          "ferromagnetically):", "mult",
+                          "Antiferromagnetic / low-spin cases: set it here. Required when "
+                          "this Combine feeds a calculation.")
+
+    def _guide_combine_fix(self, node_id, missing):
+        """Select the offending Combine, red-highlight the empty charge/mult
+        box(es), and focus the FIRST one — then hand control back to the user
+        (we don't chase focus to the second box). Each box greens + clears when a
+        valid integer is typed (see the commit closure)."""
+        node = self.wf.node(node_id)
+        if node is None:
+            return
+        self._select_only(node_id)          # rebuilds the panel -> _combine_fields
+        self._build_config_panel()
+        self._combine_required = set(missing)
+        for key in missing:
+            ent, _var = self._combine_fields.get(key, (None, None))
+            if ent is not None:
+                try:
+                    ent.configure(bg="#e57373", fg="#000000")
+                except tk.TclError:
+                    pass
+        first = self._combine_fields.get(missing[0], (None, None))[0]
+        if first is not None:
+            try:
+                first.focus_set()
+            except tk.TclError:
+                pass
+        self._add_preview_button(node)
+
+    def _add_preview_button(self, node):
+        """The 'run until here' debug view: computes this node's output geometry
+        on demand (nothing is written into the project) and opens it in the 3D
+        viewer. Plus a Write button to export the same output to a file."""
+        try:
+            import tkinter.font as tkfont
+            base = abs(tkfont.nametofont("TkDefaultFont").actual("size"))
+            ttk.Style(self).configure("Preview.TButton",
+                                      font=("TkDefaultFont", base, "bold"))
+            b = ttk.Button(self.cfg_frame, text="Preview output (3D)...",
+                           style="Preview.TButton",
+                           command=lambda: self._preview_node_geometry(node))
+        except Exception:
+            b = ttk.Button(self.cfg_frame, text="Preview output (3D)...",
+                           command=lambda: self._preview_node_geometry(node))
+        b.pack(anchor=tk.W, padx=8, pady=(8, 2))
+        tip(b, "Execute the geometry pipeline up to THIS node only and open the "
+               "result in the external 3D viewer. Nothing is added to the project — "
+               "a pure debug view, so you can iterate on rotations/shifts before "
+               "running anything.")
+        wbtn = ttk.Button(self.cfg_frame, text="Write output to file...",
+                          command=lambda: self._write_node_geometry(node))
+        wbtn.pack(anchor=tk.W, padx=8, pady=(0, 2))
+        tip(wbtn, "Export this node's output geometry to a coordinate file — .xyz "
+                  "natively, or any format OpenBabel / RDKit on this machine can "
+                  "write (.mol, .sdf, .pdb, .mol2, ...), chosen by the extension "
+                  "you save with.")
+
+    def _write_node_geometry(self, node):
+        """Export the node's output stream to coordinate file(s). Format follows
+        the chosen extension: .xyz is written natively; anything else goes
+        through OpenBabel (pybel) or RDKit, whichever is available and knows
+        the format. Multiple output molecules get numbered suffixes."""
+        from tkinter import filedialog
+        from orca_workbench.core import coords as coords_mod
+        backend, cache, _pending, notes = self._make_geom_backend()
+        streams, warns = wf_mod.compute_streams(self.wf, self._source_molsets(), backend)
+        out = streams.get(node.id, [])
+        problems = list(dict.fromkeys(warns + notes))
+        if not out:
+            messagebox.showwarning("Write output", "\n".join(problems) if problems
+                                   else "Nothing arrives at this node yet.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Write node output",
+            defaultextension=".xyz",
+            initialfile=safe_path_component(out[0]),
+            filetypes=[("XYZ", "*.xyz"), ("MDL Molfile", "*.mol"), ("SDF", "*.sdf"),
+                       ("PDB", "*.pdb"), ("Mol2", "*.mol2"), ("All files", "*.*")])
+        if not path:
+            return
+        root_p, ext = os.path.splitext(path)
+        written, errors = [], []
+        for i, nm in enumerate(out):
+            try:
+                g = self._read_geom(nm, cache)
+            except ValueError as e:
+                errors.append(str(e))
+                continue
+            c = g["coords"]
+            atoms = [(g["symbols"][k], float(c[k][0]), float(c[k][1]), float(c[k][2]))
+                     for k in range(len(g["symbols"]))]
+            target = path if len(out) == 1 else "{}_{:02d}{}".format(root_p, i, ext)
+            try:
+                coords_mod.write_structure_file(target, atoms, name=nm)
+                written.append(target)
+            except Exception as e:
+                errors.append("{}: {}".format(nm, e))
+        msg = "Wrote {} file(s).".format(len(written))
+        if written:
+            msg += "\n" + "\n".join(written[:6])
+        if errors or problems:
+            msg += "\n\nProblems:\n" + "\n".join(errors + problems)
+        (messagebox.showwarning if (errors or problems) else messagebox.showinfo)(
+            "Write output", msg)
+
+    def _source_molsets(self):
+        """Molecules-node id -> its (selection-applied) molecule filename list."""
+        mols_all = [m.filename for m in self.app.project.molecules]
+        out = {}
+        for n in self.wf.nodes:
+            if n.type != "molecules":
+                continue
+            mols = list(mols_all)
+            if n.config.get("mode") == "selection" and n.config.get("filenames"):
+                sel = set(n.config["filenames"])
+                mols = [m for m in mols if m in sel]
+            out[n.id] = mols
+        return out
+
+    def _read_geom(self, fname, cache):
+        """(symbols, coords, charge, mult) for a molecule — from the backend cache
+        (chained derived geometries) or its .xyz on disk. Delegates to the shared
+        core reader (see core.workflow_expand)."""
+        return workflow_expand.read_geometry(self.app.project, fname, cache)
+
+    def _make_geom_backend(self):
+        """The geometry backend injected into compute_streams/expand_to_calcs.
+
+        Returns (backend, cache, pending, notes): backend(node, streams) computes
+        a Transform/Combine node's output geometries in memory; every derived
+        molecule is recorded in `pending` and only written into the project by
+        _flush_geom_materialisations — so a cancelled expand (or a pure preview)
+        leaves the project untouched. `notes` collects NON-fatal per-molecule
+        problems (an op whose atom indices don't exist in one of several molecules
+        — that molecule is skipped, the rest continue) so callers can SHOW them
+        instead of failing silently. The heavy lifting lives in the shared core
+        module so the GUI and `--execute_project` expand identically."""
+        gb = workflow_expand.GeometryBackend(self.app.project)
+        return gb, gb.cache, gb.pending, gb.notes
+
+    def _flush_geom_materialisations(self, pending):
+        """Write the pending derived geometries into the project (TRANSFORM/*.xyz
+        + locked Molecule rows). Delegates to the shared core materialiser; see
+        core.workflow_expand.flush_materialisations. Returns warnings."""
+        return workflow_expand.flush_materialisations(self.app.project, pending)
+
+    def _node_input_geoms(self, node, limit=1):
+        """The first geometries ARRIVING at a node — for the op editor's atom
+        reference list. Chained Transform/Combine upstream are computed in
+        memory (nothing materialised)."""
+        backend, cache, _pending, _notes = self._make_geom_backend()
+        streams, _warns = wf_mod.compute_streams(self.wf, self._source_molsets(), backend)
+        names = []
+        for e in self.wf.edges_into(node.id, "geometry"):
+            names.extend(streams.get(e.src_node, []))
+        out = []
+        for nm in names[:limit]:
+            try:
+                g = self._read_geom(nm, cache)
+                out.append((nm, g["symbols"], g["coords"]))
+            except Exception:
+                continue
+        return out
+
+    def _preview_node_geometry(self, node):
+        """'Run until here' for the geometry pipeline: compute this node's output
+        stream in memory and open it in the external 3D viewer. Never touches the
+        project."""
+        import tempfile
+        from orca_workbench.core import coords as coords_mod
+        from orca_workbench.ui.molecules_tab import open_xyz_3d
+        backend, cache, _pending, notes = self._make_geom_backend()
+        streams, warns = wf_mod.compute_streams(self.wf, self._source_molsets(), backend)
+        out = streams.get(node.id, [])
+        problems = list(dict.fromkeys(warns + notes))
+        if problems:
+            # ALWAYS surface problems in a dialog — a combine that silently
+            # drops an input (or a transform that skips molecules) looks like
+            # "nothing happened" if the only trace is the status bar.
+            messagebox.showwarning(
+                "Preview", "\n".join(problems)
+                + ("" if out else "\n\n(No geometry reaches this node.)"))
+            if not out:
+                return
+        if not out:
+            messagebox.showinfo("Preview", "Nothing arrives at this node yet — connect its "
+                                "input(s) and make sure the molecules have geometries "
+                                "(generate XYZ first).")
+            return
+        cap = 5
+        tdir = tempfile.mkdtemp(prefix="orca_wb_preview_")
+        paths = []
+        for nm in out[:cap]:
+            try:
+                g = self._read_geom(nm, cache)
+            except ValueError as e:
+                messagebox.showwarning("Preview", str(e))
+                return
+            c = g["coords"]
+            atoms = [(g["symbols"][k], float(c[k][0]), float(c[k][1]), float(c[k][2]))
+                     for k in range(len(g["symbols"]))]
+            p = os.path.join(tdir, safe_path_component(nm) + ".xyz")
+            coords_mod.write_xyz(p, atoms, {"name": nm,
+                                            "comment": "preview - not saved to project"})
+            paths.append(p)
+        if len(out) > cap:
+            messagebox.showinfo("Preview", "{} molecules reach this node — opening the "
+                                "first {}.".format(len(out), cap))
+        for p in paths:
+            open_xyz_3d(self, self.app, p)
 
     # ------------------------------------------------------------- ZPVA builder
     def _build_zpva_panel(self, node):
@@ -1994,20 +2885,10 @@ class WorkflowTab(ttk.Frame):
         _ZpvaResultsWindow(self, results, root)
 
     def _find_existing_calc(self, origin_node, mol, category, recipe_name):
-        pc = self.app.project.planned_calcs
-        # 1) exact graph-node identity (survives recipe edits on the node)
-        if origin_node:
-            for c in pc:
-                if getattr(c, "origin_node", None) == origin_node and c.molecule_filename == mol:
-                    return c
-        # 2) same target directory (molecule + category + recipe). Catches calcs
-        #    made before origin_node existed, or by a rebuilt graph, so we never
-        #    queue a second row pointing at the same folder.
-        for c in pc:
-            if (c.molecule_filename == mol and c.category == category
-                    and c.recipe_name == recipe_name):
-                return c
-        return None
+        # Shared with the headless expander (matches by graph-node identity, then
+        # by target directory) — see core.workflow_expand.find_existing_calc.
+        return workflow_expand.find_existing_calc(self.app.project, origin_node, mol,
+                                                  category, recipe_name)
 
     def _calc_done(self, calc):
         ct = getattr(self.app, "calculations_tab", None)
@@ -2023,6 +2904,22 @@ class WorkflowTab(ttk.Frame):
         confirm. Reuses existing calcs for the same (graph node, molecule) so a
         re-run continues rather than duplicating. If `source_ids` is given, only
         those networks are expanded. Returns (calcs, node_map) or None."""
+        # A Combine that feeds a calc but lacks explicit charge/mult gets a
+        # dedicated guided fix (popup -> select node -> highlight + focus the
+        # missing box), which takes priority over the generic blocker list.
+        needs = self.wf.combine_needs_charge_mult()
+        if needs:
+            nid, missing = needs[0]
+            labels = {"charge": "charge", "mult": "multiplicity"}
+            messagebox.showwarning(
+                "Combine: set charge & multiplicity",
+                "A Combine node feeds a calculation, so its total {} must be set "
+                "explicitly — auto-summing charges and coupling every unpaired spin is "
+                "rarely right for a merged molecule.\n\nClick OK and I'll take you to the "
+                "node; fill the highlighted box(es).".format(
+                    " and ".join(labels[k] for k in missing)))
+            self._guide_combine_fix(nid, missing)
+            return None
         issues = self.wf.validate()
         # the multiple-Molecules note is informational, not a blocker
         blockers = [i for i in issues if not i.startswith("Multiple Molecules")]
@@ -2066,8 +2963,14 @@ class WorkflowTab(ttk.Frame):
                                parent_id=parent_id, gate=gate, origin_node=origin_node,
                                geom_spec=gspec)
 
+        # Geometry backend: Transform/Combine nodes compute their derived
+        # molecules in memory during expansion; they're only written into the
+        # project (below) after the user confirms.
+        geom_backend, _geom_cache, geom_pending, geom_notes = self._make_geom_backend()
         calcs, warnings, node_map = wf_mod.expand_to_calcs(self.wf, mol_files, factory,
-                                                           source_ids=source_ids)
+                                                           source_ids=source_ids,
+                                                           transform_apply=geom_backend)
+        warnings.extend(geom_notes)   # per-molecule transform skips, shown in the confirm
         if not calcs:
             messagebox.showinfo("Nothing generated",
                                 "No calculations were produced.\n\n" + "\n".join(warnings))
@@ -2087,6 +2990,12 @@ class WorkflowTab(ttk.Frame):
             msg += "\n\nNote:\n  • " + "\n  • ".join(dict.fromkeys(warnings))
         if not messagebox.askyesno(verb + " calculations", msg):
             return None
+        # NOW write any Transform/Combine-derived molecules into the project
+        # (before the calcs that reference them are built).
+        if geom_pending:
+            gwarns = self._flush_geom_materialisations(geom_pending)
+            if gwarns:
+                messagebox.showwarning("Derived geometries", "\n".join(gwarns))
         # Append only the genuinely-new calcs (reused ones are already in place).
         for c in new_calcs:
             self.app.project.planned_calcs.append(c)
@@ -2110,7 +3019,10 @@ class WorkflowTab(ttk.Frame):
                 if src is not None and src.type in wf_mod.CALC_NODE_TYPES and src.id not in feeders:
                     feeders.append(src.id)
             specs.append({"name": n.config.get("name", "report"), "node_ids": feeders,
-                          "extractors": n.config.get("extractors")})
+                          "extractors": n.config.get("extractors"),
+                          "format": n.config.get("format", "both"),
+                          "csv_columns": n.config.get("csv_columns"),
+                          "csv_missing": n.config.get("csv_missing", "")})
         return specs
 
     def _selected_sources(self):
