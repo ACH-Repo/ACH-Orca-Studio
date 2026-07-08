@@ -67,6 +67,10 @@ PROGRAM_SLOTS = [
              "Edit structure, or double-click the depiction). e.g. ChemDraw, Marvin."},
     {"key": "text_editor_path", "label": "Text editor (recipe JSON)",
      "desc": "Opens a recipe's JSON on double-click. A GUI editor (Notepad++, Sublime, gedit)."},
+    {"key": "archiver_path", "label": "Archiver (7-Zip / WinRAR, optional)",
+     "desc": "A command-line archiver, used by File > Archive Export ONLY for formats the "
+             "built-in packer can't write (.7z, .rar). tar.gz / tar / zip need no external "
+             "tool. Point at 7z.exe / Rar.exe (invoked as '<tool> a <archive> <files>')."},
 ]
 
 # Effective-path fallbacks: an unset 3D view/edit path borrows the other one (and the
@@ -77,6 +81,7 @@ _PATH_FALLBACKS = {
     "traj_viewer_path": ("traj_viewer_path", "viewer_3d_path", "avogadro_path"),
     "editor_2d_path": ("editor_2d_path", "structure_editor_path"),
     "text_editor_path": ("text_editor_path",),
+    "archiver_path": ("archiver_path",),
 }
 
 

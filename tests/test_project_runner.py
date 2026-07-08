@@ -138,6 +138,76 @@ def test_execute_expands_workflow_then_runs(tmp_path, monkeypatch):
     assert sp.geometry_source.startswith("parent:")   # SP reads the OPT's geometry
 
 
+def test_slurm_render_uses_calc_rundir_not_dot(tmp_path, monkeypatch):
+    """Regression: the headless SLURM path must render RUNDIR as the calc dir
+    (relative to the project root, where sbatch runs), NOT '.', or the job cd's
+    to the root and can't find <mol>.inp ('no inp file 000.inp' on the gateway)."""
+    proj = _project(tmp_path, [_RECIPE])
+    save_project(proj)
+    calc = PlannedCalc(id=new_calc_id(), molecule_filename="000", recipe_name="TEST OPT",
+                       category="gen", geometry_source="initial")
+    proj.planned_calcs.append(calc)
+
+    submitted = {}
+
+    def fake_submit(slurm_rel, root, dependency=None):
+        submitted["slurm_rel"] = slurm_rel
+        return "999", None
+
+    monkeypatch.setattr(pr.slurm_runtime, "submit", fake_submit)
+    runner = pr.ProjectRunner(proj, log=lambda m: None)
+    summary = runner.execute(force="slurm")
+    assert summary["launched"] == 1
+    expected_rundir = "calcs/000/gen/OPT/HF_STO-3G/t"
+    slurm_text = (tmp_path / expected_rundir / "000.slurm").read_text()
+    assert "cd {}".format(expected_rundir) in slurm_text        # cd into the calc dir
+    assert "\ncd .\n" not in slurm_text                          # not the buggy '.'
+    assert submitted["slurm_rel"] == os.path.join(expected_rundir, "000.slurm")
+
+
+def test_generate_pending_geometry_from_smiles(tmp_path, monkeypatch):
+    """A molecule with a SMILES but no .xyz should get one generated at run time
+    (so --execute_project is self-contained). Fake smiles_to_xyz to stay offline."""
+    proj = _project(tmp_path, [_RECIPE])
+    proj.molecules.append(Molecule(name="meth", filename="001", smiles="C", charge=0,
+                                   multiplicity=1, gen_status="pending", xyz_path=None))
+
+    def fake_smiles(smiles, prefer_rdkit_only=False):
+        return [("C", 0.0, 0.0, 0.0), ("H", 0.6, 0.6, 0.6)], "fake"
+
+    monkeypatch.setattr(coords_mod, "smiles_to_xyz", fake_smiles)
+    runner = pr.ProjectRunner(proj, log=lambda m: None)
+    gen, failed = runner.generate_pending_geometries()
+    assert gen == 1 and failed == 0
+    m = proj.molecule_by_filename("001")
+    assert m.xyz_path and (tmp_path / m.xyz_path).is_file() and m.gen_status == "ok"
+    # a per-molecule generation failure is non-fatal (the rest still proceed)
+    proj.molecules.append(Molecule(name="bad", filename="002", smiles="???",
+                                   gen_status="pending"))
+    monkeypatch.setattr(coords_mod, "smiles_to_xyz",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("nope")))
+    gen2, failed2 = runner.generate_pending_geometries()
+    assert failed2 == 1 and proj.molecule_by_filename("002").gen_status == "failed"
+
+
+def test_confirm_gate_blocks_execution(tmp_path):
+    proj = _project(tmp_path, [_RECIPE])
+    save_project(proj)
+    proj.planned_calcs.append(PlannedCalc(id=new_calc_id(), molecule_filename="000",
+                                          recipe_name="TEST OPT", category="gen",
+                                          geometry_source="initial"))
+    runner = pr.ProjectRunner(proj, log=lambda m: None)
+    seen = {}
+
+    def deny(calcs, mode):
+        seen["n"], seen["mode"] = len(calcs), mode
+        return False
+
+    summary = runner.execute(force="local", confirm=deny)
+    assert seen["n"] == 1 and summary["message"] == "cancelled by user"
+    assert summary["built"] == 0 and summary["launched"] == 0
+
+
 def test_execute_project_file_missing(tmp_path):
     msg = pr.execute_project_file(str(tmp_path / "nope.json"))
     assert msg.startswith("error")

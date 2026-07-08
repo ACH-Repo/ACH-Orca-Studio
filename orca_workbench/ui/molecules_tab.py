@@ -757,7 +757,37 @@ class MoleculesTab(ttk.Frame):
                     self.tree.configure(cursor="hand2")   # visual "dragging" cue
                 except tk.TclError:
                     pass
+        if self._drag_moved:
+            # A thin insertion line at the drop gap (like the Transform op editor) —
+            # ONE place() per motion, no tree mutation, so it's ThinLinc-safe.
+            self._show_reorder_line(event.y)
         return "break"
+
+    def _show_reorder_line(self, y):
+        """Place a 2px insertion line at the row gap nearest y (before the upper
+        half of a row, after the lower half; past the last row = the end)."""
+        line = getattr(self, "_reorder_line", None)
+        if line is None or not line.winfo_exists():
+            line = tk.Frame(self.tree, height=2, bg="#1f6fb2")
+            self._reorder_line = line
+        kids = [i for i in self.tree.get_children("") if not i.startswith("__")]
+        if not kids:
+            return
+        row = self.tree.identify_row(y)
+        if not row or row.startswith("__"):
+            bb = self.tree.bbox(kids[-1])
+            ly = (bb[1] + bb[3]) if bb else 0
+        else:
+            bb = self.tree.bbox(row)
+            if not bb:
+                return
+            ly = bb[1] if y < bb[1] + bb[3] / 2 else bb[1] + bb[3]
+        line.place(in_=self.tree, x=0, relwidth=1.0, y=max(0, ly - 1))
+
+    def _hide_reorder_line(self):
+        line = getattr(self, "_reorder_line", None)
+        if line is not None and line.winfo_exists():
+            line.place_forget()
 
     def _drag_release(self, event):
         """On drop, move the grabbed row to the drop position and renumber. Uses the
@@ -768,6 +798,7 @@ class MoleculesTab(ttk.Frame):
         moved = self._drag_moved or abs(event.y - getattr(self, "_drag_y0", event.y)) > 4
         self._drag_item = None
         self._drag_moved = False
+        self._hide_reorder_line()
         try:
             self.tree.configure(cursor="")
         except tk.TclError:

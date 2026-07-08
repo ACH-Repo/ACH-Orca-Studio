@@ -338,11 +338,7 @@ def write_structure_file(path, atoms, name=""):
         return "native"
 
     # Build one XYZ block in memory — the lingua franca both backends read.
-    lines = ["{}".format(len(atoms)), name or ""]
-    for symbol, x, y, z in atoms:
-        clean = "".join(ch for ch in symbol if ch.isalpha())
-        lines.append("{:<2} {:10.5f} {:10.5f} {:10.5f}".format(clean, x, y, z))
-    xyz_text = "\n".join(lines) + "\n"
+    xyz_text = _xyz_block(atoms, name) + "\n"
 
     errors = []
     try:
@@ -390,6 +386,90 @@ def write_structure_file(path, atoms, name=""):
             errors.append("RDKit raised {}: {}".format(type(e).__name__, e))
 
     raise ValueError("could not write '{}': {}".format(ext, "; ".join(errors)))
+
+
+# File extensions that can hold MANY structures in one file (a trajectory /
+# multi-record collection). xyz is a concatenated multi-frame trajectory (what
+# molden/VMD/PyMOL animate); sdf is the classic multi-molecule container; pdb
+# uses MODEL/ENDMDL; mol2 writes several @<TRIPOS>MOLECULE records. (.mol is
+# single-structure only, so it's deliberately excluded.)
+MULTI_STRUCTURE_FORMATS = ("xyz", "sdf", "pdb", "mol2")
+
+
+def _xyz_block(atoms, name=""):
+    lines = ["{}".format(len(atoms)), name or ""]
+    for symbol, x, y, z in atoms:
+        clean = "".join(ch for ch in symbol if ch.isalpha())
+        lines.append("{:<2} {:14.8f} {:14.8f} {:14.8f}".format(clean, x, y, z))
+    return "\n".join(lines)
+
+
+def write_structures_file(path, structures):
+    # type: (str, List) -> str
+    """Write MANY structures into ONE file — a trajectory / multi-record
+    collection. `structures` is a list of (atoms, name). The extension picks the
+    format: .xyz is a native multi-frame trajectory (concatenated blocks); any
+    other multi-capable extension (.sdf/.pdb/.mol2/...) goes through OpenBabel's
+    multi-molecule writer, with an RDKit fallback for .sdf. Returns the backend
+    used ('native' / 'openbabel' / 'rdkit'); raises ValueError if the format
+    can't hold multiple structures or no backend can write it."""
+    if not structures:
+        raise ValueError("nothing to write")
+    ext = os.path.splitext(path)[1].lower().lstrip(".") or "xyz"
+    if ext == "xyz":
+        text = "\n".join(_xyz_block(atoms, nm) for atoms, nm in structures) + "\n"
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return "native"
+
+    errors = []
+    try:
+        try:
+            from openbabel import pybel
+        except ImportError:
+            import pybel  # type: ignore
+        if ext not in pybel.outformats:
+            errors.append("OpenBabel doesn't write '{}'".format(ext))
+        else:
+            out = pybel.Outputfile(ext, path, overwrite=True)
+            try:
+                for atoms, nm in structures:
+                    mol = pybel.readstring("xyz", _xyz_block(atoms, nm) + "\n")
+                    if nm:
+                        mol.title = nm
+                    out.write(mol)
+            finally:
+                out.close()
+            return "openbabel"
+    except ImportError as e:
+        errors.append("OpenBabel/Pybel not installed ({})".format(e))
+    except Exception as e:
+        errors.append("OpenBabel raised {}: {}".format(type(e).__name__, e))
+
+    if ext == "sdf":
+        try:
+            from rdkit import Chem
+            with Chem.SDWriter(path) as w:
+                for atoms, nm in structures:
+                    mol = Chem.MolFromXYZBlock(_xyz_block(atoms, nm) + "\n")
+                    if mol is None:
+                        raise ValueError("RDKit could not read a geometry")
+                    try:
+                        from rdkit.Chem import rdDetermineBonds
+                        rdDetermineBonds.DetermineConnectivity(mol)
+                    except Exception:
+                        pass
+                    if nm:
+                        mol.SetProp("_Name", nm)
+                    w.write(mol)
+            return "rdkit"
+        except ImportError as e:
+            errors.append("RDKit not installed ({})".format(e))
+        except Exception as e:
+            errors.append("RDKit raised {}: {}".format(type(e).__name__, e))
+
+    raise ValueError("could not write a multi-structure '{}': {}".format(
+        ext, "; ".join(errors)))
 
 
 def _try_pybel(smiles):

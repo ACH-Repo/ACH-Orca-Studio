@@ -215,6 +215,47 @@ class ProjectRunner(object):
         calc.exported = True
         return rundir_rel, inp_text
 
+    # -- geometry generation ------------------------------------------------
+    def generate_pending_geometries(self):
+        """Generate geometry from SMILES for any molecule that has a SMILES but no
+        usable .xyz on disk yet — so an unattended run is self-contained (no GUI
+        Generate step). Mirrors the GUI's Generate: uses gen_smiles if set (RDKit
+        only, the metal-swap case), else the real SMILES. coords-locked (imported)
+        and already-generated molecules are left untouched. A per-molecule failure
+        is logged and skipped; the rest still run. Returns (generated, failed)."""
+        from orca_workbench.core import coords as coords_mod
+        gen = failed = 0
+        for m in self.project.molecules:
+            if m.xyz_path and os.path.isfile(self._abs(m.xyz_path)):
+                continue                       # already has a geometry file
+            if m.coords_locked:
+                continue                       # imported original — never regenerate
+            smiles = (m.gen_smiles or "").strip() or (m.smiles or "").strip()
+            if not smiles:
+                continue
+            try:
+                atoms, method = coords_mod.smiles_to_xyz(
+                    smiles, prefer_rdkit_only=bool((m.gen_smiles or "").strip()))
+            except Exception as e:
+                m.gen_status, m.gen_error = "failed", str(e)
+                self.log("GEN FAILED {}: {}".format(m.filename, e))
+                failed += 1
+                continue
+            rel = "XYZ_INI/{}.xyz".format(inputs_mod.safe_path_component(m.filename))
+            abs_path = self._abs(rel)
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            meta = {"name": m.name, "smiles": m.smiles, "charge": m.charge,
+                    "multiplicity": m.multiplicity, "method": method, "comment": m.comment}
+            if m.gen_smiles:
+                meta["gen_smiles"] = m.gen_smiles
+            coords_mod.write_xyz(abs_path, atoms, meta)
+            m.xyz_path, m.generated, m.gen_status, m.gen_error = rel, True, "ok", None
+            self.log("generated geometry for {} ({})".format(m.filename, method))
+            gen += 1
+        if gen or failed:
+            self.log("geometry generation: {} generated, {} failed.".format(gen, failed))
+        return gen, failed
+
     # -- workflow expansion -------------------------------------------------
     def _calc_done(self, calc):
         """Whether a calc has already finished (its .out terminated normally) —
@@ -261,10 +302,13 @@ class ProjectRunner(object):
                 good.append(c)
         return order_dependency_first(good), skipped
 
-    def execute(self, force=None, expand=True):
-        """Expand the Workflow (unless `expand` is False), then build + run/submit
-        the project. `force` is None (auto-detect), 'slurm', or 'local'. Returns a
-        summary dict."""
+    def execute(self, force=None, expand=True, confirm=None):
+        """Generate any missing geometries, expand the Workflow (unless `expand` is
+        False), list the plan, then build + run/submit the project. `force` is None
+        (auto-detect), 'slurm', or 'local'. `confirm(calcs, mode) -> bool`, if
+        given, is called after the plan is listed and must return True to proceed
+        (the CLI uses this for `--confirm`). Returns a summary dict."""
+        self.generate_pending_geometries()
         exp = self.expand() if expand else {"blockers": []}
         calcs, skipped = self._runnable()
         if not calcs and exp.get("blockers"):
@@ -277,6 +321,23 @@ class ProjectRunner(object):
                     "mode": None, "message": "no runnable calculations"}
         use_slurm = (slurm_runtime.sbatch_available() if force is None
                      else force == "slurm")
+        mode = "slurm" if use_slurm else "local"
+        # List the dependency-ordered plan so the user sees exactly what will run
+        # (and can confirm it, with --confirm).
+        self.log("")
+        self.log("Plan - {} calculation(s), {} mode (dependency order):".format(
+            len(calcs), mode))
+        for i, c in enumerate(calcs, 1):
+            mol = self.project.molecule_by_filename(c.molecule_filename)
+            rec = self.recipe(c.recipe_name)
+            dep = (" (after parent {})".format(c.parent_id[:8])
+                   if c.geometry_source.startswith("parent:") and c.parent_id else "")
+            self.log("  {:>3}. {} / {} -> {}{}".format(
+                i, c.molecule_filename, c.recipe_name, target_dir_rel(c, mol, rec), dep))
+        if confirm is not None and not confirm(calcs, mode):
+            self.log("Cancelled - nothing was built or submitted.")
+            return {"built": 0, "launched": 0, "skipped": len(skipped), "mode": None,
+                    "message": "cancelled by user"}
         if use_slurm:
             return self._execute_slurm(calcs, len(skipped))
         return self._execute_local(calcs, len(skipped))
@@ -358,8 +419,13 @@ class ProjectRunner(object):
                 failed += 1
                 continue
             built += 1
+            # sbatch is run from the project root (slurm_runtime.submit cwd=root),
+            # so RUNDIR must be the calc dir RELATIVE TO THE ROOT — the template
+            # does `cd RUNDIR` then copies <mol>.inp from there. "." (the old value)
+            # left the job in the root, where <mol>.inp doesn't exist ("no inp file
+            # 000.inp"). Matches the GUI's _build_one (rundir=target_dir_rel).
             slurm_text = slurm_mod.render_slurm(
-                template, inp_filename=mol.filename + ".inp", rundir=".",
+                template, inp_filename=mol.filename + ".inp", rundir=rundir_rel,
                 jobname=mol.filename, cores=inputs_mod.parse_cores(inp_text), usermail=mail)
             slurm_rel = os.path.join(rundir_rel, mol.filename + ".slurm")
             with open(self._abs(slurm_rel), "w", encoding="utf-8", newline="\n") as fh:
@@ -380,11 +446,12 @@ class ProjectRunner(object):
                 "skipped": n_skipped, "mode": "slurm"}
 
 
-def execute_project_file(path, force=None, log=None, save=True, expand=True):
-    """Top-level entry: load a project.json, expand its Workflow, and
-    build+run/submit it. `expand` False runs only the already-generated planned
-    calcs. Returns a one-line status string (prefixed 'error' on failure) for the
-    CLI exit code."""
+def execute_project_file(path, force=None, log=None, save=True, expand=True, confirm=None):
+    """Top-level entry: load a project.json, generate missing geometries, expand
+    its Workflow, and build+run/submit it. `expand` False runs only the
+    already-generated planned calcs. `confirm(calcs, mode)` gates execution after
+    the plan is listed (used for `--confirm`). Returns a one-line status string
+    (prefixed 'error' on failure) for the CLI exit code."""
     log = log or (lambda m: print(m))
     if not os.path.isfile(path):
         return "error: no such project file: {}".format(path)
@@ -395,7 +462,7 @@ def execute_project_file(path, force=None, log=None, save=True, expand=True):
     runner = ProjectRunner(project, log=log)
     if not runner.recipes:
         return "error: no recipes loaded (check the project's recipe folders)"
-    summary = runner.execute(force=force, expand=expand)
+    summary = runner.execute(force=force, expand=expand, confirm=confirm)
     if save:
         # Persist the run dirs / job ids we just assigned, so reopening the
         # project in the GUI can monitor + harvest the jobs.

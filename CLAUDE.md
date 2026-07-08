@@ -761,6 +761,43 @@ off the core path and gracefully degradable.
   type + reference-plane combo + angle field; a fraction field on the center op). Tests in
   `tests/test_transform.py` (plane-angle hits target for every ref plane/target + rigidity +
   parallel start; fractional anchor 0/0.25/0.5/1 + range validation). 340 tests.
+- **align_moiety op + ring-orientation cycling** (uncommitted v1.4.2 batch) — a Transform op
+  that rigidly superposes a molecule's `mobile` atoms onto another project molecule's `ref`
+  atoms via **Kabsch** best fit (`core/transform.kabsch/_rmsd/align_moiety`; proper-rotation only,
+  chirality preserved). A symmetric moiety (phenyl fits ~12 ways) is resolved EITHER by extra
+  matched **anchor** atoms (score every `_ring_orderings` mapping) OR by an explicit **`ordering`**
+  index — the "cycle through the N candidate ring alignments in the preview" control: `moiety_orderings(mobile)`
+  gives the finite set, the Transform node's **"Cycle moiety orientation >"** button steps the
+  op's `ordering` (wrapping 0..N-1) and re-opens the 3D preview so you eyeball each and keep the
+  right one. Dialog (`ui/transform_dialog`) has a template picker + mobile/ref atom-list fields +
+  a live "of N orientations" count. Tests in `tests/test_transform.py`.
+- **Archive Export + SCF-energy bar plot** (uncommitted v1.4.2 batch) — (a) **File > Archive
+  Export...** (below Save as) bundles the whole project into one tar/zip: `core/archive.py` (pure)
+  `collect_results` (finished-calc records: mol/smiles/calctype/out_path/energy) + `create_archive`
+  (stdlib `tarfile`/`zipfile` for tar.gz[default]/tar/zip/tar.bz2/tar.xz — **no external tool
+  needed**; `.7z`/`.rar` shell out to a configured 7-Zip/WinRAR via `<tool> a <archive> <files>`)
+  + `export_archive` orchestrator (optionally render figures, then pack project.json + calcs/ +
+  XYZ_INI/ + TRANSFORM/ + ZPVA/ + FIGS_EXPORT/, nested under one arc-root folder). `ui/archive_dialog.py`
+  options form (include figures? img format=svg default; archive format=tar.gz default; stack
+  offset=0.5) runs on the main thread with a streaming log. Headless: **`--archive_export PROJECT.json`**
+  (`archive.archive_project_file`) with `--out/--archive-format/--fig-format/--no-figs/--stack-offset/--archiver`.
+  New `archiver_path` slot in `ui/extprog.PROGRAM_SLOTS` (optional; only for 7z/rar). (b) **`core/figures.py`**
+  (pure; attaches an **Agg** canvas per-Figure and NEVER calls `matplotlib.use()`, so it renders
+  files without clobbering the GUI's TkAgg backend — verified they coexist) renders into
+  FIGS_EXPORT/: a grouped **SCF final-energy bar** chart (bars grouped by molecule, one colour-coded
+  bar per calc type; `scf_bar_groups` + `draw_scf_bars`, absolute Eh / Δ-per-molecule / Δ-vs-global
+  modes) plus simulated **IR/UV-Vis/NMR/EPR** spectra as overlay AND (when >1 molecule) a
+  vertically-**stacked** variant (offset = 0.5×max), each with a full molecule **legend** (static
+  images omit the interactive SMILES hover panel — the legend is the attribution). (c) Interactive
+  **`SCFEnergyBarWindow`** (`ui/spectra.py`, a `BaseSpectrumWindow` subclass; new `SHOW_OFFSET`/
+  `AUTO_LEGEND` class hooks let a bar chart drop the stack slider + line-legend) — shares
+  `draw_scf_bars` with the exporter (identical output), hovering a bar shows that molecule's 2D
+  structure in the side panel; wired via Calc-tab right-click **"Plot final SCF energies (bar
+  chart)"** (`_plot_scf_energies`, any finished calcs). Tests `tests/test_archive.py`,
+  `tests/test_figures.py` (375 total). LEFT for the gateway: matplotlib must be importable there for
+  `--archive_export` figures (Agg, no display needed); a ThinLinc visual pass on the bar chart /
+  stacked exports. **Design note**: Python's stdlib already writes tar.gz/zip everywhere, so the
+  external-archiver path is only for 7z/rar (corrected the "Windows has no zipper" assumption).
 
 ## Open work / TODO
 - `--execute_project` now expands the Workflow graph AND materialises Transform/Combine

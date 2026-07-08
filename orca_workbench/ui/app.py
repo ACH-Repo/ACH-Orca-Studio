@@ -162,6 +162,7 @@ class App(object):
         filemenu.add_command(label="Open project...", command=self.on_open, accelerator="Ctrl+O")
         filemenu.add_command(label="Save", command=self.on_save, accelerator="Ctrl+S")
         filemenu.add_command(label="Save as...", command=self.on_save_as)
+        filemenu.add_command(label="Archive Export...", command=self.on_archive_export)
         filemenu.add_separator()
         self.autosave_var = tk.BooleanVar(value=self.autosave_enabled)
         filemenu.add_checkbutton(label="Autosave", variable=self.autosave_var,
@@ -941,6 +942,15 @@ class App(object):
         self.mark_clean()
         self.set_status("Saved {}".format(path))
         return True
+
+    def on_archive_export(self):
+        """Bundle the whole project (+ generated figures) into one tar/zip."""
+        # Persist first so the archive captures the current state (project.json +
+        # its folders on disk are what get packed).
+        if self._dirty and self.project.path:
+            self.on_save()
+        from orca_workbench.ui.archive_dialog import ArchiveExportDialog
+        ArchiveExportDialog(self.root, self)
 
     def on_add_recipe_dir(self):
         """Append a recipe directory to the project (recipes accumulate across

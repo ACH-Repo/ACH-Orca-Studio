@@ -357,3 +357,39 @@ def test_write_structure_file_converted_or_clear_error(tmp_path):
     assert backend in ("openbabel", "rdkit")
     import os as _os
     assert _os.path.getsize(p) > 0
+
+
+# ----------------------------------------------- write_structures_file (multi)
+_STRUCTS = [
+    ([("O", 0.0, 0.0, 0.0), ("H", 0.9, 0.0, 0.0), ("H", -0.2, 0.9, 0.0)], "f0"),
+    ([("O", 0.0, 0.0, 1.0), ("H", 0.9, 0.0, 1.0), ("H", -0.2, 0.9, 1.0)], "f1"),
+]
+
+
+def test_write_structures_xyz_trajectory_roundtrips(tmp_path):
+    p = str(tmp_path / "traj.xyz")
+    assert coords.write_structures_file(p, _STRUCTS) == "native"
+    frames = coords.parse_xyz_frames_text(open(p).read())
+    assert len(frames) == 2
+    # second frame's O sits at z=1.0 (frames written in order, geometry preserved)
+    assert frames[1][0][0][3] == pytest.approx(1.0, abs=1e-6)
+    assert [a[0] for a in frames[0][0]] == ["O", "H", "H"]
+
+
+def test_write_structures_empty_raises(tmp_path):
+    with pytest.raises(ValueError):
+        coords.write_structures_file(str(tmp_path / "x.xyz"), [])
+
+
+def test_multi_structure_formats_list():
+    assert coords.MULTI_STRUCTURE_FORMATS[0] == "xyz"
+    assert "sdf" in coords.MULTI_STRUCTURE_FORMATS
+    assert "mol" not in coords.MULTI_STRUCTURE_FORMATS      # single-structure only
+
+
+@pytest.mark.skipif(not _has_chem_backend(), reason="no OpenBabel/RDKit")
+def test_write_structures_sdf_has_two_records(tmp_path):
+    p = str(tmp_path / "coll.sdf")
+    backend = coords.write_structures_file(p, _STRUCTS)
+    assert backend in ("openbabel", "rdkit")
+    assert open(p).read().count("$$$$") == 2               # two SDF records

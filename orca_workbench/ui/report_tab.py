@@ -32,6 +32,8 @@ class ReportTab(ttk.Frame):
         self._csv_format = "both"
         self._csv_columns = None
         self._csv_missing = ""
+        self._sort_col = None      # header-click column sort (None = scan order)
+        self._sort_desc = False
         self._build()
 
     def _build(self):
@@ -54,9 +56,11 @@ class ReportTab(ttk.Frame):
         paned.add(left, weight=3)
         columns = ("type", "molecule", "recipe", "state")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="extended")
-        for col, label, width in [("type", "Type", 60), ("molecule", "Molecule", 90),
-                                  ("recipe", "Recipe", 170), ("state", "State", 150)]:
-            self.tree.heading(col, text=label)
+        self._col_labels = {"type": "Type", "molecule": "Molecule",
+                            "recipe": "Recipe", "state": "State"}
+        for col, width in (("type", 60), ("molecule", 90), ("recipe", 170), ("state", 150)):
+            self.tree.heading(col, text=self._col_labels[col],
+                              command=lambda c=col: self._on_header_click(c))
             self.tree.column(col, width=width, anchor=tk.W)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
@@ -260,7 +264,30 @@ class ReportTab(ttk.Frame):
         for i in sel:
             if self.tree.exists(i):
                 self.tree.selection_add(i)
+        self._apply_sort()   # keep the active header sort after a re-scan
         self.app.set_status("Report: {} finished calculation(s) found.".format(len(finished)))
+
+    # ---- header-click column sorting ----
+
+    def _on_header_click(self, col):
+        if self._sort_col == col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col
+            self._sort_desc = False
+        self._apply_sort()
+
+    def _apply_sort(self):
+        for c, label in self._col_labels.items():
+            arrow = (" ▼" if self._sort_desc else " ▲") if c == self._sort_col else ""
+            self.tree.heading(c, text=label + arrow)
+        if not self._sort_col:
+            return
+        items = list(self.tree.get_children(""))
+        items.sort(key=lambda iid: str(self.tree.set(iid, self._sort_col)).lower(),
+                   reverse=self._sort_desc)
+        for idx, iid in enumerate(items):
+            self.tree.move(iid, "", idx)
 
     def _finished_calcs(self):
         """List (calc, recipe) for calcs whose .out shows normal termination."""

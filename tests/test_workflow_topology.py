@@ -100,3 +100,52 @@ def test_multiple_sources_validate_is_informational_not_false():
     msgs = w.validate()
     assert any(m.startswith("Multiple Molecules") for m in msgs)
     assert not any("only the first" in m for m in msgs)   # the old false claim is gone
+
+
+def test_node_ok_flags_broken_nodes_for_the_hover_glow():
+    w = wf.Workflow()
+    m = w.add_node("molecules")
+    opt = w.add_node("optimize", config={"recipe": ""})      # no recipe
+    assert w.node_ok(m.id)                                   # a source is always fine
+    assert not w.node_ok(opt.id)                             # no recipe -> not ok
+    w.add_edge(m.id, "geometry", opt.id, "geometry")
+    opt.config["recipe"] = "OPT"
+    assert w.node_ok(opt.id)                                 # recipe + input -> ok
+    opt2 = w.add_node("optimize", config={"recipe": "OPT"})  # recipe but no input
+    assert not w.node_ok(opt2.id)
+
+
+def test_node_ok_write_and_combine_and_condition():
+    w = wf.Workflow()
+    m1 = w.add_node("molecules")
+    m2 = w.add_node("molecules")
+    wr = w.add_node("write")
+    assert not w.node_ok(wr.id)                              # write with no input
+    w.add_edge(m1.id, "geometry", wr.id, "geometry")
+    assert w.node_ok(wr.id)
+    comb = w.add_node("combine")
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    w.add_edge(m1.id, "geometry", comb.id, "geometry")
+    w.add_edge(m2.id, "geometry", comb.id, "geometry")
+    w.add_edge(comb.id, "geometry", opt.id, "geometry")
+    assert not w.node_ok(comb.id)                            # feeds a calc, no charge/mult
+    comb.config["charge"] = 0
+    comb.config["mult"] = 1
+    assert w.node_ok(comb.id)
+    cond = w.add_node("condition")                           # no calc feeder
+    assert not w.node_ok(cond.id)
+
+
+def test_write_node_is_a_sink_ignored_by_expand():
+    w = wf.Workflow()
+    m = w.add_node("molecules")
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    wr = w.add_node("write")
+    w.add_edge(m.id, "geometry", opt.id, "geometry")
+    w.add_edge(m.id, "geometry", wr.id, "geometry")     # geometry fans out to Write
+    assert wf.NODE_TYPES["write"]["kind"] == "writer"
+    assert "write" not in wf.CALC_NODE_TYPES
+    calcs, warnings, _n = wf.expand_to_calcs(w, ["A"], _factory)
+    # the Write node produces no calc; the Optimize still does
+    assert {(c.molecule_filename, c.recipe_name) for c in calcs} == {("A", "OPT")}
+    assert not any("Write" in x for x in warnings)

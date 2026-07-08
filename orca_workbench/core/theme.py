@@ -92,6 +92,8 @@ _NODE_DEFAULTS = {
     "summary_fg": "#555555",     # the config-summary line
     "outline": "#7a8a99",        # idle node border
     "sel": "#1f6fb2",            # selection highlight (border + rubber band)
+    "hover": "#f2a200",          # mouse-hover glow (a node the cursor is over)
+    "hover_bad": "#d33a3a",      # hover glow for a node that can't work (red)
     "port_geom": "#2a8a2a",      # geometry port dot
     "port_results": "#b06000",   # results port dot
     "port_ring": "#333333",      # port outline
@@ -104,7 +106,7 @@ _NODE_DEFAULTS = {
     "kinds": {
         "source": "#cfe8cf", "calc": "#d3e6f5", "sink": "#f0dcc0", "gate": "#ede0c8",
         "builder": "#e6d6f2", "filter": "#cfe6e0", "transform": "#f2e3c8",
-        "combine": "#f2d9c8", "annotation": "#eeeeee",
+        "combine": "#f2d9c8", "writer": "#e0dccf", "annotation": "#eeeeee",
     },
 }
 
@@ -113,35 +115,41 @@ _NODE_OVERRIDES = {
     "dark": {
         "body": "#2a2b2e", "fg": "#e6e6e6", "summary_fg": "#9a9a9a",
         "outline": "#55606a", "sel": "#4aa3ff", "wire": "#6a7a88", "wire_sel": "#4aa3ff",
+        "hover": "#ffb454", "hover_bad": "#ff5a5a",
         "port_geom": "#4caf50", "port_results": "#d9903b", "port_ring": "#0d0d0d",
         "port_label": "#b8b8b8", "splice": "#ffb454",
         "comment_bg": "#3a3620", "comment_fg": "#e8dca0", "comment_outline": "#6a5a20",
         "frame_bg": "#2e2b1e", "frame_fg": "#d8c98a", "frame_outline": "#5a4f2a",
         "kinds": {"source": "#24402a", "calc": "#1e3a4f", "sink": "#4a3a24",
                   "gate": "#423522", "builder": "#3a2b4a", "filter": "#24413c",
-                  "transform": "#46402a", "combine": "#4a3324", "annotation": "#333333"},
+                  "transform": "#46402a", "combine": "#4a3324", "writer": "#38382e",
+                  "annotation": "#333333"},
     },
     "aero": {
         "body": "#ffffff", "fg": "#0d3b5e", "summary_fg": "#3f7096",
         "outline": "#8fc7e6", "sel": "#17a5e6", "wire": "#5a90b0", "wire_sel": "#17a5e6",
+        "hover": "#ff9a3a", "hover_bad": "#e04a4a",
         "port_geom": "#2a8a2a", "port_results": "#c06000", "port_label": "#3f7096",
         "splice": "#ff9a3a",
         "comment_bg": "#fff6cf", "comment_fg": "#6a5a10", "comment_outline": "#e0c85a",
         "frame_bg": "#e7f4d6", "frame_fg": "#3a5a1a", "frame_outline": "#9ec26a",
         "kinds": {"source": "#cdefd6", "calc": "#cfe6fb", "sink": "#ffe6c2",
                   "gate": "#ffedcf", "builder": "#e6ddf7", "filter": "#cdeef0",
-                  "transform": "#fdeecf", "combine": "#ffe0cf", "annotation": "#e3eef5"},
+                  "transform": "#fdeecf", "combine": "#ffe0cf", "writer": "#e8e4d6",
+                  "annotation": "#e3eef5"},
     },
     "boombox": {
         "body": "#2a2d31", "fg": "#d6d6c2", "summary_fg": "#9a9a86",
         "outline": "#6b7178", "sel": "#39ff7a", "wire": "#6b7178", "wire_sel": "#39ff7a",
+        "hover": "#ffd23b", "hover_bad": "#ff5555",
         "port_geom": "#39ff7a", "port_results": "#ffb13b", "port_ring": "#0a0a0a",
         "port_label": "#b0b09c", "splice": "#ffd23b",
         "comment_bg": "#2e3320", "comment_fg": "#c8d68a", "comment_outline": "#5a6a2a",
         "frame_bg": "#242820", "frame_fg": "#b8c88a", "frame_outline": "#4a5a2a",
         "kinds": {"source": "#2f4a34", "calc": "#2a3a44", "sink": "#4a3a24",
                   "gate": "#423522", "builder": "#3a2b4a", "filter": "#24413c",
-                  "transform": "#46402a", "combine": "#4a3324", "annotation": "#2e3236"},
+                  "transform": "#46402a", "combine": "#4a3324", "writer": "#33352e",
+                  "annotation": "#2e3236"},
     },
 }
 

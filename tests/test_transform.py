@@ -273,6 +273,119 @@ def test_set_plane_angle_validation():
     assert len(issues) == 4
 
 
+def _hexagon(z=0.0):
+    return np.array([[math.cos(math.radians(60 * i)), math.sin(math.radians(60 * i)), z]
+                     for i in range(6)])
+
+
+def test_kabsch_recovers_a_rigid_motion():
+    P = CHAIN
+    R = T.rotation_matrix("z", 40.0)
+    Q = P.dot(R.T) + np.array([1.0, 2.0, 3.0])
+    R2, Pc, Qc = T.kabsch(P, Q)
+    assert np.allclose((P - Pc).dot(R2.T) + Qc, Q, atol=1e-9)
+
+
+def test_align_moiety_superimposes_the_matched_atoms():
+    ring = _hexagon()
+    tmpl = np.vstack([ring, [[2.0, 0.0, 0.0]]])         # ring + a substituent atom
+    R = T.rotation_matrix([1.0, 1.0, 0.2], 55.0)
+    mobile = tmpl.dot(R.T) + np.array([4.0, -2.0, 1.0])  # a rigid copy, moved
+    out = T.align_moiety(mobile, tmpl, list(range(6)), list(range(6)))
+    assert T._rmsd(out[:6], ring) < 1e-6                 # ring lands on the template ring
+    assert np.allclose(_dists(out), _dists(mobile), atol=1e-9)   # rigid
+
+
+def test_align_moiety_resolves_ring_symmetry_with_anchors():
+    # A symmetric ring fits many ways; the user's identity correspondence is
+    # deliberately rotated by 2, so ONLY the anchor (a substituent) can pick the
+    # right cyclic ordering. With the anchor supplied, the transformed anchor must
+    # land on the template's.
+    ring = _hexagon()
+    A_t = np.array([[2.0, 0.0, 0.0]])                    # template anchor at vertex-0 dir
+    tmpl = np.vstack([ring, A_t])                        # 7 atoms (anchor at idx 6)
+    R = T.rotation_matrix([0.3, 0.5, 1.0], 47.0)
+    t = np.array([2.0, -1.0, 0.5])
+    moved_ring = ring.dot(R.T) + t
+    A_m = A_t.dot(R.T) + t
+    perm = [(i + 2) % 6 for i in range(6)]              # relabel: wrong-by-2 ordering
+    mobile = np.vstack([moved_ring[perm], A_m])          # ring idx 0..5, anchor idx 6
+    out = T.align_moiety(mobile, tmpl, list(range(6)), list(range(6)),
+                         anchor_mobile=[6], anchor_ref=[6])
+    assert T._rmsd(out[6:7], tmpl[6:7]) < 1e-6           # anchor aligned -> symmetry resolved
+
+
+def test_align_moiety_validation():
+    tpl = [["C", 0, 0, 0], ["C", 1, 0, 0], ["C", 0, 1, 0], ["C", 1, 1, 0]]
+    ok = T.validate_ops([{"op": "align_moiety", "template": tpl,
+                          "mobile": [0, 1, 2], "ref": [0, 1, 2]}], n_atoms=4)
+    assert ok == []
+    issues = T.validate_ops([
+        {"op": "align_moiety", "template": [], "mobile": [0, 1, 2], "ref": [0, 1, 2]},
+        {"op": "align_moiety", "template": tpl, "mobile": [0, 1], "ref": [0, 1]},   # <3
+        {"op": "align_moiety", "template": tpl, "mobile": [0, 1, 9], "ref": [0, 1, 2]},
+        {"op": "align_moiety", "template": tpl, "mobile": [0, 1, 2], "ref": [0, 1, 9]},
+    ], n_atoms=4)
+    assert len(issues) >= 4
+
+
+def test_align_moiety_through_the_interpreter():
+    ring = _hexagon()
+    tmpl_rows = [["C", float(x), float(y), float(z)] for x, y, z in ring]
+    R = T.rotation_matrix("y", 30.0)
+    mobile = ring.dot(R.T) + np.array([0.0, 0.0, 5.0])
+    op = {"op": "align_moiety", "template": tmpl_rows,
+          "mobile": [0, 1, 2, 3, 4, 5], "ref": [0, 1, 2, 3, 4, 5]}
+    assert T.validate_ops([op], n_atoms=6) == []
+    out = T.apply_ops(["C"] * 6, mobile, [op])
+    assert T._rmsd(out, ring) < 1e-6
+    assert "moiety" in T.describe_op(op)
+
+
+def test_moiety_orderings_count_and_shape():
+    # A symmetric 6-ring correspondence has 2*k symmetry-equivalent mappings
+    # (k cyclic rotations x the reflection), each a permutation of the same atoms.
+    orders = T.moiety_orderings([0, 1, 2, 3, 4, 5])
+    assert len(orders) == 12
+    for o in orders:
+        assert sorted(o) == [0, 1, 2, 3, 4, 5]
+    assert len(set(tuple(o) for o in orders)) == 12       # all distinct
+
+
+def test_align_moiety_explicit_ordering_forces_a_fit():
+    # Force each candidate orientation and confirm the ring atoms still land on the
+    # template (every symmetry op maps the ring onto itself), while at least two
+    # orderings put a labelled vertex in DIFFERENT places (they are genuine choices).
+    ring = _hexagon()
+    tmpl_rows = [["C", float(x), float(y), float(z)] for x, y, z in ring]
+    R = T.rotation_matrix([0.2, 1.0, 0.4], 63.0)
+    mobile = ring.dot(R.T) + np.array([3.0, 0.0, -2.0])
+    n = len(T.moiety_orderings([0, 1, 2, 3, 4, 5]))
+    vertex0_positions = []
+    for k in range(n):
+        op = {"op": "align_moiety", "template": tmpl_rows,
+              "mobile": [0, 1, 2, 3, 4, 5], "ref": [0, 1, 2, 3, 4, 5], "ordering": k}
+        assert T.validate_ops([op], n_atoms=6) == []
+        out = T.apply_ops(["C"] * 6, mobile, [op])
+        # every symmetry op maps the ring onto itself: the output point SET equals
+        # the template ring (compare column-sorted, which is set-invariant).
+        assert np.allclose(np.sort(out, axis=0), np.sort(ring, axis=0), atol=1e-6)
+        vertex0_positions.append(tuple(np.round(out[0], 4)))
+    assert len(set(vertex0_positions)) > 1                # different orientations differ
+
+
+def test_align_moiety_ordering_out_of_range_rejected():
+    tpl = [["C", 0, 0, 0], ["C", 1, 0, 0], ["C", 0, 1, 0],
+           ["C", 1, 1, 0], ["C", 2, 0, 0], ["C", 0, 2, 0]]
+    op = {"op": "align_moiety", "template": tpl,
+          "mobile": [0, 1, 2, 3, 4, 5], "ref": [0, 1, 2, 3, 4, 5], "ordering": 99}
+    issues = T.validate_ops([op], n_atoms=6)
+    assert any("orientation" in s for s in issues)
+    # describe_op surfaces the chosen orientation as "orient k/N"
+    good = dict(op, ordering=2)
+    assert "orient 3/12" in T.describe_op(good)
+
+
 def test_describe_op_strings():
     assert "translate" in T.describe_op({"op": "translate", "vec": [1, 0, 0]})
     assert "D(0,1,2,3)" in T.describe_op({"op": "set_dihedral",

@@ -25,6 +25,7 @@ _TYPES = [
     ("align_axis", "Align 2-atom axis to x/y/z"),
     ("align_plane", "Align 3-atom plane (face) to x/y/z"),
     ("set_plane_angle", "Set 3-atom plane angle to a coordinate plane"),
+    ("align_moiety", "Align a moiety onto a template molecule"),
     ("align_principal", "Align principal axes"),
     ("set_dihedral", "Set a dihedral (conformation edit)"),
 ]
@@ -65,11 +66,14 @@ def _parse_center(text):
 
 
 class TransformOpDialog(tk.Toplevel):
-    def __init__(self, parent, op=None, ref_geom=None):
+    def __init__(self, parent, op=None, ref_geom=None, templates=None):
         super().__init__(parent.winfo_toplevel() if hasattr(parent, "winfo_toplevel")
                          else parent)
         self.result = None
         self._op = dict(op or {})
+        # Candidate alignment templates: [(name, symbols, coords), ...] — other
+        # molecules in the project the moiety op can superpose onto.
+        self._templates = list(templates or [])
         self.title("Transform operation")
 
         body = ttk.Frame(self)
@@ -138,6 +142,16 @@ class TransformOpDialog(tk.Toplevel):
         ttk.Combobox(f, textvariable=var, state="readonly", values=["x", "y", "z"],
                      width=5).pack(anchor=tk.W)
         self._vars["target"] = var
+
+    def _field_list(self, label, key):
+        """An entry for a space-separated list of atom indices, prefilled from the
+        op (a list) and stored back as a StringVar in self._vars[key]."""
+        f = self._fields_frame
+        ttk.Label(f, text=label).pack(anchor=tk.W, pady=(4, 0))
+        cur = self._op.get(key) or []
+        var = tk.StringVar(value=" ".join(str(a) for a in cur))
+        ttk.Entry(f, textvariable=var, width=26).pack(anchor=tk.W)
+        self._vars[key] = var
 
     def _render_fields(self):
         for w in self._fields_frame.winfo_children():
@@ -244,6 +258,77 @@ class TransformOpDialog(tk.Toplevel):
                       "of intersection (minimal tilt); the conformation is unchanged.",
                       foreground="#777", wraplength=250, justify=tk.LEFT).pack(
                           anchor=tk.W, pady=(2, 0))
+        elif kind == "align_moiety":
+            if not self._templates:
+                ttk.Label(self._fields_frame, text="No template available: add another "
+                          "molecule (with a generated geometry) to the project to align "
+                          "onto.", foreground="#a33", wraplength=250, justify=tk.LEFT).pack(
+                              anchor=tk.W, pady=(4, 0))
+                return
+            ttk.Label(self._fields_frame, text="Template molecule (the fixed target):").pack(
+                anchor=tk.W, pady=(4, 0))
+            names = [t[0] for t in self._templates]
+            cur = self._op.get("template_name")
+            self._vars["template_name"] = tk.StringVar(value=cur if cur in names else names[0])
+            tcb = ttk.Combobox(self._fields_frame, textvariable=self._vars["template_name"],
+                               state="readonly", values=names, width=22)
+            tcb.pack(anchor=tk.W)
+            tl_frame = ttk.Frame(self._fields_frame)
+            tl_frame.pack(fill=tk.X, pady=(2, 4))
+            tsb = ttk.Scrollbar(tl_frame, orient=tk.VERTICAL)
+            tlst = tk.Listbox(tl_frame, height=7, width=26, exportselection=False,
+                              yscrollcommand=tsb.set, font=("Courier", 9))
+            tsb.configure(command=tlst.yview)
+            tlst.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            tsb.pack(side=tk.LEFT, fill=tk.Y)
+
+            def fill_template(*_a):
+                tlst.delete(0, tk.END)
+                nm = self._vars["template_name"].get()
+                entry = next((t for t in self._templates if t[0] == nm), None)
+                if entry:
+                    _n, syms, coords = entry
+                    for i, s in enumerate(syms):
+                        tlst.insert(tk.END, "{:>3}  {:<2} {:8.3f} {:8.3f} {:8.3f}".format(
+                            i, s, coords[i][0], coords[i][1], coords[i][2]))
+            tcb.bind("<<ComboboxSelected>>", fill_template)
+            fill_template()
+            self._field_list("Atoms in THIS molecule (space-sep, 0-based):", "mobile")
+            self._field_list("...matching TEMPLATE atoms (same count, SAME order):", "ref")
+            # Ring-orientation override: a symmetric moiety fits N symmetry-equivalent
+            # ways; blank = auto (Kabsch on the order given / anchors), or force one
+            # (1..N). The Transform node's "Cycle moiety orientation" button steps this.
+            ttk.Label(self._fields_frame, text="Ring orientation (blank = auto):").pack(
+                anchor=tk.W, pady=(6, 0))
+            cur_ord = self._op.get("ordering")
+            self._vars["ordering"] = tk.StringVar(
+                value="" if cur_ord is None else str(int(cur_ord) + 1))
+            orow = ttk.Frame(self._fields_frame)
+            orow.pack(anchor=tk.W)
+            ttk.Entry(orow, textvariable=self._vars["ordering"], width=6).pack(side=tk.LEFT)
+            ocount = ttk.Label(orow, text="", foreground="#777")
+            ocount.pack(side=tk.LEFT, padx=(6, 0))
+
+            def _update_count(*_a):
+                try:
+                    mob = [int(x) for x in
+                           self._vars["mobile"].get().replace(",", " ").split()]
+                    n = len(transform_mod.moiety_orderings(mob)) if len(mob) >= 3 else 0
+                except (ValueError, TypeError):
+                    n = 0
+                ocount.configure(text="of {} orientations".format(n) if n else "")
+            self._vars["mobile"].trace_add("write", _update_count)
+            _update_count()
+            ttk.Label(self._fields_frame, text="Best-fit (Kabsch) superposition, moving the "
+                      "WHOLE molecule so the atoms you list here land on the template's. "
+                      "The two boxes must line up 1:1, in the same order (list above = "
+                      "template atoms, right = this molecule's atoms). For a symmetric ring, "
+                      "either add the substituent-bearing carbons to the correspondence, or "
+                      "leave orientation blank and use the node's 'Cycle moiety orientation' "
+                      "button to step the N candidate fits in the 3D preview and keep the "
+                      "one that looks right.",
+                      foreground="#777", wraplength=250, justify=tk.LEFT).pack(
+                          anchor=tk.W, pady=(2, 0))
         elif kind == "align_principal":
             self._field("Axis order (permutation of xyz):", "order", default="xyz", width=8,
                         hint="The LONG axis (smallest moment of inertia) goes to the "
@@ -309,6 +394,25 @@ class TransformOpDialog(tk.Toplevel):
                     op[key] = int(self._vars[key].get())
                 op["plane"] = self._vars["plane"].get()
                 op["angle"] = float(self._vars["angle"].get())
+            elif kind == "align_moiety":
+                if "template_name" not in self._vars:
+                    raise ValueError("add a template molecule to the project first")
+                nm = self._vars["template_name"].get()
+                entry = next((t for t in self._templates if t[0] == nm), None)
+                if entry is None:
+                    raise ValueError("pick a template molecule")
+                _n, syms, coords = entry
+                op["template_name"] = nm
+                op["template"] = [[syms[i], float(coords[i][0]), float(coords[i][1]),
+                                   float(coords[i][2])] for i in range(len(syms))]
+
+                def _ints(key):
+                    return [int(x) for x in self._vars[key].get().replace(",", " ").split()]
+                op["mobile"] = _ints("mobile")
+                op["ref"] = _ints("ref")
+                ord_s = self._vars["ordering"].get().strip()
+                if ord_s:
+                    op["ordering"] = int(ord_s) - 1     # UI is 1-based, core is 0-based
             elif kind == "align_principal":
                 op["order"] = self._vars["order"].get().strip().lower()
             elif kind == "set_dihedral":

@@ -244,6 +244,10 @@ class BaseSpectrumWindow(tk.Toplevel):
     and the self.baseline() stacking helper)."""
 
     DEFAULT_GEOMETRY = "1150x720"
+    # Subclass switches: a bar chart has no vertical-stack semantics and draws its
+    # own legend, so it turns these off (no dead offset slider, no duplicate legend).
+    SHOW_OFFSET = True
+    AUTO_LEGEND = True
 
     def __init__(self, parent, window_title):
         super().__init__(parent)
@@ -296,7 +300,7 @@ class BaseSpectrumWindow(tk.Toplevel):
         # tabbed before Redraw.
         self.offset_var = tk.DoubleVar(value=0.0)
         off_label = off_scale = None
-        if self._stacked:
+        if self._stacked and self.SHOW_OFFSET:
             off_label = ttk.Label(bar, text="Stack offset:")
             off_scale = ttk.Scale(bar, from_=0.0, to=1.5, orient=tk.HORIZONTAL, length=110,
                                   variable=self.offset_var, command=lambda _v: self._redraw())
@@ -304,7 +308,7 @@ class BaseSpectrumWindow(tk.Toplevel):
         close_btn = ttk.Button(bar, text="Close", command=self.destroy)
         close_btn.pack(side=tk.RIGHT, padx=(2, 0))
         redraw_btn.pack(side=tk.RIGHT, padx=2)
-        if self._stacked:
+        if self._stacked and self.SHOW_OFFSET:
             off_scale.pack(side=tk.RIGHT, padx=(0, 4))
             off_label.pack(side=tk.RIGHT, padx=(10, 2))
 
@@ -644,9 +648,11 @@ class BaseSpectrumWindow(tk.Toplevel):
             self._home_ylim = ax.get_ylim()
             self._apply_limit_boxes(ax)
             if self._stacked:
-                # Fixed location, NOT 'best': loc='best' recomputes the legend position
-                # on every draw, so it hops around (and slows redraws) during a pan.
-                ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+                if self.AUTO_LEGEND:
+                    # Fixed location, NOT 'best': loc='best' recomputes the legend
+                    # position on every draw, so it hops around (and slows redraws)
+                    # during a pan.
+                    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
             else:
                 m = self.mols[0]
                 self.struct.show(0, m["name"], m.get("smiles"), m["color"])
@@ -1681,4 +1687,102 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
+        self.canvas.draw_idle()
+
+
+# ------------------------------------------------------------- SCF energy bars
+
+# Display label -> internal mode for draw_scf_bars (see core/figures).
+_SCF_MODES = [
+    ("absolute (Eh)", "absolute"),
+    ("delta per molecule (kcal/mol)", "rel_molecule"),
+    ("delta vs global min (kcal/mol)", "rel_global"),
+]
+
+
+class SCFEnergyBarWindow(BaseSpectrumWindow):
+    """Grouped bar chart of final SCF energies: one group of bars per molecule,
+    one colour-coded bar per calculation type within each group. Hovering a bar
+    shows that molecule's 2D structure in the side panel (same panel the spectrum
+    windows use). The energy axis switches between absolute Eh and two relative
+    (kcal/mol) views. The drawing itself lives in core/figures.draw_scf_bars, so the
+    interactive chart and the FIGS_EXPORT image are pixel-for-pixel the same."""
+
+    SHOW_OFFSET = False     # bars have no vertical-stack semantics
+    AUTO_LEGEND = False     # draw_scf_bars draws its own (calc-type) legend
+
+    def __init__(self, parent, title, entries):
+        # type: (tk.Misc, str, List[dict]) -> None
+        # entries: [{molecule, name, smiles, calctype, energy(Eh)}] — one per
+        # finished calc with a final energy.
+        super().__init__(parent, "Final SCF energies - {}".format(title))
+        if not self._mpl_ok:
+            return
+        from orca_workbench.core import figures as figures_mod
+        self._figures = figures_mod
+        self._groups, self._calctypes = figures_mod.scf_bar_groups(entries)
+        self._bar_recs = []
+        self._mol_index = {}
+        for g in self._groups:
+            self._mol_index[g["molecule"]] = len(self.mols)
+            self.mols.append({
+                "name": g["name"], "short": g["molecule"],
+                "color": figures_mod.color_of(len(self.mols)),
+                "smiles": g.get("smiles"),
+            })
+        self.mode_var = tk.StringVar(value=_SCF_MODES[0][0])
+        self._build_ui("No final SCF energies found in the selected calculation(s).")
+
+    def add_controls(self, bar):
+        ttk.Label(bar, text="Energy axis:").pack(side=tk.LEFT)
+        cb = ttk.Combobox(bar, textvariable=self.mode_var, state="readonly", width=26,
+                          values=[label for label, _k in _SCF_MODES])
+        cb.pack(side=tk.LEFT, padx=6)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._redraw())
+
+    def _mode_key(self):
+        return dict(_SCF_MODES).get(self.mode_var.get(), "absolute")
+
+    def add_summary(self):
+        n_ct = len(self._calctypes)
+        ttk.Label(self, text="{} molecule(s), {} calculation type(s): {}. Hover a bar "
+                  "for its structure + energy.".format(
+                      len(self._groups), n_ct, ", ".join(self._calctypes)),
+                  foreground="#555").pack(side=tk.TOP, anchor=tk.W, padx=10)
+
+    def plot(self, ax):
+        self._bar_recs = self._figures.draw_scf_bars(
+            ax, self._groups, self._calctypes, mode=self._mode_key(), annotate=False)
+
+    def _bar_at(self, event):
+        if event.xdata is None or event.ydata is None:
+            return None
+        for rec in self._bar_recs:
+            r = rec["rect"]
+            x0 = r.get_x()
+            x1 = x0 + r.get_width()
+            h = r.get_height()
+            lo, hi = min(0.0, h), max(0.0, h)
+            pad = (hi - lo) * 0.03 or 1e-9
+            if x0 <= event.xdata <= x1 and (lo - pad) <= event.ydata <= (hi + pad):
+                return rec
+        return None
+
+    def _hover(self, event):
+        ax = self.ax
+        if ax is None:
+            return
+        rec = self._bar_at(event) if event.inaxes is ax else None
+        self._clear_hover()
+        if rec is None:
+            self._set_active(None)
+            self.canvas.draw_idle()
+            return
+        self._set_active(self._mol_index.get(rec["molecule"]))
+        self._hover_artists.append(ax.annotate(
+            "{}\n{}  {}\nE = {:.6f} Eh".format(rec["name"], rec["molecule"],
+                                               rec["calctype"], rec["energy"]),
+            xy=(0.02, 0.98), xycoords="axes fraction", va="top", ha="left",
+            fontsize=9, family="monospace",
+            bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         self.canvas.draw_idle()

@@ -61,6 +61,11 @@ class WorkflowTab(ttk.Frame):
         self._sel_edge = None      # type: Optional[str]
         self._mode = None          # "drag" | "wire" | "pan" | "box" | None
         self._drag = None          # transient drag state
+        self._hover_node = None    # node id the cursor is over (for the hover glow)
+        # Once the user has confirmed editing an already-executed graph, don't nag
+        # again this session (the escape hatch stays an informed, explicit choice
+        # the first time). Reset when a fresh project/graph is loaded.
+        self._edit_run_ack = False
         self._add_offset = 0
         # View transform: world (node.x/y) -> screen = world*zoom + (ox, oy).
         self._zoom = 1.0
@@ -199,6 +204,7 @@ class WorkflowTab(ttk.Frame):
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_motion)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Motion>", self._on_hover)   # node glow follows the cursor
         # Pan on middle-drag (left-drag in empty space is box-select).
         self.canvas.bind("<Button-2>", self._pan_start)
         self.canvas.bind("<B2-Motion>", self._pan_move)
@@ -399,6 +405,8 @@ class WorkflowTab(ttk.Frame):
             self._build_transform_panel(node)
         elif node.type == "combine":
             self._build_combine_panel(node)
+        elif node.type == "write":
+            self._build_write_panel(node)
         elif self._is_annotation(node):
             what = "title" if node.type == "frame" else "text"
             ttk.Label(self.cfg_frame, text="A {} annotation (not part of the run).".format(
@@ -540,7 +548,7 @@ class WorkflowTab(ttk.Frame):
             btns = ttk.Frame(self.cfg_frame)
             btns.pack(anchor=tk.W, padx=18, pady=(0, 3))
             if ctype == "FREQ" and done:
-                b = ttk.Button(btns, text="IR", width=4, command=lambda c=calc: ct._plot_ir(c))
+                b = ttk.Button(btns, text="IR", width=4, command=lambda c=calc: ct._plot_ir([c]))
                 b.pack(side=tk.LEFT, padx=1); tip(b, "Plot the simulated IR spectrum.")
             if ctype == "NMR" and done:
                 b = ttk.Button(btns, text="NMR", width=5, command=lambda c=calc: ct._plot_nmr([c]))
@@ -730,6 +738,7 @@ class WorkflowTab(ttk.Frame):
         # survives a normal editing session.
         if self._undo_baseline is None or self.app.project.workflow != self._undo_baseline:
             self._reset_undo()
+            self._edit_run_ack = False   # a fresh graph: re-arm the executed-edit gate
         # drop selections that no longer exist
         self._sel_nodes = [nid for nid in self._sel_nodes if self.wf.node(nid) is not None]
         if self._sel_edge is not None and self.wf.edge(self._sel_edge) is None:
@@ -861,6 +870,7 @@ class WorkflowTab(ttk.Frame):
 
     def _redraw(self):
         self.canvas.delete("all")
+        self._hover_node = None   # the glow ring was cleared with "all"; next Motion re-adds
         # Frames sit behind everything; comments behind the real nodes; then edges;
         # then the real (computational) nodes on top.
         for n in self.wf.nodes:
@@ -1109,9 +1119,12 @@ class WorkflowTab(ttk.Frame):
         if hit[0] == "node":
             nid = hit[1]
             if ctrl:
-                self._toggle_node(nid)
-                self._mode = None
-                self._drag = None
+                # Ctrl+CLICK toggles selection; Ctrl+DRAG duplicates the selection
+                # (or just this node) and moves the copy — PowerPoint-style. Start a
+                # copy-pending drag; if it never moves, _on_release toggles instead.
+                self._mode = "drag"
+                self._drag = {"ox": cx, "oy": cy, "moved": False,
+                              "copy_pending": nid, "sel_snapshot": list(self._sel_nodes)}
                 return
             if nid not in self._sel_nodes:
                 self._select_only(nid)
@@ -1161,6 +1174,44 @@ class WorkflowTab(ttk.Frame):
         self._drag = {"orig": orig, "ox": cx, "oy": cy, "moved": False,
                       "collapse_to": collapse_to}
 
+    def _duplicate_node_ids(self, node_ids, dx=0.0, dy=0.0):
+        """Duplicate `node_ids` (fresh ids; wires INTERNAL to the set preserved;
+        positions offset by dx/dy). Returns the new node ids. Does NOT commit — the
+        caller commits once (so a Ctrl+drag copy is a single undo step)."""
+        import copy
+        ids = set(node_ids)
+        internal = [e for e in self.wf.edges if e.src_node in ids and e.dst_node in ids]
+        idmap, new_ids = {}, []
+        for nid in node_ids:
+            n = self.wf.node(nid)
+            if n is None:
+                continue
+            nn = self.wf.add_node(n.type, n.x + dx, n.y + dy, copy.deepcopy(n.config))
+            idmap[nid] = nn.id
+            new_ids.append(nn.id)
+        for e in internal:
+            if e.src_node in idmap and e.dst_node in idmap:
+                self.wf.add_edge(idmap[e.src_node], e.src_port, idmap[e.dst_node], e.dst_port)
+        return new_ids
+
+    def _materialize_copy_drag(self):
+        """Turn a Ctrl+drag (copy-pending) into real duplicated nodes the drag then
+        moves — the copies sit on the originals, then follow the cursor. Copies the
+        whole selection if the pressed node was part of it, else just that node."""
+        d = self._drag
+        nid = d.get("copy_pending")
+        snap = d.get("sel_snapshot", [])
+        source = list(snap) if nid in snap else [nid]
+        new_ids = self._duplicate_node_ids(source)
+        d.pop("copy_pending", None)
+        if not new_ids:
+            return
+        self._sel_nodes = new_ids
+        self._sel_edge = None
+        d["orig"] = {i: (self.wf.node(i).x, self.wf.node(i).y)
+                     for i in new_ids if self.wf.node(i) is not None}
+        d["copied"] = True
+
     def _on_motion(self, event):
         cx, cy = self._cxy(event)
         if self._mode == "resize" and self._drag:
@@ -1174,6 +1225,20 @@ class WorkflowTab(ttk.Frame):
             dx, dy = cx - self._drag["ox"], cy - self._drag["oy"]
             if abs(dx) > 2 or abs(dy) > 2:
                 self._drag["moved"] = True
+            # Ctrl+drag: on the first real movement, duplicate the source nodes and
+            # drag the COPIES (the originals stay put) — PowerPoint-style.
+            if (self._drag.get("copy_pending") is not None and self._drag["moved"]
+                    and "orig" not in self._drag):
+                self._materialize_copy_drag()
+            if "orig" not in self._drag:
+                return   # copy-pending but hasn't moved far enough to copy yet
+            # Shift locks movement to the dominant axis (horizontal or vertical,
+            # whichever the cursor has moved more in) — PowerPoint-style.
+            if bool(event.state & 0x0001):
+                if abs(dx) >= abs(dy):
+                    dy = 0.0
+                else:
+                    dx = 0.0
             for nid, (ox, oy) in self._drag["orig"].items():
                 n = self.wf.node(nid)
                 if n is not None:
@@ -1201,11 +1266,17 @@ class WorkflowTab(ttk.Frame):
             self._commit()
             return
         if mode == "drag" and drag:
+            if drag.get("copy_pending") is not None and not drag.get("moved"):
+                self._toggle_node(drag["copy_pending"])   # Ctrl+click, no drag = toggle
+                return
             if drag.get("moved"):
                 # Dropping a lone, unconnected node onto a wire splices it in.
                 self._maybe_splice_at_drop(cx, cy, drag)
                 self._commit()
                 self._redraw()
+                if drag.get("copied"):
+                    self._build_config_panel()
+                    self.app.set_status("Duplicated {} node(s).".format(len(drag["orig"])))
             elif drag.get("collapse_to"):
                 self._select_only(drag["collapse_to"])
             return
@@ -1241,6 +1312,9 @@ class WorkflowTab(ttk.Frame):
             old = self.wf.edge(detach)
             if old is not None and target == (old.dst_node, old.dst_port):
                 self._redraw()                      # dropped back where it was
+                return
+            if old is not None and not self._confirm_destructive_edit("Rewiring a connection"):
+                self._redraw()                      # keep the wire as it was
                 return
             if old is not None:
                 self.wf.remove_edge(detach)
@@ -1278,6 +1352,8 @@ class WorkflowTab(ttk.Frame):
             # Standard node-editor behaviour: dropping a wire on an occupied
             # single input REPLACES the old connection (put back if the new
             # one turns out invalid, e.g. it would make a cycle).
+            if not self._confirm_destructive_edit("Replacing a connection"):
+                return False
             old = list(self.wf.edges_into(dn, dp))
             for oe in old:
                 self.wf.remove_edge(oe.id)
@@ -1325,6 +1401,8 @@ class WorkflowTab(ttk.Frame):
         destination — and pushes the downstream nodes right to make room."""
         eid = drag.get("splice_edge") or self._splice_candidate(drag)
         if eid is None:
+            return
+        if not self._confirm_destructive_edit("Splicing a node into a wire"):
             return
         nid = next(iter(drag["orig"]))
         node = self.wf.node(nid)
@@ -1424,6 +1502,42 @@ class WorkflowTab(ttk.Frame):
                 if x <= cx <= x + w and y <= cy <= y + h:
                     return n.id
         return None
+
+    def _on_hover(self, event):
+        """Glow the node under the cursor. Cheap: it only redraws the glow ring
+        when the hovered node CHANGES (plain motion over the same node does
+        nothing), so it's safe over ThinLinc (no per-event canvas redraw)."""
+        if self._mode or self._drag or self._pan:
+            return   # an active drag/pan owns the canvas
+        cx, cy = self._s2w(event.x, event.y)
+        nid = self._node_at(cx, cy)
+        if nid is not None:
+            n = self.wf.node(nid)
+            if n is not None and self._is_annotation(n):
+                nid = None   # annotations don't glow (they have their own affordances)
+        if nid == self._hover_node:
+            return
+        self._hover_node = nid
+        self._draw_hover_glow()
+
+    def _draw_hover_glow(self):
+        """(Re)draw just the hover ring for self._hover_node — a themeable glow
+        (np['hover']), or red (np['hover_bad']) when the node can't currently work
+        (missing recipe / input, misplaced Transform, Combine without charge/mult).
+        Tagged 'hoverglow' so it's the only thing this touches."""
+        self.canvas.delete("hoverglow")
+        nid = self._hover_node
+        node = self.wf.node(nid) if nid else None
+        if node is None:
+            return
+        z = self._zoom
+        x, y = self._w2s(node.x, node.y)
+        w = self._node_width(node) * z
+        h = self._node_height(node) * z
+        col = self._np["hover"] if self.wf.node_ok(nid) else self._np["hover_bad"]
+        pad = 3 * z + 1
+        self.canvas.create_rectangle(x - pad, y - pad, x + w + pad, y + h + pad,
+                                     outline=col, width=2, tags=("hoverglow",))
 
     def _out_port_type(self, node_id, port):
         n = self.wf.node(node_id)
@@ -1618,6 +1732,8 @@ class WorkflowTab(ttk.Frame):
                 drop.update(e.id for e in self.wf.edges_out(nid))
         if not drop:
             self.app.set_status("No connections to cut on the selection.")
+            return "break"
+        if not self._confirm_destructive_edit("Cutting {} wire(s)".format(len(drop))):
             return "break"
         self.wf.edges = [e for e in self.wf.edges if e.id not in drop]
         self._commit()
@@ -1848,8 +1964,32 @@ class WorkflowTab(ttk.Frame):
             return False
         return bool(self._node_launched_calcs(node_id))
 
+    def _graph_has_run(self):
+        """True if any node has launched calculations — i.e. the graph now
+        DOCUMENTS work that has actually executed."""
+        return any(self._node_launched_calcs(n.id) for n in self.wf.nodes)
+
+    def _confirm_destructive_edit(self, what):
+        """Gate a structural edit of an already-EXECUTED graph behind one
+        explicit, informed confirmation — the escape hatch. Returns True to
+        proceed. A no-op (returns True) when the graph hasn't run yet, or once the
+        user has acknowledged it this session (so it doesn't nag every edit)."""
+        if self._edit_run_ack or not self._graph_has_run():
+            return True
+        ok = messagebox.askyesno(
+            "Edit an executed workflow?",
+            "This workflow documents calculations that have already run.\n\n"
+            "{} can detach finished results from the graph that produced them, so the "
+            "record no longer reflects what was actually executed.\n\n"
+            "Proceed anyway? (You won't be asked again this session.)".format(what))
+        if ok:
+            self._edit_run_ack = True
+        return ok
+
     def _delete_selected(self):
         if self._sel_edge is not None:
+            if not self._confirm_destructive_edit("Deleting a wire"):
+                return
             self.wf.remove_edge(self._sel_edge)
             self._sel_edge = None
             self._commit()
@@ -1951,6 +2091,7 @@ class WorkflowTab(ttk.Frame):
             "combine": ("merge", "append", "join", "dimer", "assemble"),
             "filter": ("subset", "select"),
             "molecules": ("source", "input"),
+            "write": ("export", "save", "trajectory", "traj", "dump", "xyz", "sdf"),
         }
 
         top = tk.Toplevel(self)
@@ -2198,9 +2339,16 @@ class WorkflowTab(ttk.Frame):
         def sel_indices():
             return list(lb.curselection())
 
+        def has_moiety(op_list):
+            return any((o.get("op") == "align_moiety") for o in op_list)
+
         def commit(new_ops, select_indices):
+            had = has_moiety(ops())
             self._set_cfg(node, "ops", new_ops)   # marks dirty + redraws canvas
-            refill(select_indices)
+            if had != has_moiety(new_ops):
+                self._build_config_panel()        # show/hide the Cycle button
+            else:
+                refill(select_indices)
 
         def on_add():
             op = self._edit_op_dialog(node, None)
@@ -2328,7 +2476,49 @@ class WorkflowTab(ttk.Frame):
         ttk.Button(row2, text="Up", width=5, command=lambda: move_block(-1)).pack(side=tk.LEFT, padx=1)
         ttk.Button(row2, text="Down", width=6, command=lambda: move_block(1)).pack(side=tk.LEFT, padx=1)
 
-        self._add_preview_button(node)
+        def cycle_moiety():
+            """Step the ring-orientation of a moiety op through its N symmetry-
+            equivalent fits and re-open the 3D preview — the 'cycle through the
+            candidate ring alignments and eyeball the right one' control. Cycles
+            the selected align_moiety op, else the last one in the list."""
+            lst = ops()
+            sel = sel_indices()
+            target = None
+            if (len(sel) == 1 and 0 <= sel[0] < len(lst)
+                    and lst[sel[0]].get("op") == "align_moiety"):
+                target = sel[0]
+            else:
+                for kk in range(len(lst) - 1, -1, -1):
+                    if lst[kk].get("op") == "align_moiety":
+                        target = kk
+                        break
+            if target is None:
+                return
+            op = dict(lst[target])
+            mob = op.get("mobile") or []
+            try:
+                n = len(transform_mod.moiety_orderings(mob)) if len(mob) >= 3 else 0
+            except Exception:
+                n = 0
+            if n <= 0:
+                messagebox.showinfo("Cycle moiety orientation",
+                                    "This moiety op needs at least 3 matched atoms first.")
+                return
+            cur = op.get("ordering")
+            op["ordering"] = 0 if cur is None else (int(cur) + 1) % n
+            lst[target] = op
+            commit(lst, [target])
+            self.app.set_status("Moiety orientation {} / {} - opening preview...".format(
+                op["ordering"] + 1, n))
+            self._preview_node_geometry(node)
+
+        if has_moiety(node.config.get("ops") or []):
+            cbtn = ttk.Button(f, text="Cycle moiety orientation >", command=cycle_moiety)
+            cbtn.pack(anchor=tk.W, padx=8, pady=(0, 2))
+            tip(cbtn, "Force the moiety op to the NEXT of its N symmetry-equivalent ring "
+                      "fits and open the 3D preview. Click repeatedly to step through them "
+                      "and keep the orientation that looks right (it's saved on the op). "
+                      "Cycles the selected moiety op, or the last one.")
         ttk.Label(f, text="Tip: multi-select ops (Shift/Ctrl-click) and move them as a block, "
                   "or drag a row to reorder. To align two molecules to EACH OTHER, give each "
                   "its own Transform aligning the chosen axis/plane to the same lab axis — then "
@@ -2336,7 +2526,9 @@ class WorkflowTab(ttk.Frame):
                       anchor=tk.W, padx=8, pady=(4, 0))
 
     def _edit_op_dialog(self, node, op):
-        """Open the op editor, with the first input molecule's atoms as reference."""
+        """Open the op editor, with the first input molecule's atoms as reference
+        and every other molecule (with a geometry) offered as an alignment template
+        (for the moiety op)."""
         from orca_workbench.ui.transform_dialog import TransformOpDialog
         ref = None
         try:
@@ -2345,7 +2537,17 @@ class WorkflowTab(ttk.Frame):
                 ref = geoms[0]
         except Exception:
             ref = None
-        dlg = TransformOpDialog(self, op=op, ref_geom=ref)
+        templates = []
+        cache = {}
+        for m in self.app.project.molecules:
+            if not m.xyz_path:
+                continue
+            try:
+                g = self._read_geom(m.filename, cache)
+                templates.append((m.filename, g["symbols"], g["coords"]))
+            except Exception:
+                continue
+        dlg = TransformOpDialog(self, op=op, ref_geom=ref, templates=templates)
         return dlg.result
 
     def _build_combine_panel(self, node):
@@ -2418,6 +2620,9 @@ class WorkflowTab(ttk.Frame):
                           "ferromagnetically):", "mult",
                           "Antiferromagnetic / low-spin cases: set it here. Required when "
                           "this Combine feeds a calculation.")
+        # Preview / Write the merged geometry — same 'run until here' debug view the
+        # Transform panel offers (computed in memory; nothing is written to the project).
+        self._add_preview_button(node)
 
     def _guide_combine_fix(self, node_id, missing):
         """Select the offending Combine, red-highlight the empty charge/mult
@@ -2443,7 +2648,7 @@ class WorkflowTab(ttk.Frame):
                 first.focus_set()
             except tk.TclError:
                 pass
-        self._add_preview_button(node)
+        # (the Preview/Write buttons are already part of the rebuilt combine panel)
 
     def _add_preview_button(self, node):
         """The 'run until here' debug view: computes this node's output geometry
@@ -2626,6 +2831,143 @@ class WorkflowTab(ttk.Frame):
                                 "first {}.".format(len(out), cap))
         for p in paths:
             open_xyz_3d(self, self.app, p)
+
+    # ------------------------------------------------------------- Write node
+    def _set_cfg_quiet(self, node, key, value):
+        """Set a node config value WITHOUT a redraw / undo snapshot — for text
+        fields that update per keystroke (a Write node's path/folder). The graph
+        structure is unchanged, so we just record it and mark the project dirty."""
+        node.config[key] = value
+        self.app.mark_dirty()
+
+    def _build_write_panel(self, node):
+        """Config for a Write node: export the geometries arriving here as one
+        multi-structure file (trajectory / collection) or a batch of
+        one-file-per-molecule into a folder."""
+        from tkinter import filedialog
+        from orca_workbench.core import coords as coords_mod
+        f = self.cfg_frame
+        ttk.Label(f, text="Export the geometries arriving here to disk.",
+                  foreground="#555", wraplength=220, justify=tk.LEFT).pack(
+                      anchor=tk.W, padx=8, pady=(4, 2))
+
+        mode = tk.StringVar(value=node.config.get("mode", "trajectory"))
+
+        def on_mode():
+            self._set_cfg(node, "mode", mode.get())
+            self._build_config_panel()   # swap the format list + destination widget
+        ttk.Radiobutton(f, text="One file (trajectory / collection)", variable=mode,
+                        value="trajectory", command=on_mode).pack(anchor=tk.W, padx=8)
+        ttk.Radiobutton(f, text="Batch: one file per molecule (folder)", variable=mode,
+                        value="batch", command=on_mode).pack(anchor=tk.W, padx=8)
+
+        is_traj = mode.get() == "trajectory"
+        fmts = (list(coords_mod.MULTI_STRUCTURE_FORMATS) if is_traj
+                else ["xyz", "mol", "sdf", "pdb", "mol2"])
+        ttk.Label(f, text="Format:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        cur_fmt = node.config.get("format", fmts[0])
+        fmt = tk.StringVar(value=cur_fmt if cur_fmt in fmts else fmts[0])
+        cb = ttk.Combobox(f, textvariable=fmt, state="readonly", values=fmts, width=8)
+        cb.pack(anchor=tk.W, padx=8, pady=2)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._set_cfg(node, "format", fmt.get()))
+
+        if is_traj:
+            ttk.Label(f, text="Destination file:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+            pv = tk.StringVar(value=node.config.get("path", ""))
+            row = ttk.Frame(f); row.pack(fill=tk.X, padx=8)
+            ttk.Entry(row, textvariable=pv, width=20).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            pv.trace_add("write", lambda *_a: self._set_cfg_quiet(node, "path", pv.get()))
+
+            def browse_file():
+                ext = fmt.get()
+                p = filedialog.asksaveasfilename(
+                    defaultextension="." + ext, initialfile="trajectory." + ext,
+                    filetypes=[(ext.upper(), "*." + ext), ("All files", "*.*")])
+                if p:
+                    pv.set(p)
+            ttk.Button(row, text="...", width=3, command=browse_file).pack(side=tk.LEFT, padx=(2, 0))
+        else:
+            ttk.Label(f, text="Destination folder:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+            fv = tk.StringVar(value=node.config.get("folder", ""))
+            row = ttk.Frame(f); row.pack(fill=tk.X, padx=8)
+            ttk.Entry(row, textvariable=fv, width=20).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            fv.trace_add("write", lambda *_a: self._set_cfg_quiet(node, "folder", fv.get()))
+
+            def browse_dir():
+                p = filedialog.askdirectory()
+                if p:
+                    fv.set(p)
+            ttk.Button(row, text="...", width=3, command=browse_dir).pack(side=tk.LEFT, padx=(2, 0))
+
+        b = ttk.Button(f, text="Write now", command=lambda: self._write_node_now(node))
+        b.pack(anchor=tk.W, padx=8, pady=(8, 2))
+        tip(b, "Write the geometries currently arriving at this node. Reads each molecule's "
+               "CURRENT .xyz now (like Transform/Combine), so place Write before the "
+               "calculation nodes — it exports the input geometries, not optimised ones.")
+        ttk.Label(f, text="Several wires can feed one Write (its geometry input fans in), so you "
+                  "can pile molecules from different branches into one trajectory.",
+                  foreground="#999", wraplength=220, justify=tk.LEFT).pack(
+                      anchor=tk.W, padx=8, pady=(2, 0))
+
+    def _write_node_now(self, node):
+        """Export the Write node's incoming geometry stream to disk, per its mode
+        (single multi-structure file, or one file per molecule into a folder)."""
+        from orca_workbench.core import coords as coords_mod
+        backend, cache, _pending, notes = self._make_geom_backend()
+        streams, warns = wf_mod.compute_streams(self.wf, self._source_molsets(), backend)
+        # gather from EVERY inbound wire (the geometry input fans in)
+        names = []
+        for e in self.wf.edges_into(node.id, "geometry"):
+            for nm in streams.get(e.src_node, []):
+                if nm not in names:
+                    names.append(nm)
+        problems = list(dict.fromkeys(warns + notes))
+        if not names:
+            messagebox.showwarning("Write", "\n".join(problems) if problems else
+                                   "No geometry reaches this Write node yet — connect its "
+                                   "input and make sure the molecules have geometries.")
+            return
+        structs = []
+        for nm in names:
+            try:
+                g = self._read_geom(nm, cache)
+            except ValueError as e:
+                problems.append(str(e))
+                continue
+            c = g["coords"]
+            atoms = [(g["symbols"][k], float(c[k][0]), float(c[k][1]), float(c[k][2]))
+                     for k in range(len(g["symbols"]))]
+            structs.append((atoms, nm))
+        if not structs:
+            messagebox.showwarning("Write", "\n".join(problems) or "No readable geometries.")
+            return
+        mode = node.config.get("mode", "trajectory")
+        fmt = node.config.get("format", "xyz")
+        try:
+            if mode == "trajectory":
+                path = (node.config.get("path") or "").strip()
+                if not path:
+                    messagebox.showwarning("Write", "Choose a destination file first.")
+                    return
+                used = coords_mod.write_structures_file(path, structs)
+                msg = "Wrote {} structure(s) to\n{}\n(via {}).".format(len(structs), path, used)
+            else:
+                folder = (node.config.get("folder") or "").strip()
+                if not folder:
+                    messagebox.showwarning("Write", "Choose a destination folder first.")
+                    return
+                os.makedirs(folder, exist_ok=True)
+                for atoms, nm in structs:
+                    target = os.path.join(folder, safe_path_component(nm) + "." + fmt)
+                    coords_mod.write_structure_file(target, atoms, name=nm)
+                msg = "Wrote {} file(s) into\n{}".format(len(structs), folder)
+        except Exception as e:
+            messagebox.showerror("Write failed", str(e))
+            return
+        if problems:
+            msg += "\n\nProblems:\n" + "\n".join(problems)
+        (messagebox.showwarning if problems else messagebox.showinfo)("Write", msg)
+        self.app.set_status("Write node: exported {} structure(s).".format(len(structs)))
 
     # ------------------------------------------------------------- ZPVA builder
     def _build_zpva_panel(self, node):

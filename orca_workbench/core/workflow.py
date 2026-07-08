@@ -104,6 +104,22 @@ NODE_TYPES = {
         "fan_in": ("geometry",),
         "config": {"name": "", "mode": "merge", "charge": None, "mult": None},
     },
+    # A Write node exports the CURRENT geometries flowing into it to disk — either
+    # a single multi-structure file (a trajectory / collection: one xyz/sdf/pdb/
+    # mol2 holding every incoming molecule as a frame/record) or a BATCH (one file
+    # per molecule into a folder). It's a geometry SINK: no outputs, runs no
+    # calculation, ignored by expand_to_calcs. Its 'geometry' input fans in so
+    # several wires can pile molecules into one export. Like Transform/Combine it
+    # reads geometries when you press its Write button, so it belongs in the
+    # geometry-prep zone (before the calc nodes).
+    "write": {
+        "label": "Write",
+        "inputs": [("geometry", "geometry")],
+        "outputs": [],
+        "kind": "writer",
+        "fan_in": ("geometry",),
+        "config": {"mode": "trajectory", "format": "xyz", "path": "", "folder": ""},
+    },
     "report": {
         "label": "Report",
         "inputs": [("results", "results")],
@@ -576,6 +592,51 @@ class Workflow(object):
         if self.topo_order() is None:
             issues.append("The graph contains a cycle.")
         return issues
+
+    def node_ok(self, node_id):
+        # type: (str) -> bool
+        """Lightweight 'is this node currently workable' check — for the node
+        editor's hover glow (a broken node glows red). Mirrors the per-node
+        conditions validate() uses: a calc/ZPVA node needs a recipe + geometry
+        input; a Condition needs a calc feeder; Filter/Write need an input;
+        Transform/Combine need an input, valid ops, and must not sit after a calc;
+        a Combine feeding a calc needs charge+mult. Sources / Reports / annotations
+        are always OK. This is a visual hint, NOT a substitute for validate()."""
+        n = self.node(node_id)
+        if n is None or n.kind == "annotation":
+            return True
+        t = n.type
+        if t in CALC_NODE_TYPES or t == "zpva":
+            if not n.config.get("recipe"):
+                return False
+            if not self.edges_into(n.id, "geometry"):
+                return False
+        elif t == "condition":
+            fin = self.edges_into(n.id, "in")
+            if not fin:
+                return False
+            feeder = self.node(fin[0].src_node)
+            if feeder is None or feeder.type not in CALC_NODE_TYPES:
+                return False
+        elif t in ("filter", "write"):
+            if not self.edges_into(n.id, "geometry"):
+                return False
+        elif t == "transform":
+            if not self.edges_into(n.id, "geometry") or self.has_calc_upstream(n.id):
+                return False
+            try:
+                from orca_workbench.core import transform as _tmod
+                if _tmod.validate_ops(n.config.get("ops") or []):
+                    return False
+            except ImportError:
+                pass
+        elif t == "combine":
+            if not self.edges_into(n.id, "geometry") or self.has_calc_upstream(n.id):
+                return False
+            if self.has_calc_downstream(n.id) and any(
+                    n.config.get(k) is None for k in ("charge", "mult")):
+                return False
+        return True
 
 
 def compute_streams(workflow, source_mols, transform_apply=None):

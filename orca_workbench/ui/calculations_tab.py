@@ -2225,6 +2225,18 @@ class CalculationsTab(ttk.Frame):
             menu.add_command(label="Plot EPR spectrum  (select finished EPR)",
                              state=tk.DISABLED)
 
+        # Final SCF energies across the selection, as a grouped bar chart (bars
+        # grouped by molecule, one per calc type). Any finished calc contributes.
+        finished_any = [c for c in calcs if self._own_state(c)[2]]
+        if finished_any:
+            menu.add_command(
+                label="Plot final SCF energies (bar chart) ({} finished)".format(
+                    len(finished_any)),
+                command=lambda cs=list(finished_any): self._plot_scf_energies(cs))
+        else:
+            menu.add_command(label="Plot final SCF energies  (select finished calcs)",
+                             state=tk.DISABLED)
+
         if len(calcs) == 1 and calcs[0].job_id:
             menu.add_separator()
             menu.add_command(label="Open live progress plot",
@@ -2743,6 +2755,37 @@ class CalculationsTab(ttk.Frame):
         if op:
             LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), op,
                            app=self.app, trj_path=self._expected_trj(calc))
+
+    def _plot_scf_energies(self, calcs):
+        # Grouped bar chart of final SCF energies for the finished calcs in the
+        # selection (any calc type). Groups by molecule, colour-codes by calc type.
+        entries = []
+        for c in calcs:
+            text = self._read_out(c)
+            if not text:
+                continue
+            hits = orca_parser._FINAL_E.findall(text)
+            if not hits:
+                continue
+            mol = self.app.project.molecule_by_filename(c.molecule_filename)
+            entries.append({
+                "molecule": c.molecule_filename,
+                "name": (mol.name if mol else c.molecule_filename),
+                "smiles": mol.smiles if mol else None,
+                "calctype": self._calctype_of(c),
+                "energy": float(hits[-1]),
+            })
+        if not entries:
+            messagebox.showinfo(
+                "No SCF energies",
+                "None of the selected calculations has a FINAL SINGLE POINT ENERGY in "
+                "its output.")
+            return
+        from orca_workbench.ui.spectra import SCFEnergyBarWindow
+        mols = {e["molecule"] for e in entries}
+        title = (entries[0]["molecule"] if len(mols) == 1
+                 else "{} molecules".format(len(mols)))
+        SCFEnergyBarWindow(self, title, entries)
 
     def _plot_ir(self, calcs):
         # Accepts one or more finished FREQ calcs; stacks them as colour-matched

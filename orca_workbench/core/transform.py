@@ -317,6 +317,116 @@ def set_plane_angle(coords, i, j, k, ref_plane="xy", angle_deg=0.0):
     return (c - o).dot(R.T) + o
 
 
+def kabsch(P, Q):
+    """Optimal rigid superposition of matched point sets P -> Q (both (n,3)).
+    Returns (R, Pc, Qc): the rotation R, and the two centroids, such that the
+    best-fit image of a point p is ``(p - Pc) @ R.T + Qc``. Proper rotation only
+    (the reflection is corrected), so chirality is preserved."""
+    P = _coords(P)
+    Q = _coords(Q)
+    if P.shape != Q.shape or len(P) < 1:
+        raise ValueError("kabsch needs two equal-length point sets")
+    Pc, Qc = P.mean(axis=0), Q.mean(axis=0)
+    H = (P - Pc).T.dot(Q - Qc)
+    U, _s, Vt = np.linalg.svd(H)
+    d = 1.0 if np.linalg.det(Vt.T.dot(U.T)) >= 0 else -1.0
+    R = Vt.T.dot(np.diag([1.0, 1.0, d])).dot(U.T)
+    return R, Pc, Qc
+
+
+def _rmsd(A, B):
+    A, B = _coords(A), _coords(B)
+    d = A - B
+    return float(np.sqrt((d * d).sum(axis=1).mean()))
+
+
+def _ring_orderings(seq):
+    """The dihedral-group set of a ring correspondence: every cyclic rotation of
+    `seq` and its reflection (reversed), de-duplicated. These are the mappings a
+    symmetric ring can take against a FIXED partner — what we enumerate to resolve
+    a phenyl-type ambiguity."""
+    k = len(seq)
+    out, seen = [], set()
+    for shift in range(k):
+        rot = list(seq[shift:]) + list(seq[:shift])
+        for cand in (rot, list(reversed(rot))):
+            t = tuple(cand)
+            if t not in seen:
+                seen.add(t)
+                out.append(cand)
+    return out
+
+
+def moiety_orderings(mobile):
+    """The finite, enumerable set of symmetry-equivalent correspondences a ring
+    moiety `mobile` can take against a fixed template — every cyclic rotation and
+    its reflection (see `_ring_orderings`). Public so the UI can size + step the
+    'try all ring orientations' control (there are len(...) of them)."""
+    return _ring_orderings([int(i) for i in mobile])
+
+
+def align_moiety(coords, template_coords, mobile, ref,
+                 anchor_mobile=None, anchor_ref=None, ordering=None):
+    """Rigidly move the whole molecule so its `mobile` atoms superpose on the
+    template's `ref` atoms (Kabsch best fit). `mobile`/`ref` are equal-length,
+    0-based index lists (mobile into `coords`, ref into `template_coords`).
+
+    Ring/symmetry resolution: a symmetric substructure (a phenyl ring fits ~7
+    ways) has a finite set of equally-valid mobile->ref mappings — one per ring
+    symmetry op (`moiety_orderings`). Resolve the ambiguity either way:
+      * `anchor_mobile`/`anchor_ref`: pass a few extra matched atoms (e.g. the
+        substituent-bearing carbons); every ordering is tried and the one whose
+        fit best matches the anchors is kept ("overlay the ring, then minimise
+        error to the rest").
+      * `ordering`: an explicit index into `moiety_orderings(mobile)` — force that
+        exact fit, no search. This is what the 'cycle through the N candidate ring
+        alignments in the preview' control drives (step the index, eyeball each).
+    With neither it's a single deterministic Kabsch on the order you gave.
+    Returns new coords."""
+    c = _coords(coords)
+    T = _coords(template_coords)
+    mobile = [int(i) for i in mobile]
+    ref = [int(j) for j in ref]
+    am = [int(i) for i in (anchor_mobile or [])]
+    ar = [int(j) for j in (anchor_ref or [])]
+    if len(mobile) != len(ref):
+        raise ValueError("the moiety atom lists must be the same length")
+    if len(mobile) < 3:
+        raise ValueError("moiety alignment needs at least 3 matched atom pairs")
+    if len(set(mobile)) != len(mobile) or len(set(ref)) != len(ref):
+        raise ValueError("moiety atom indices must be distinct")
+    if len(am) != len(ar):
+        raise ValueError("the anchor atom lists must be the same length")
+    n, nt = len(c), len(T)
+    if not all(0 <= i < n for i in mobile + am):
+        raise ValueError("a molecule atom index is out of range")
+    if not all(0 <= j < nt for j in ref + ar):
+        raise ValueError("a template atom index is out of range")
+
+    Q_moi = T[ref]
+    Q_anc = T[ar] if ar else None
+    if ordering is not None:
+        all_ord = _ring_orderings(mobile)
+        orderings = [all_ord[int(ordering) % len(all_ord)]]   # one forced fit
+    elif am:
+        orderings = _ring_orderings(mobile)
+    else:
+        orderings = [mobile]
+    best = None
+    for order in orderings:
+        P = c[order + am] if am else c[order]
+        Q = np.vstack([Q_moi, Q_anc]) if am else Q_moi
+        R, Pc, Qc = kabsch(P, Q)
+        if am:                                   # tie-break on the anchors
+            score = _rmsd((c[am] - Pc).dot(R.T) + Qc, Q_anc)
+        else:
+            score = _rmsd((c[order] - Pc).dot(R.T) + Qc, Q_moi)
+        if best is None or score < best[0]:
+            best = (score, R, Pc, Qc)
+    _, R, Pc, Qc = best
+    return (c - Pc).dot(R.T) + Qc
+
+
 def inertia_axes(symbols, coords):
     """(com, axes) — principal axes of the mass-weighted inertia tensor, rows
     sorted by moment ASCENDING (axes[0] = smallest moment = the long axis)."""
@@ -452,7 +562,7 @@ def min_distance(coords_a, coords_b):
 # The ops-list interpreter (what a Transform node's config stores)
 # ---------------------------------------------------------------------------
 OP_TYPES = ("translate", "rotate", "center", "mirror", "align_axis", "align_plane",
-            "set_plane_angle", "align_principal", "set_dihedral")
+            "set_plane_angle", "align_principal", "align_moiety", "set_dihedral")
 
 
 def apply_ops(symbols, coords, ops):
@@ -494,6 +604,12 @@ def _apply_one(symbols, c, op):
                                op.get("plane", "xy"), float(op.get("angle", 0.0)))
     if kind == "align_principal":
         return align_principal(symbols, c, op.get("order", "xyz"))
+    if kind == "align_moiety":
+        tpl = op.get("template") or []
+        tcoords = [[row[-3], row[-2], row[-1]] for row in tpl]
+        return align_moiety(c, tcoords, op.get("mobile", []), op.get("ref", []),
+                            op.get("anchor_mobile"), op.get("anchor_ref"),
+                            ordering=op.get("ordering"))
     if kind == "set_dihedral":
         a, b, cc, d = [int(t) for t in op.get("atoms", [])]
         return set_dihedral(symbols, c, a, b, cc, d, float(op.get("angle", 0.0)))
@@ -590,6 +706,42 @@ def validate_ops(ops, n_atoms=None):
             order = (op.get("order") or "xyz").strip().lower()
             if sorted(order) != ["x", "y", "z"]:
                 issues.append("op {}: order must be a permutation of xyz".format(k + 1))
+        elif kind == "align_moiety":
+            tpl = op.get("template") or []
+            mob = list(op.get("mobile") or [])
+            ref = list(op.get("ref") or [])
+            am = list(op.get("anchor_mobile") or [])
+            ar = list(op.get("anchor_ref") or [])
+            if not tpl:
+                issues.append("op {}: align_moiety needs a template geometry".format(k + 1))
+            if len(mob) != len(ref):
+                issues.append("op {}: the moiety atom lists must match in length".format(k + 1))
+            elif len(mob) < 3:
+                issues.append("op {}: moiety alignment needs at least 3 matched pairs"
+                              .format(k + 1))
+            if len(am) != len(ar):
+                issues.append("op {}: the anchor atom lists must match in length".format(k + 1))
+            if n_atoms is not None:
+                for v in mob + am:
+                    try:
+                        if not (0 <= int(v) < n_atoms):
+                            issues.append("op {}: molecule atom {} out of range".format(k + 1, v))
+                    except (TypeError, ValueError):
+                        issues.append("op {}: bad molecule atom index".format(k + 1))
+            for v in ref + ar:
+                try:
+                    if not (0 <= int(v) < len(tpl)):
+                        issues.append("op {}: template atom {} out of range".format(k + 1, v))
+                except (TypeError, ValueError):
+                    issues.append("op {}: bad template atom index".format(k + 1))
+            ordv = op.get("ordering")
+            if ordv is not None:
+                try:
+                    oi = int(ordv)
+                    if len(mob) >= 3 and not (0 <= oi < len(moiety_orderings(mob))):
+                        issues.append("op {}: ring orientation index out of range".format(k + 1))
+                except (TypeError, ValueError):
+                    issues.append("op {}: bad ring orientation index".format(k + 1))
         elif kind == "set_dihedral":
             atoms = op.get("atoms")
             if not (isinstance(atoms, (list, tuple)) and len(atoms) == 4):
@@ -646,6 +798,17 @@ def describe_op(op):
                 float(op.get("angle", 0)))
         if kind == "align_principal":
             return "align principal axes -> {}".format(op.get("order", "xyz"))
+        if kind == "align_moiety":
+            na = len(op.get("anchor_mobile") or [])
+            mob = op.get("mobile") or []
+            ordv = op.get("ordering")
+            if ordv is not None and len(mob) >= 3:
+                extra = ", orient {}/{}".format(int(ordv) + 1, len(moiety_orderings(mob)))
+            elif na:
+                extra = " + {} anchors".format(na)
+            else:
+                extra = ""
+            return "align moiety ({} atoms{}) onto a template".format(len(mob), extra)
         if kind == "set_dihedral":
             return "set dihedral D({}) = {:g} deg".format(
                 ",".join(str(a) for a in op.get("atoms", [])), float(op.get("angle", 0)))

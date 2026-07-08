@@ -49,8 +49,21 @@ def _print_usage():
     print("                      chain (login node) or run them locally in order (plain")
     print("                      machine). Design the project in the GUI, copy project.json +")
     print("                      XYZ_INI/ to the cluster, then run this - no Generate step")
-    print("                      needed. Add --local or --slurm to force the mode, or")
+    print("                      needed (it also generates any missing geometries from")
+    print("                      SMILES). Add --local or --slurm to force the mode,")
+    print("                      --confirm to list the plan and prompt before running, or")
     print("                      --no-expand to run only already-generated calcs.")
+    print("  --archive_export PROJECT.json")
+    print("                      Headless, no GUI: bundle the project (project.json +")
+    print("                      calcs/ + XYZ_INI/ + TRANSFORM/) into one archive, first")
+    print("                      generating all plots into FIGS_EXPORT/. Options:")
+    print("                        --out PATH          archive path (default <proj>_export.<fmt>)")
+    print("                        --archive-format F  tar.gz (default) | zip | tar | tar.bz2 |")
+    print("                                            tar.xz | 7z | rar   (7z/rar need --archiver)")
+    print("                        --fig-format F      svg (default) | png | pdf | jpg | tiff")
+    print("                        --no-figs           skip figure generation")
+    print("                        --stack-offset F    stacked-plot offset (default 0.5)")
+    print("                        --archiver PATH     7-Zip/WinRAR exe (only for 7z/rar)")
     print("  --simple, --gateway_mode")
     print("                      Lightweight mode: load only the core pipeline tabs")
     print("                      (Molecules/Recipes/Calculations/Report), build them")
@@ -91,9 +104,46 @@ def _cli():
             print("error: --execute_project needs a path to a project .json file")
             sys.exit(2)
         force = "local" if "--local" in sys.argv else ("slurm" if "--slurm" in sys.argv else None)
+
+        def _tty_confirm(calcs, mode):
+            try:
+                ans = input("\nProceed with {} calc(s) in {} mode? [y/N] ".format(
+                    len(calcs), mode))
+            except EOFError:
+                print("(no input available — cancelling)")
+                return False
+            return ans.strip().lower() in ("y", "yes")
+
         from orca_workbench.core.project_runner import execute_project_file
         msg = execute_project_file(sys.argv[idx + 1], force=force,
-                                   expand="--no-expand" not in sys.argv)
+                                   expand="--no-expand" not in sys.argv,
+                                   confirm=_tty_confirm if "--confirm" in sys.argv else None)
+        print(msg)
+        sys.exit(1 if msg.startswith("error") else 0)
+
+    # Headless project archive/export — no display needed.
+    if "--archive_export" in sys.argv:
+        idx = sys.argv.index("--archive_export")
+        if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith("-"):
+            print("error: --archive_export needs a path to a project .json file")
+            sys.exit(2)
+
+        def _opt(flag, default=None):
+            if flag in sys.argv:
+                j = sys.argv.index(flag)
+                if j + 1 < len(sys.argv):
+                    return sys.argv[j + 1]
+            return default
+
+        from orca_workbench.core.archive import archive_project_file
+        msg = archive_project_file(
+            sys.argv[idx + 1],
+            out=_opt("--out"),
+            fmt=_opt("--archive-format", "tar.gz"),
+            include_figures="--no-figs" not in sys.argv,
+            img_format=_opt("--fig-format", "svg"),
+            offset_frac=float(_opt("--stack-offset", "0.5")),
+            external_tool=_opt("--archiver"))
         print(msg)
         sys.exit(1 if msg.startswith("error") else 0)
 
