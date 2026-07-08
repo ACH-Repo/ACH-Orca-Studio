@@ -257,7 +257,9 @@ def _nmr_traces_by_element(records):
             elems.setdefault(row["element"], []).append(row["isotropic_ppm"])
         for el, sigmas in elems.items():
             lo, hi = _S.auto_range(sigmas, min_pad=5.0)
-            xs, ys = _S.broaden(sigmas, None, lo, hi, n=1200, fwhm=2.0)
+            # Adaptive grid keeps sharp NMR lines crisp across a wide shielding range.
+            grid = _S.adaptive_grid(sigmas, lo, hi, 2.0)
+            xs, ys = _S.broaden_at(sigmas, None, grid, fwhm=2.0)
             by_el.setdefault(el, []).append(
                 {"label": "{} / {}".format(r["molecule"], r["recipe"]),
                  "color": color_of(len(by_el.get(el, []))), "xs": xs, "ys": ys})

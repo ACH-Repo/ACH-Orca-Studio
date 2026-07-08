@@ -1136,9 +1136,12 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
         self.nucleus_label = nucleus_label
         self.reference = reference
         self.fwhm_var = tk.DoubleVar(value=0.2)
+        self.labels_var = tk.BooleanVar(value=False)   # peak-shift labels (off by default)
         self.xmin_var = tk.StringVar(value="")
         self.xmax_var = tk.StringVar(value="")
         self._user_xlim = None
+        self._fwhm = 0.2
+        self._last_hover = object()   # sentinel so the first hover always draws
         self._build_ui("No {} nuclei found in the selected calculations.".format(nucleus_label))
 
     def add_controls(self, bar):
@@ -1147,6 +1150,8 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
                          command=self._redraw)
         sp.pack(side=tk.LEFT, padx=6)
         sp.bind("<Return>", lambda e: self._redraw())
+        ttk.Checkbutton(bar, text="Peak labels", variable=self.labels_var,
+                        command=self._redraw).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(bar, text="x-range:").pack(side=tk.LEFT, padx=(12, 2))
         e1 = ttk.Entry(bar, textvariable=self.xmin_var, width=7); e1.pack(side=tk.LEFT)
         ttk.Label(bar, text="to").pack(side=tk.LEFT, padx=2)
@@ -1184,6 +1189,8 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
 
     def plot(self, ax):
         fwhm = max(0.01, float(self.fwhm_var.get()))
+        self._fwhm = fwhm
+        self._last_hover = object()   # a fresh draw re-arms the hover caption
         # Determine the view range first (user override, else auto), and broaden the
         # curves over that whole range (plus a margin) so they fill the axis rather
         # than stopping at the data's auto-range edges.
@@ -1198,7 +1205,10 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
         ymax = 0.0
         curves = []
         for m in self.mols:
-            xs, ys = S.broaden(m["shifts"], None, grid_lo, grid_hi, n=1600, fwhm=fwhm)
+            # Adaptive grid: sharp NMR lines stay crisp when zoomed no matter how
+            # wide the ppm axis is (a fixed uniform grid under-samples them).
+            grid = S.adaptive_grid(m["shifts"], grid_lo, grid_hi, fwhm)
+            xs, ys = S.broaden_at(m["shifts"], None, grid, fwhm=fwhm)
             curves.append((m, xs, ys))
             if ys:
                 ymax = max(ymax, max(ys))
@@ -1208,14 +1218,39 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
             m["_base"] = base
             ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.4, label=m["short"])
 
+        # Peak-shift labels (Mestrenova-style: the ppm value in a vertical caption
+        # above each peak apex, coloured to its trace). Off by default; when off the
+        # value still appears on hover (see _hover).
+        if self.labels_var.get():
+            for m in self.mols:
+                for c in m["shifts"]:
+                    if view_lo <= c <= view_hi or view_hi <= c <= view_lo:
+                        self._draw_shift_label(ax, m, c, fwhm, bold=False)
+
         xlabel = ("chemical shift δ (ppm)" if self.reference is not None
                   else "isotropic shielding σ (ppm)")
         # NMR convention: high shift / low shielding on the left (axis reversed).
         ax.set_xlim(view_hi, view_lo)
-        ax.set_ylim(0, (ref + self.stack_top(ref)) * 1.12)
+        ax.set_ylim(0, (ref + self.stack_top(ref)) * 1.18)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("intensity (a.u.)")
         ax.set_title("Simulated {} NMR".format(self.nucleus_label))
+
+    def _peak_apex(self, m, center, fwhm):
+        """y of a peak's apex (baseline + the summed Lorentzian at that center)."""
+        return m.get("_base", 0.0) + sum(S.lorentzian(center, c, fwhm) for c in m["shifts"])
+
+    def _draw_shift_label(self, ax, m, center, fwhm, bold=False, hover=False):
+        """A vertical ppm caption above a peak apex. Persistent labels are drawn in
+        plot(); hover labels go through _hover_artists so they clear on the next move."""
+        apex = self._peak_apex(m, center, fwhm)
+        art = ax.annotate("{:.2f}".format(center), xy=(center, apex),
+                          xytext=(0, 3), textcoords="offset points", rotation=90,
+                          ha="center", va="bottom", fontsize=9 if hover else 8,
+                          color=m["color"], clip_on=False,
+                          fontweight="bold" if bold else "normal")
+        if hover:
+            self._hover_artists.append(art)
 
     def after_plot(self, ax):
         # reflect the active x-range in the entry boxes (only when auto)
@@ -1228,20 +1263,32 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
         ax = self.ax
         if ax is None:
             return
-        if event.inaxes is not ax or event.xdata is None:
-            self._set_active(None)
-            return
         # Work in data units (ppm) so it's symmetric about each peak and independent
         # of the display's pixel scaling.
-        x0, x1 = ax.get_xlim()
-        tol = abs(x1 - x0) * 0.025 or 0.5
-        best, best_d = None, 1e9
-        for mi, m in enumerate(self.mols):
-            for sh in m["shifts"]:
-                d = abs(sh - event.xdata)
-                if d < best_d:
-                    best_d, best = d, mi
-        self._set_active(best if best_d <= tol else None)
+        best, best_center, best_d = None, None, 1e9
+        if event.inaxes is ax and event.xdata is not None:
+            x0, x1 = ax.get_xlim()
+            tol = abs(x1 - x0) * 0.025 or 0.5
+            for mi, m in enumerate(self.mols):
+                for sh in m["shifts"]:
+                    d = abs(sh - event.xdata)
+                    if d < best_d:
+                        best_d, best, best_center = d, mi, sh
+            if best_d > tol:
+                best, best_center = None, None
+        # Only redraw when the hovered peak actually changes — over ThinLinc a
+        # per-motion redraw storm lags the framebuffer (see the project's redraw rule).
+        key = (best, best_center)
+        if key == self._last_hover:
+            return
+        self._last_hover = key
+        self._clear_hover()
+        self._set_active(best)
+        # When persistent labels are off, show the hovered peak's shift as a caption.
+        if best is not None and not self.labels_var.get():
+            self._draw_shift_label(ax, self.mols[best], best_center, self._fwhm,
+                                   bold=True, hover=True)
+        self.canvas.draw_idle()
 
 
 _KNOWN_IMG_EXT = {".png", ".pdf", ".svg", ".svgz", ".jpg", ".jpeg",
