@@ -83,6 +83,8 @@ def install_global_text_shortcuts(root):
     select-all, undo/redo and word-wise motion/selection with no per-widget wiring.
     Covers ttk.Entry ('TEntry'), classic Entry/Spinbox, and tk.Text. Handlers
     return 'break' to suppress Tk's conflicting defaults (e.g. Ctrl+A = home)."""
+    global _ROOT
+    _ROOT = root
     entry_classes = ("TEntry", "Entry", "Spinbox", "TSpinbox")
     for cls in entry_classes:
         root.bind_class(cls, "<Control-a>", _entry_select_all, add="+")
@@ -121,6 +123,34 @@ def install_global_text_shortcuts(root):
 
 # ------------------------------------------------------------- Entry undo/redo
 
+# Set by install_global_text_shortcuts; used to resolve a widget path string back
+# to its widget object (see _entry_widget).
+_ROOT = None
+
+
+def _entry_widget(event):
+    """The widget that fired an entry class-binding, or None.
+
+    On some Tk builds (seen on the LiDO3 gateway's conda Tk 8.6) event.widget
+    arrives as the widget PATH STRING, not the widget object — Tkinter's automatic
+    nametowidget() lookup KeyError'd because the widget wasn't created through
+    Python Tkinter (e.g. a ttk-internal element). Left as-is, that string then hits
+    w.get() / w._undo_state and raises AttributeError ('str' object has no
+    attribute ...), spamming the callback. Resolve it via the root when possible;
+    otherwise return None so the handler skips gracefully (the field keeps Tk's
+    default behaviour — we just don't layer our undo/word-nav onto that widget)
+    instead of crashing."""
+    w = event.widget
+    if not isinstance(w, str):
+        return w
+    if _ROOT is not None:
+        try:
+            return _ROOT.nametowidget(w)
+        except (KeyError, tk.TclError):
+            return None
+    return None
+
+
 def _entry_state(w):
     st = getattr(w, "_undo_state", None)
     if st is None:
@@ -131,7 +161,9 @@ def _entry_state(w):
 def _entry_focus_baseline(event):
     """Seed the undo history with the value present when the field gains focus, and
     break any in-progress typing run so the next keystroke starts a fresh step."""
-    w = event.widget
+    w = _entry_widget(event)
+    if w is None:
+        return
     st = _entry_state(w)
     if not st["undo"]:
         try:
@@ -145,7 +177,9 @@ def _entry_record(event):
     """After a text-changing keystroke, snapshot the field. Runs of typed word
     characters coalesce into ONE undo step (word-level undo); anything else starts
     a new step. Skips Control-held keys (those are shortcuts, not edits)."""
-    w = event.widget
+    w = _entry_widget(event)
+    if w is None:
+        return
     if event.state & _CONTROL_MASK:
         return
     try:
@@ -183,7 +217,9 @@ def _entry_apply(w, val, pos):
 
 
 def _entry_undo(event):
-    w = event.widget
+    w = _entry_widget(event)
+    if w is None:
+        return
     st = _entry_state(w)
     if len(st["undo"]) < 2:
         return "break"
@@ -195,7 +231,9 @@ def _entry_undo(event):
 
 
 def _entry_redo(event):
-    w = event.widget
+    w = _entry_widget(event)
+    if w is None:
+        return
     st = _entry_state(w)
     if not st["redo"]:
         return "break"
@@ -238,14 +276,18 @@ def _entry_see_after(event):
     updated the selection and cursor (native runs first — it was bound earlier on the
     same class tag). Synchronous, not after_idle: over ThinLinc a deferred callback
     was landing too late/not at all. Returns None so the default still runs."""
-    _entry_see_insert(event.widget)
+    w = _entry_widget(event)
+    if w is not None:
+        _entry_see_insert(w)
     return None
 
 
 # ------------------------------------------------------- Entry word navigation
 
 def _entry_word_move(event, direction):
-    w = event.widget
+    w = _entry_widget(event)
+    if w is None:
+        return
     try:
         s, cur = w.get(), w.index("insert")
     except tk.TclError:
@@ -262,7 +304,9 @@ def _entry_word_move(event, direction):
 
 
 def _entry_word_select(event, direction):
-    w = event.widget
+    w = _entry_widget(event)
+    if w is None:
+        return
     try:
         s, cur = w.get(), w.index("insert")
     except tk.TclError:
@@ -451,7 +495,9 @@ def _text_redo(event):
 
 
 def _entry_select_all(event):
-    w = event.widget
+    w = _entry_widget(event)
+    if w is None:
+        return
     try:
         w.select_range(0, "end")
         w.icursor("end")

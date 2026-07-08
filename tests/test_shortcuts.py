@@ -58,3 +58,37 @@ def test_edges_and_empty():
     assert next_word_boundary("", 0) == 0
     assert prev_word_boundary("", 0) == 0
     assert next_word_boundary("ab", 5) == 2   # pos past end clamps to len(text)
+
+
+# --- Regression: entry class-bindings must survive a string event.widget -------
+# On the LiDO3 gateway's conda Tk, event.widget can arrive as the widget PATH
+# STRING (Tkinter's nametowidget lookup KeyError'd for an untracked ttk-internal
+# widget). The handlers used to do w.get()/w._undo_state and crash with
+# "'str' object has no attribute ...". They must now bail instead.
+
+class _StrEvent:
+    def __init__(self, widget=".!frame.!ghost", state=0, char="a"):
+        self.widget = widget
+        self.state = state
+        self.char = char
+
+
+def test_entry_handlers_survive_string_widget():
+    from orca_workbench.ui import shortcuts as sc
+    # _ROOT unset (or unresolvable path) -> every handler returns without raising.
+    ev = _StrEvent()
+    sc._entry_focus_baseline(ev)
+    sc._entry_record(ev)
+    sc._entry_undo(ev)
+    sc._entry_redo(ev)
+    sc._entry_select_all(ev)
+    sc._entry_word_move(ev, 1)
+    sc._entry_word_select(ev, -1)
+    sc._entry_see_after(ev)
+    assert sc._entry_widget(_StrEvent("no.such.path")) is None
+
+
+def test_entry_widget_passes_through_real_widget():
+    from orca_workbench.ui import shortcuts as sc
+    obj = object()
+    assert sc._entry_widget(_StrEvent(widget=obj)) is obj   # non-str -> as-is
