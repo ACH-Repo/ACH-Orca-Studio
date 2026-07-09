@@ -175,3 +175,55 @@ def test_export_archive_no_figures(tmp_path):
     assert summary["n_figures"] == 0
     assert not (tmp_path / "FIGS_EXPORT").exists()
     assert os.path.isfile(out)
+
+
+# ---------------------------------------------------------------- exclude/compress
+
+def _tree_with_heavy(tmp_path):
+    (tmp_path / "calcs").mkdir()
+    (tmp_path / "proj.json").write_text("{}")
+    (tmp_path / "calcs" / "000.out").write_text("FINAL SINGLE POINT ENERGY -76.0\n")
+    (tmp_path / "calcs" / "000.xyz").write_text("1\n\nO 0 0 0\n")
+    (tmp_path / "calcs" / "000.gbw").write_text("X" * 20000)      # big binary
+    (tmp_path / "calcs" / "000.tmp").write_text("scratch")
+    (tmp_path / "calcs" / "000.cpcm").write_text("scratch")
+
+
+def test_default_exclude_drops_gbw_and_scratch_keeps_results(tmp_path):
+    _tree_with_heavy(tmp_path)
+    out = str(tmp_path / "a.tar.gz")
+    archive.create_archive(out, str(tmp_path), ["proj.json", "calcs"], fmt="tar.gz",
+                           exclude=archive.DEFAULT_EXCLUDE)
+    with tarfile.open(out) as tf:
+        base = [os.path.basename(n) for n in tf.getnames()]
+    assert "000.gbw" not in base and "000.tmp" not in base and "000.cpcm" not in base
+    assert "000.out" in base and "000.xyz" in base and "proj.json" in base
+
+
+def test_keep_heavy_includes_gbw(tmp_path):
+    _tree_with_heavy(tmp_path)
+    out = str(tmp_path / "b.tar.gz")
+    archive.create_archive(out, str(tmp_path), ["calcs"], fmt="tar.gz", exclude=None)
+    with tarfile.open(out) as tf:
+        base = [os.path.basename(n) for n in tf.getnames()]
+    assert "000.gbw" in base
+
+
+def test_exclude_applies_to_zip_and_shrinks_archive(tmp_path):
+    _tree_with_heavy(tmp_path)
+    excl = str(tmp_path / "small.zip")
+    full = str(tmp_path / "full.zip")
+    archive.create_archive(excl, str(tmp_path), ["calcs"], fmt="zip",
+                           exclude=archive.DEFAULT_EXCLUDE, compresslevel=0)
+    archive.create_archive(full, str(tmp_path), ["calcs"], fmt="zip", exclude=None)
+    with zipfile.ZipFile(excl) as zf:
+        names = [os.path.basename(n) for n in zf.namelist()]
+    assert "000.gbw" not in names and "000.out" in names
+    assert os.path.getsize(excl) < os.path.getsize(full)
+
+
+def test_is_excluded_matches_basename():
+    assert archive._is_excluded("/x/y/foo.gbw", archive.DEFAULT_EXCLUDE)
+    assert archive._is_excluded("bar.tmp", archive.DEFAULT_EXCLUDE)
+    assert not archive._is_excluded("keep.out", archive.DEFAULT_EXCLUDE)
+    assert not archive._is_excluded("foo.gbw", None)

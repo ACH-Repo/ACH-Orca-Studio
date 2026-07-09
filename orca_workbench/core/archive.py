@@ -40,9 +40,28 @@ _STDLIB_TAR_MODES = {
 }
 STDLIB_FORMATS = list(_STDLIB_TAR_MODES.keys()) + ["zip"]
 
+# Large, regenerable ORCA files excluded by default so a project archive stays
+# small and fast to write (a finished project is dominated by binary wavefunction
+# and scratch files that compress poorly and can be re-made by re-running). The
+# .out / .xyz / .hess / .inp results are kept. Matched by fnmatch on the BASENAME.
+# NOTE: dropping .gbw means the archive can't do a MOREAD restart or regenerate
+# cubes without re-running the SCF — a deliberate size/completeness trade-off,
+# switchable off (keep_heavy / the dialog checkbox / --keep-heavy).
+DEFAULT_EXCLUDE = ["*.gbw", "*.tmp", "*.tmp.*", "*.cpcm", "*.densities",
+                   "*.densitiesinfo", "*.ges", "*.bas.tmp", "*.nbo"]
+
 
 def _abs(root, rel):
     return rel if os.path.isabs(rel) else os.path.join(root, rel)
+
+
+def _is_excluded(path, patterns):
+    """True if a file's basename matches any fnmatch pattern in `patterns`."""
+    if not patterns:
+        return False
+    import fnmatch
+    base = os.path.basename(path)
+    return any(fnmatch.fnmatch(base, pat) for pat in patterns)
 
 
 # --------------------------------------------------------------- result collector
@@ -130,15 +149,19 @@ def format_needs_external(fmt):
     return normalize_format(fmt) not in STDLIB_FORMATS
 
 
-def _iter_member_files(abs_path):
-    """Yield (abs_file, rel_to_member) for a file or every file under a directory."""
+def _iter_member_files(abs_path, exclude=None):
+    """Yield (abs_file, rel_to_member) for a file or every file under a directory,
+    skipping files whose basename matches an `exclude` fnmatch pattern."""
     if os.path.isfile(abs_path):
-        yield abs_path, os.path.basename(abs_path)
+        if not _is_excluded(abs_path, exclude):
+            yield abs_path, os.path.basename(abs_path)
         return
     base = os.path.dirname(abs_path.rstrip(os.sep))
     for dirpath, _dirs, files in os.walk(abs_path):
         for fn in files:
             fp = os.path.join(dirpath, fn)
+            if _is_excluded(fp, exclude):
+                continue
             yield fp, os.path.relpath(fp, base)
 
 
@@ -149,15 +172,22 @@ def existing_members(root, members):
 
 
 def create_archive(out_path, root, members, fmt="tar.gz", arc_root=None,
-                   external_tool=None, log=None):
-    # type: (str, str, List[str], str, Optional[str], Optional[str], Optional[Callable]) -> str
+                   external_tool=None, exclude=None, compresslevel=6, log=None):
+    # type: (str, str, List[str], str, Optional[str], Optional[str], Optional[List[str]], int, Optional[Callable]) -> str
     """Pack `members` (paths relative to `root`) into `out_path`.
 
     `fmt` selects the container; a stdlib format (tar.gz/tar/zip/tar.bz2/tar.xz)
     is written with tarfile/zipfile, otherwise (or when `external_tool` is given)
     the archiver executable is invoked as `<tool> a <archive> <members>`. Every
     packed path is nested under `arc_root` (default: the archive's base name) so
-    it extracts into one tidy folder. Returns `out_path`; raises on failure."""
+    it extracts into one tidy folder.
+
+    `exclude` is a list of fnmatch patterns (matched on each file's basename) to
+    skip — the big regenerable ORCA files, which dominate a project's size and
+    compress poorly (see DEFAULT_EXCLUDE). `compresslevel` (0-9, gz/bz2/zip only;
+    lower = faster, bigger) tunes the speed/size trade-off. Both apply to the
+    stdlib formats; the external-archiver path packs the members verbatim.
+    Returns `out_path`; raises on failure."""
     log = log or (lambda m: None)
     members = existing_members(root, members)
     if not members:
@@ -189,17 +219,30 @@ def create_archive(out_path, root, members, fmt="tar.gz", arc_root=None,
 
     if fmt == "zip":
         import zipfile
-        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED,
+                             compresslevel=compresslevel) as zf:
             for m in members:
-                for fp, rel in _iter_member_files(_abs(root, m)):
+                for fp, rel in _iter_member_files(_abs(root, m), exclude=exclude):
                     zf.write(fp, arcname=os.path.join(arc_root, rel))
                 log("added {}".format(m))
     else:
         import tarfile
         mode = _STDLIB_TAR_MODES[fmt]
-        with tarfile.open(out_path, mode) as tf:
+        # compresslevel applies to gz/bz2; plain tar and xz don't take it.
+        open_kwargs = {}
+        if mode in ("w:gz", "w:bz2"):
+            open_kwargs["compresslevel"] = compresslevel
+
+        def _filter(tarinfo):
+            # Drop excluded files; keep directories/links so the tree is intact.
+            if tarinfo.isfile() and _is_excluded(tarinfo.name, exclude):
+                return None
+            return tarinfo
+
+        with tarfile.open(out_path, mode, **open_kwargs) as tf:
             for m in members:
-                tf.add(_abs(root, m), arcname=os.path.join(arc_root, m))
+                tf.add(_abs(root, m), arcname=os.path.join(arc_root, m),
+                       filter=_filter)
                 log("added {}".format(m))
     return out_path
 
@@ -208,9 +251,12 @@ def create_archive(out_path, root, members, fmt="tar.gz", arc_root=None,
 
 def export_archive(project, recipe_by_name, out_path, fmt="tar.gz",
                    include_figures=True, img_format="svg", stacked=True,
-                   offset_frac=0.5, members=None, external_tool=None, log=None):
+                   offset_frac=0.5, members=None, external_tool=None,
+                   exclude=None, compresslevel=6, log=None):
     # type: (...) -> dict
-    """Build the FIGS_EXPORT figures (optional) then pack the project. Returns a
+    """Build the FIGS_EXPORT figures (optional) then pack the project. `exclude`
+    (fnmatch patterns) and `compresslevel` are forwarded to create_archive — pass
+    exclude=DEFAULT_EXCLUDE to drop the big regenerable ORCA files. Returns a
     summary dict {archive, n_figures, members, figures, warnings}."""
     log = log or (lambda m: None)
     root = project.root()
@@ -233,7 +279,8 @@ def export_archive(project, recipe_by_name, out_path, fmt="tar.gz",
             members.append(os.path.basename(project.path))
         members += DEFAULT_MEMBER_DIRS
     members = existing_members(root, members)
-    create_archive(out_path, root, members, fmt=fmt, external_tool=external_tool, log=log)
+    create_archive(out_path, root, members, fmt=fmt, external_tool=external_tool,
+                   exclude=exclude, compresslevel=compresslevel, log=log)
     return {"archive": out_path, "n_figures": len(figures), "members": members,
             "figures": figures, "warnings": warnings}
 
@@ -246,12 +293,15 @@ def _default_out_path(project, fmt):
 
 def archive_project_file(path, out=None, fmt="tar.gz", include_figures=True,
                          img_format="svg", stacked=True, offset_frac=0.5,
-                         external_tool=None, log=None):
+                         external_tool=None, keep_heavy=False, compresslevel=6,
+                         log=None):
     # type: (...) -> str
     """Headless entry (the `--archive_export` CLI): load a project.json, build the
     figures + archive it. Recipes are loaded exactly like project_runner (so
-    calctypes resolve identically). Returns a one-line status ('error…' on
-    failure) for the CLI exit code."""
+    calctypes resolve identically). By default the big regenerable ORCA files
+    (.gbw, scratch) are excluded for a smaller/faster archive; `keep_heavy=True`
+    packs them too. Returns a one-line status ('error…' on failure) for the CLI
+    exit code."""
     log = log or (lambda m: print(m))
     if not os.path.isfile(path):
         return "error: no such project file: {}".format(path)
@@ -273,7 +323,9 @@ def archive_project_file(path, out=None, fmt="tar.gz", include_figures=True,
         summary = export_archive(
             project, recipe_by_name, out_path, fmt=fmt,
             include_figures=include_figures, img_format=img_format, stacked=stacked,
-            offset_frac=offset_frac, external_tool=external_tool, log=log)
+            offset_frac=offset_frac, external_tool=external_tool,
+            exclude=None if keep_heavy else DEFAULT_EXCLUDE,
+            compresslevel=compresslevel, log=log)
     except Exception as e:
         return "error: {}: {}".format(type(e).__name__, e)
     for w in summary.get("warnings", []):

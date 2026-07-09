@@ -64,6 +64,9 @@ def _print_usage():
     print("                        --no-figs           skip figure generation")
     print("                        --stack-offset F    stacked-plot offset (default 0.5)")
     print("                        --archiver PATH     7-Zip/WinRAR exe (only for 7z/rar)")
+    print("                        --keep-heavy        keep .gbw/scratch (default: excluded")
+    print("                                            for a much smaller/faster archive)")
+    print("                        --compression C     normal (default) | fast | store")
     print("  --simple, --gateway_mode")
     print("                      Lightweight mode: load only the core pipeline tabs")
     print("                      (Molecules/Recipes/Calculations/Report), build them")
@@ -135,6 +138,8 @@ def _cli():
                     return sys.argv[j + 1]
             return default
 
+        _levels = {"normal": 6, "fast": 1, "store": 0}
+        _clvl = _opt("--compression", "normal").lower()
         from orca_workbench.core.archive import archive_project_file
         msg = archive_project_file(
             sys.argv[idx + 1],
@@ -143,7 +148,9 @@ def _cli():
             include_figures="--no-figs" not in sys.argv,
             img_format=_opt("--fig-format", "svg"),
             offset_frac=float(_opt("--stack-offset", "0.5")),
-            external_tool=_opt("--archiver"))
+            external_tool=_opt("--archiver"),
+            keep_heavy="--keep-heavy" in sys.argv,
+            compresslevel=_levels.get(_clvl, 6))
         print(msg)
         sys.exit(1 if msg.startswith("error") else 0)
 

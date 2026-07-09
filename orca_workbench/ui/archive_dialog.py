@@ -43,6 +43,11 @@ class ArchiveExportDialog(tk.Toplevel):
                         variable=self.include_figs,
                         command=self._sync_enabled).pack(anchor=tk.W)
 
+        self.exclude_heavy = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frm, text="Exclude wavefunction & scratch files (.gbw, scratch) "
+                        "- much smaller & faster",
+                        variable=self.exclude_heavy).pack(anchor=tk.W)
+
         grid = ttk.Frame(frm)
         grid.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(grid, text="Plot image format:").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -68,6 +73,14 @@ class ArchiveExportDialog(tk.Toplevel):
         self.ext_note = ttk.Label(grid, text="", foreground="#a60", wraplength=250,
                                   justify=tk.LEFT)
         self.ext_note.grid(row=2, column=2, sticky=tk.W, pady=(8, 2))
+
+        ttk.Label(grid, text="Compression:").grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.compression = tk.StringVar(value="Normal")
+        ttk.Combobox(grid, textvariable=self.compression, state="readonly", width=10,
+                     values=["Normal", "Fast", "Store"]).grid(row=3, column=1,
+                                                              sticky=tk.W, padx=6, pady=2)
+        ttk.Label(grid, text="(Fast/Store = quicker, larger)",
+                  foreground="#777").grid(row=3, column=2, sticky=tk.W)
 
         self.log = tk.Text(frm, height=9, width=64, state=tk.DISABLED, wrap=tk.NONE,
                            font=("Courier", 9))
@@ -145,12 +158,14 @@ class ArchiveExportDialog(tk.Toplevel):
         self.export_btn.configure(state=tk.DISABLED)
         self._append("Exporting to {} ...".format(out_path))
         recipe_by_name = {r.name: r for r in self.app.recipes}
+        exclude = archive_mod.DEFAULT_EXCLUDE if self.exclude_heavy.get() else None
+        compresslevel = {"Normal": 6, "Fast": 1, "Store": 0}.get(self.compression.get(), 6)
         try:
             summary = archive_mod.export_archive(
                 proj, recipe_by_name, out_path, fmt=fmt,
                 include_figures=self.include_figs.get(), img_format=self.img_fmt.get(),
                 stacked=True, offset_frac=offset, external_tool=external_tool,
-                log=self._append)
+                exclude=exclude, compresslevel=compresslevel, log=self._append)
         except Exception as e:
             self._append("FAILED: {}: {}".format(type(e).__name__, e))
             messagebox.showerror("Archive Export", "Export failed:\n{}".format(e),
