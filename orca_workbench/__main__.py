@@ -30,6 +30,9 @@ def _print_usage():
     print("Usage: orca-workbench [PROJECT.json] [--diagnose | --check-backends | --help]")
     print("       Without arguments, launches the GUI with an empty project.")
     print()
+    print("  --version, -V       Print the version, install location, python, and the")
+    print("                      ORCA executable this install resolves — then exit. Use")
+    print("                      it to confirm the command is wired to the current code.")
     print("  PROJECT.json        Open this project file on startup.")
     print("  --diagnose, -d      Launch with live self-diagnostics ON. Times each tab")
     print("                      build / project load / tab switch as you use the app,")
@@ -79,6 +82,25 @@ def _print_usage():
 def _cli():
     if "--help" in sys.argv or "-h" in sys.argv:
         _print_usage()
+        sys.exit(0)
+    # Version + install location + the ORCA exe this install will actually invoke.
+    # If `orca-workbench --version` prints this and exits (rather than launching the
+    # GUI), you're on a build new enough to HAVE --version -- so it confirms the
+    # command is wired to the current code, and shows exactly which orca is used.
+    if "--version" in sys.argv or "-V" in sys.argv:
+        import orca_workbench
+        print("orca-workbench {}".format(getattr(orca_workbench, "__version__", "?")))
+        print("  package : {}".format(os.path.dirname(os.path.abspath(orca_workbench.__file__))))
+        print("  python  : {}".format(sys.executable))
+        try:
+            from orca_workbench.core import config as _cfg
+            from orca_workbench.core.local_runner import resolve_orca_exe
+            raw = _cfg.get("orca_path", "") or ""
+            print("  orca_path (config)  : {}".format(raw or "(not set)"))
+            print("  orca_path (resolved): {}".format(
+                resolve_orca_exe(raw) if raw else "(not set)"))
+        except Exception as e:
+            print("  orca_path: (could not read: {})".format(e))
         sys.exit(0)
     # Headless backend probe — kept separate so it works even without a display.
     if "--check-backends" in sys.argv:
