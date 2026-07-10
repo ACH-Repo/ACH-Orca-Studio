@@ -113,6 +113,8 @@ class LivePlotWindow(tk.Toplevel):
                         variable=self.auto_var).pack(side=tk.LEFT)
         ttk.Button(btns, text="Refresh now", command=self._update_once).pack(side=tk.LEFT, padx=6)
         ttk.Button(btns, text="Save image...", command=self._save).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Open .out (text)", command=self._open_out_text).pack(
+            side=tk.LEFT, padx=2)
         if self.trj_path:
             ttk.Button(btns, text="View current geometry (3D)...",
                        command=self._view_current_geometry).pack(side=tk.LEFT, padx=6)
@@ -190,6 +192,27 @@ class LivePlotWindow(tk.Toplevel):
             return
         from orca_workbench.ui.spectra import _save_figure
         _save_figure(self.fig, self)
+
+    def _open_out_text(self):
+        """Open the raw .out in the user's configured text editor. ORCA's text output
+        streams to the shared-FS .out even on the cluster (SLURM --output + line
+        buffering), so this works for a RUNNING job; it's only missing while the job is
+        still queued (PENDING) or for a purely local run that hasn't started."""
+        from tkinter import messagebox
+        if not (self.out_path and os.path.isfile(self.out_path)):
+            messagebox.showinfo(
+                "No output on disk yet",
+                "The output file isn't here yet:\n{}\n\nIf this is a cluster job it may "
+                "still be queued (PENDING) — ORCA's text output streams to the shared "
+                "filesystem once the job starts RUNNING. (Auxiliary files like the "
+                "trajectory / .gbw stay on the compute node's scratch until the job "
+                "finishes and are copied back then.)".format(self.out_path or "(unknown)"),
+                parent=self)
+            return
+        from orca_workbench.ui import extprog
+        extprog.open_with(self, "text_editor_path", self.out_path, "text editor",
+                          "Choose a plain-text editor for ORCA .out / .inp files "
+                          "(Notepad++, VS Code, gedit, ...).")
 
     # ------------------------------------------------- zoom/pan (multi-panel)
     def _drag_press(self, event):

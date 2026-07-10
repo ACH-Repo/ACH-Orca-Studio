@@ -88,6 +88,9 @@ class PlannedCalc(object):
     # Shape: {"constraints": [{type, atoms, value?}, ...], "scan": {type, atoms, start,
     # end, steps} | None}. Atom indices are 0-based (ORCA's convention).
     geom_spec: Optional[dict] = None
+    # Extra ORCA simple-input keywords appended to the `!` line at build time (e.g.
+    # "UseSym" to optimise within a point group). Free-form; None/"" = nothing added.
+    extra_keywords: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d):
@@ -99,6 +102,7 @@ class PlannedCalc(object):
         d.setdefault("origin_node", None)
         d.setdefault("orbital_source", None)
         d.setdefault("geom_spec", None)
+        d.setdefault("extra_keywords", None)
         return cls(**d)
 
     def children(self, project):

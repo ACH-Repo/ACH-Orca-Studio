@@ -157,11 +157,18 @@ def event_to_sequence(state, keysym):
 
 def sequence_variants(seq):
     # type: (str) -> "list"
-    """Sequences to actually bind for `seq`. When the key is a single letter we bind
-    BOTH cases — Tk treats '<...-f>' and '<...-F>' as different events, and with Shift
-    held the event's keysym is the UPPER-case letter. This matters even WITH modifiers:
-    a rebind to Ctrl+Shift+M is captured/stored as '<Control-Shift-m>', but the actual
-    keypress reports keysym 'M', so without the upper-case variant nothing fires."""
+    """Sequences to actually bind for `seq`.
+
+    Tk treats '<...-f>' and '<...-F>' as different events, and with **Shift** held the
+    event's keysym is the UPPER-case letter — so a Ctrl+Shift+M shortcut, stored as
+    '<Control-Shift-m>', only fires if we ALSO bind '<Control-Shift-M>'. We therefore
+    add the upper-case variant *only* when the sequence contains Shift.
+
+    Crucially we do NOT add the upper-case variant to a non-Shift modified key: binding
+    '<Control-S>' alongside '<Control-s>' would ALSO capture Ctrl+Shift+S, stealing it
+    from a distinct Shift shortcut (Save vs. Save-As, New vs. Add-by-name). A bare
+    letter (no modifiers, e.g. a plot 'f' key) still binds both cases so it survives
+    Caps Lock, where there's no separate Shift shortcut to collide with."""
     if not seq:
         return []
     inner = seq.strip("<>").replace("KeyPress-", "").replace("Key-", "")
@@ -171,11 +178,10 @@ def sequence_variants(seq):
         mods = parts[:-1]
         if mods:
             lo = "<" + "-".join(mods + [key.lower()]) + ">"
-            hi = "<" + "-".join(mods + [key.upper()]) + ">"
-        else:
-            lo = "<KeyPress-{}>".format(key.lower())
-            hi = "<KeyPress-{}>".format(key.upper())
-        return [lo, hi]
+            if any(m.lower() == "shift" for m in mods):
+                return [lo, "<" + "-".join(mods + [key.upper()]) + ">"]
+            return [lo]
+        return ["<KeyPress-{}>".format(key.lower()), "<KeyPress-{}>".format(key.upper())]
     return [seq]
 
 
@@ -189,6 +195,7 @@ def _register_defaults():
         ("app.new_project",  APP,  "New project",              "<Control-n>"),
         ("app.open_project", APP,  "Open project",             "<Control-o>"),
         ("app.save_project", APP,  "Save project",             "<Control-s>"),
+        ("app.save_as",      APP,  "Save project as",          "<Control-Shift-S>"),
         ("app.add_by_name",  APP,  "Add molecule by name",     "<Control-Shift-N>"),
         ("app.import_files", APP,  "Import structure files",   "<Control-Shift-O>"),
         ("app.refresh",      APP,  "Refresh / status (F5)",    "<F5>"),

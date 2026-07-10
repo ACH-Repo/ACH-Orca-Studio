@@ -219,6 +219,7 @@ def expand_project_workflow(project, calc_done=None, log=None):
     def factory(mol, recipe_name, category, geometry_source, parent_id, gate, origin_node):
         onode = wf.node(origin_node)
         gspec = onode.config.get("geom_spec") if onode is not None else None
+        xkw = onode.config.get("extra_keywords") if onode is not None else None
         existing = find_existing_calc(project, origin_node, mol, category, recipe_name)
         if existing is not None:
             if getattr(existing, "origin_node", None) is None:
@@ -231,11 +232,12 @@ def expand_project_workflow(project, calc_done=None, log=None):
                 existing.parent_id = parent_id
                 existing.gate = gate
                 existing.geom_spec = gspec
+                existing.extra_keywords = xkw
             return existing
         return PlannedCalc(id=new_calc_id(), molecule_filename=mol, recipe_name=recipe_name,
                            category=category, geometry_source=geometry_source,
                            parent_id=parent_id, gate=gate, origin_node=origin_node,
-                           geom_spec=gspec)
+                           geom_spec=gspec, extra_keywords=xkw)
 
     backend = GeometryBackend(project)
     calcs, warnings, _node_map = wf_mod.expand_to_calcs(wf, mol_files, factory,

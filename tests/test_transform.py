@@ -26,6 +26,31 @@ CHAIN = np.array([
 ])
 
 
+def test_flatten_zeros_perpendicular_axis():
+    # a non-planar chain -> flatten onto xy sets every z to 0 (planar), x/y untouched
+    out = T.flatten(CHAIN, "xy")
+    assert np.allclose(out[:, 2], 0.0)
+    assert np.allclose(out[:, :2], CHAIN[:, :2])
+    # yz -> zero x; xz -> zero y
+    assert np.allclose(T.flatten(CHAIN, "yz")[:, 0], 0.0)
+    assert np.allclose(T.flatten(CHAIN, "xz")[:, 1], 0.0)
+    # subset only: flatten atoms 0 and 1, leave 2 and 3 alone
+    sub = T.flatten(CHAIN, "xy", atoms=[0, 1])
+    assert sub[0, 2] == 0.0 and sub[1, 2] == 0.0
+    assert sub[2, 2] == CHAIN[2, 2] and sub[3, 2] == CHAIN[3, 2]
+    with pytest.raises(ValueError):
+        T.flatten(CHAIN, "bad")
+
+
+def test_flatten_via_ops_and_validate():
+    out = T.apply_ops(CHAIN_SYMS, CHAIN, [{"op": "flatten", "plane": "xy"}])
+    assert np.allclose(np.asarray(out)[:, 2], 0.0)
+    assert T.validate_ops([{"op": "flatten", "plane": "xy"}]) == []
+    assert T.validate_ops([{"op": "flatten", "plane": "nope"}])
+    assert T.validate_ops([{"op": "flatten", "plane": "xy", "atoms": [9]}], n_atoms=4)
+    assert "flatten" in T.describe_op({"op": "flatten", "plane": "xy"})
+
+
 def test_translate_and_centroid():
     c = T.translate(CHAIN, [1.0, -2.0, 0.5])
     assert np.allclose(c[1], [1.0, -2.0, 0.5])

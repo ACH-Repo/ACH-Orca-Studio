@@ -180,7 +180,17 @@ class ProjectRunner(object):
                 inp = inputs_mod.add_moread(inp, gbw)
         gspec = getattr(calc, "geom_spec", None)
         if not geomspec_mod.is_empty(gspec):
-            inp = inputs_mod.add_geom_block(inp, geomspec_mod.build_geom_inner(gspec))
+            # Resolve geometry-derived scan/constraint values against the INPUT
+            # geometry (see calculations_tab._build_one) — measure from the molecule's
+            # own coordinates even in the chained (xyzfile) case.
+            try:
+                meas_atoms = self._embed_atoms(calc, mol)
+            except Exception:
+                meas_atoms = None
+            inp = inputs_mod.add_geom_block(inp, geomspec_mod.build_geom_inner(gspec, meas_atoms))
+        xkw = getattr(calc, "extra_keywords", None)
+        if xkw:
+            inp = inputs_mod.add_keywords(inp, xkw)
         gcores = int(config_mod.get("default_cores", 0) or 0)
         if gcores > 0:
             inp = inputs_mod.set_cores(inp, gcores)
@@ -345,7 +355,10 @@ class ProjectRunner(object):
     def _execute_local(self, calcs, n_skipped):
         """Run each calc with a local ORCA, in dependency order, embedding a
         finished parent's optimised geometry."""
-        orca = config_mod.get("orca_path") or "orca"
+        # Full pathname: ORCA refuses parallel (%pal nprocs>1) runs unless argv[0] is
+        # absolute (it derives its install dir from argv[0] for the MPI launch).
+        from orca_workbench.core.local_runner import resolve_orca_exe
+        orca = resolve_orca_exe(config_mod.get("orca_path") or "orca")
         import subprocess
         built = launched = failed = 0
         for c in calcs:

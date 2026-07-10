@@ -98,6 +98,49 @@ def test_relink_files_take_priority_over_queue(tmp_path):
     assert proj.planned_calcs[0].job_id == "555"   # file wins
 
 
+def test_relink_from_local_run_output(tmp_path):
+    # A calc run locally through the app writes <mol>-local.out; if its job_id was
+    # lost, Detect jobs must recover it from that file (no SLURM number, no squeue).
+    proj = _project(tmp_path)
+    proj.planned_calcs.append(_calc("x", "calcs/x"))
+    _touch(str(tmp_path / "calcs" / "x" / "x-local.out"))
+
+    s = discovery.relink_project(proj)
+    assert proj.planned_calcs[0].job_id == "local"
+    assert s["from_files"] == 1 and s["changed"] == 1 and s["from_queue"] == 0
+
+
+def test_relink_from_plain_output(tmp_path):
+    # A bare <mol>.out (e.g. ORCA run by hand in the rundir) links via the sentinel.
+    proj = _project(tmp_path)
+    proj.planned_calcs.append(_calc("x", "calcs/x"))
+    _touch(str(tmp_path / "calcs" / "x" / "x.out"))
+
+    discovery.relink_project(proj)
+    assert proj.planned_calcs[0].job_id == "imported"
+
+
+def test_relink_slurm_number_beats_local_output(tmp_path):
+    proj = _project(tmp_path)
+    proj.planned_calcs.append(_calc("x", "calcs/x"))
+    _touch(str(tmp_path / "calcs" / "x" / "x-333.out"))
+    _touch(str(tmp_path / "calcs" / "x" / "x-local.out"))
+
+    discovery.relink_project(proj)
+    assert proj.planned_calcs[0].job_id == "333"   # numeric SLURM id wins
+
+
+def test_unlinked_with_output_detects_local(tmp_path):
+    proj = _project(tmp_path)
+    proj.planned_calcs.append(_calc("x", "calcs/x"))          # has local output
+    proj.planned_calcs.append(_calc("built", "calcs/built"))  # only built, no output
+    _touch(str(tmp_path / "calcs" / "x" / "x-local.out"))
+    os.makedirs(str(tmp_path / "calcs" / "built"))
+
+    got = {c.molecule_filename for c in discovery.unlinked_with_output(proj)}
+    assert got == {"x"}
+
+
 def test_relink_skips_already_linked(tmp_path):
     proj = _project(tmp_path)
     proj.planned_calcs.append(_calc("x", "calcs/x", job_id="42"))

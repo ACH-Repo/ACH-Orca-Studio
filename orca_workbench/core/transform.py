@@ -181,6 +181,24 @@ def mirror(coords, plane="xy", center=None, symbols=None):
     return out + o
 
 
+def flatten(coords, plane="xy", atoms=None):
+    """Make the molecule planar by projecting onto a coordinate plane: zero the
+    perpendicular axis ('xy' -> z=0, 'yz' -> x=0, 'xz' -> y=0). `atoms` (indices)
+    limits it to a subset; default flattens everything. Handy for seeding a planar /
+    Cs-symmetric starting geometry — align the molecular plane to a coordinate plane
+    (align_plane / align_principal) first, flatten, then optimise with ORCA `UseSym`."""
+    axis = {"xy": 2, "yz": 0, "xz": 1}.get((plane or "xy").strip().lower())
+    if axis is None:
+        raise ValueError("flatten plane must be xy, yz or xz")
+    c = _coords(coords).copy()
+    if atoms:
+        for a in atoms:
+            c[int(a), axis] = 0.0
+    else:
+        c[:, axis] = 0.0
+    return c
+
+
 def rotate_about_atoms(coords, i, j, angle_deg):
     """Rotate the whole molecule by `angle_deg` about the axis THROUGH atoms
     i and j. Position-invariant: the axis rides with the molecule, so the
@@ -561,8 +579,9 @@ def min_distance(coords_a, coords_b):
 # ---------------------------------------------------------------------------
 # The ops-list interpreter (what a Transform node's config stores)
 # ---------------------------------------------------------------------------
-OP_TYPES = ("translate", "rotate", "center", "mirror", "align_axis", "align_plane",
-            "set_plane_angle", "align_principal", "align_moiety", "set_dihedral")
+OP_TYPES = ("translate", "rotate", "center", "mirror", "flatten", "align_axis",
+            "align_plane", "set_plane_angle", "align_principal", "align_moiety",
+            "set_dihedral")
 
 
 def apply_ops(symbols, coords, ops):
@@ -594,6 +613,8 @@ def _apply_one(symbols, c, op):
     if kind == "mirror":
         return mirror(c, op.get("plane", "xy"), center=op.get("center"),
                       symbols=symbols)
+    if kind == "flatten":
+        return flatten(c, op.get("plane", "xy"), op.get("atoms"))
     if kind == "align_axis":
         return align_axis(c, int(op["i"]), int(op["j"]), op.get("target", "x"))
     if kind == "align_plane":
@@ -681,6 +702,17 @@ def validate_ops(ops, n_atoms=None):
         elif kind == "mirror":
             if (op.get("plane") or "xy").strip().lower() not in ("xy", "yz", "xz"):
                 issues.append("op {}: mirror plane must be xy, yz or xz".format(k + 1))
+        elif kind == "flatten":
+            if (op.get("plane") or "xy").strip().lower() not in ("xy", "yz", "xz"):
+                issues.append("op {}: flatten plane must be xy, yz or xz".format(k + 1))
+            atoms = op.get("atoms")
+            if atoms and n_atoms is not None:
+                for v in atoms:
+                    try:
+                        if not (0 <= int(v) < n_atoms):
+                            issues.append("op {}: atom {} out of range".format(k + 1, v))
+                    except (TypeError, ValueError):
+                        issues.append("op {}: bad atom index".format(k + 1))
         elif kind == "align_axis":
             chk_idx(op, ("i", "j"), k)
             if op.get("i") == op.get("j"):
@@ -786,6 +818,10 @@ def describe_op(op):
             return "center at origin ({})".format(op.get("mode", "com"))
         if kind == "mirror":
             return "mirror across the {} plane".format(op.get("plane", "xy"))
+        if kind == "flatten":
+            atoms = op.get("atoms")
+            where = " (atoms {})".format(",".join(str(a) for a in atoms)) if atoms else ""
+            return "flatten onto the {} plane{}".format(op.get("plane", "xy"), where)
         if kind == "align_axis":
             return "align atoms {}-{} axis -> {}".format(
                 op.get("i"), op.get("j"), op.get("target", "x"))

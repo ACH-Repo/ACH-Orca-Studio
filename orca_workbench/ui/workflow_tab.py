@@ -25,7 +25,7 @@ from orca_workbench.core import workflow_expand
 from orca_workbench.core.inputs import safe_path_component
 from orca_workbench.core.project import Molecule, PlannedCalc, new_calc_id
 from orca_workbench.ui.modal import make_modal
-from orca_workbench.ui.shortcuts import install_text_shortcuts
+from orca_workbench.ui.shortcuts import bind_mousewheel, install_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
 
@@ -353,24 +353,9 @@ class WorkflowTab(ttk.Frame):
             self._recipe_search_combo(node, "recipe").pack(anchor=tk.W, padx=8, pady=2)
             if node.type == "optimize":
                 self._geom_spec_widget(node)
+            self._extra_keywords_widget(node)
         elif node.type == "molecules":
-            mode = tk.StringVar(value=node.config.get("mode", "all"))
-            ttk.Radiobutton(self.cfg_frame, text="All molecules", variable=mode, value="all",
-                            command=lambda n=node, m=mode: self._set_cfg(n, "mode", m.get())
-                            ).pack(anchor=tk.W, padx=8)
-            ttk.Radiobutton(self.cfg_frame, text="Selected only:", variable=mode, value="selection",
-                            command=lambda n=node, m=mode: self._set_cfg(n, "mode", m.get())
-                            ).pack(anchor=tk.W, padx=8)
-            lb = tk.Listbox(self.cfg_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
-            for m in self.app.project.molecules:
-                lb.insert(tk.END, m.filename)
-            chosen = set(node.config.get("filenames", []))
-            for i, m in enumerate(self.app.project.molecules):
-                if m.filename in chosen:
-                    lb.selection_set(i)
-            lb.pack(anchor=tk.W, fill=tk.X, padx=8, pady=2)
-            lb.bind("<<ListboxSelect>>", lambda e, n=node, w=lb: self._set_cfg(
-                n, "filenames", [w.get(i) for i in w.curselection()]))
+            self._build_molecules_panel(node)
         elif node.type == "condition":
             ttk.Label(self.cfg_frame, text="Run the downstream branch only if\nthe feeding "
                       "calculation's result:", justify=tk.LEFT).pack(anchor=tk.W, padx=8)
@@ -425,43 +410,181 @@ class WorkflowTab(ttk.Frame):
         ttk.Button(self.cfg_frame, text="Delete node",
                    command=lambda nid=node.id: self._delete_node(nid)).pack(anchor=tk.W, padx=8)
 
+    def _build_molecules_panel(self, node):
+        """Molecules node: pick all / a selection, and show miniature SMILES depictions
+        (3 per row) of the molecules this node emits. Thumbnails re-render on a debounced
+        timer (RDKit rendering is costly — a per-click storm would lag ThinLinc) and are
+        capped so a huge project can't render hundreds of images at once."""
+        from orca_workbench.ui.depict import smiles_to_photoimage
+        MAX_THUMBS = 24
+
+        mode = tk.StringVar(value=node.config.get("mode", "all"))
+        lb = tk.Listbox(self.cfg_frame, selectmode=tk.EXTENDED, height=6, exportselection=False)
+
+        def on_mode():
+            self._set_cfg(node, "mode", mode.get())
+            schedule_refresh()
+
+        ttk.Radiobutton(self.cfg_frame, text="All molecules", variable=mode, value="all",
+                        command=on_mode).pack(anchor=tk.W, padx=8)
+        ttk.Radiobutton(self.cfg_frame, text="Selected only:", variable=mode, value="selection",
+                        command=on_mode).pack(anchor=tk.W, padx=8)
+        for m in self.app.project.molecules:
+            lb.insert(tk.END, m.filename)
+        chosen = set(node.config.get("filenames", []))
+        for i, m in enumerate(self.app.project.molecules):
+            if m.filename in chosen:
+                lb.selection_set(i)
+        lb.pack(anchor=tk.W, fill=tk.X, padx=8, pady=2)
+
+        ttk.Label(self.cfg_frame, text="Structures (SMILES) this node emits:",
+                  foreground="#555", wraplength=210, justify=tk.LEFT).pack(
+                      anchor=tk.W, padx=8, pady=(6, 0))
+        grid = ttk.Frame(self.cfg_frame)
+        grid.pack(anchor=tk.W, fill=tk.X, padx=6, pady=2)
+        self._mol_thumb_refs = []   # keep PhotoImage refs alive against Tk GC
+
+        def active_mols():
+            if mode.get() == "all":
+                return list(self.app.project.molecules)
+            sel = set(lb.get(i) for i in lb.curselection())
+            if not sel:
+                sel = set(node.config.get("filenames", []))
+            return [m for m in self.app.project.molecules if m.filename in sel]
+
+        def refresh_thumbs():
+            self._thumb_after = None
+            if not grid.winfo_exists():
+                return
+            for w in grid.winfo_children():
+                w.destroy()
+            self._mol_thumb_refs = []
+            mols = active_mols()
+            if not mols:
+                ttk.Label(grid, text="(no molecules)", foreground="#999").grid(
+                    row=0, column=0, padx=4, pady=4)
+                return
+            shown = mols[:MAX_THUMBS]
+            for i, m in enumerate(shown):
+                cell = ttk.Frame(grid, relief="groove", borderwidth=1)
+                cell.grid(row=i // 3, column=i % 3, padx=2, pady=2, sticky="n")
+                img = None
+                if m.smiles:
+                    img, _err = smiles_to_photoimage(m.smiles, size=(96, 76), master=grid)
+                if img is not None:
+                    self._mol_thumb_refs.append(img)
+                    ttk.Label(cell, image=img).pack()
+                else:
+                    ttk.Label(cell, text=("no\nSMILES" if not m.smiles else "n/a"),
+                              foreground="#999", justify=tk.CENTER).pack(padx=16, pady=22)
+                ttk.Label(cell, text=m.filename[:14], font=("TkDefaultFont", 7)).pack()
+            if len(mols) > MAX_THUMBS:
+                ttk.Label(grid, text="(+{} more…)".format(len(mols) - MAX_THUMBS),
+                          foreground="#999").grid(row=(len(shown) // 3) + 1, column=0,
+                                                  columnspan=3, sticky="w", pady=(2, 0))
+
+        def schedule_refresh():
+            prev = getattr(self, "_thumb_after", None)
+            if prev is not None:
+                try:
+                    grid.after_cancel(prev)
+                except Exception:
+                    pass
+            self._thumb_after = grid.after(300, refresh_thumbs)
+
+        lb.bind("<<ListboxSelect>>", lambda e: (
+            self._set_cfg(node, "filenames", [lb.get(i) for i in lb.curselection()]),
+            schedule_refresh()))
+        refresh_thumbs()
+
+    def _extra_keywords_widget(self, node):
+        """Free-form extra ORCA `!`-line keywords for this job node (e.g. UseSym,
+        TightSCF). Appended to the recipe's keyword line at build (inputs.add_keywords);
+        locked read-only once the node has launched calcs so it can't desync from them."""
+        ttk.Label(self.cfg_frame, text="Extra ORCA keywords:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        cur = node.config.get("extra_keywords", "") or ""
+        if self._node_is_locked(node.id):
+            ttk.Label(self.cfg_frame, text="{}  (locked - node has run)".format(cur or "(none)"),
+                      foreground="#555", wraplength=210, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+            return
+        var = tk.StringVar(value=cur)
+        ent = ttk.Entry(self.cfg_frame, textvariable=var, width=28)
+        ent.pack(anchor=tk.W, padx=8, pady=1)
+        var.trace_add("write", lambda *_a: self._set_cfg(node, "extra_keywords", var.get().strip()))
+        tip(ent, "Appended to the recipe's ! line for every job this node builds — e.g. "
+                 "'UseSym' (optimise within the molecule's point group / Cs, C2v, …), "
+                 "'TightSCF', 'Grid5'. Space-separated; duplicates of the recipe's own "
+                 "keywords are ignored.")
+
     def _recipe_search_combo(self, node, key="recipe"):
-        """An editable recipe combobox that filters its list as you TYPE — the
-        recipe library can be long. Only a real recipe name is committed (on pick /
-        Return / focus-out); partial text just narrows the dropdown. Returns the
-        widget so the caller packs it."""
+        """Recipe picker that lets you type AND see the filtered list at the same time
+        — an Entry over an always-visible Listbox that narrows live as you type, like
+        the F3 Add-node popup (a ttk.Combobox can't do both: posting its dropdown steals
+        keyboard focus). Click / Return / Down commits a recipe; partial text just
+        filters. Returns a frame so the caller packs it."""
         # Once a node has launched calcs its recipe is locked (changing it would
-        # silently desync the node from the calcs it spawned). Show the recipe name
-        # read-only so it's still clear which one ran.
+        # silently desync the node from the calcs it spawned). Show it read-only.
         if self._node_is_locked(node.id):
             current = node.config.get(key, "") or "(none set)"
             return ttk.Label(self.cfg_frame, text="{}  (locked - node has run)".format(current),
                              foreground="#555", wraplength=210, justify=tk.LEFT)
         names = [r.name for r in self.app.recipes]
+        frame = ttk.Frame(self.cfg_frame)
         var = tk.StringVar(value=node.config.get(key, ""))
-        cb = ttk.Combobox(self.cfg_frame, textvariable=var, values=names, width=28)
+        ent = ttk.Entry(frame, textvariable=var, width=30)
+        ent.pack(anchor=tk.W, fill=tk.X)
+        lb = tk.Listbox(frame, height=5, exportselection=False, activestyle="dotbox")
+        lb.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
+        bind_mousewheel(lb, lb)
 
-        def commit(*_a):
-            v = var.get().strip()
+        def repopulate():
+            typed = var.get().strip().lower()
+            shown = [n for n in names if typed in n.lower()] if typed else list(names)
+            lb.delete(0, tk.END)
+            for n in shown:
+                lb.insert(tk.END, n)
+            cur = var.get().strip()
+            if cur in shown:
+                i = shown.index(cur)
+                lb.selection_clear(0, tk.END)
+                lb.selection_set(i)
+                lb.see(i)
+
+        def commit(v):
             if v in names:
                 self._set_cfg(node, key, v)
 
-        def on_key(e):
-            if e.keysym in ("Up", "Down", "Return", "Escape", "Tab", "Left", "Right"):
+        def on_type(e=None):
+            if e is not None and e.keysym in ("Up", "Down", "Return", "Escape", "Tab"):
                 return
-            # Narrow the dropdown list to what's been typed. We deliberately do NOT
-            # re-post the dropdown here: posting it on every keystroke grabs keyboard
-            # focus to the listbox (the async grab beats a synchronous focus_set),
-            # which is what made typing lose focus letter-by-letter. The filtered
-            # matches show when the user opens the list (Down / the arrow).
-            typed = var.get().strip().lower()
-            cb["values"] = [n for n in names if typed in n.lower()] if typed else names
+            repopulate()
+            commit(var.get().strip())   # live-commit only when it's an exact recipe name
 
-        cb.bind("<KeyRelease>", on_key, add="+")
-        cb.bind("<<ComboboxSelected>>", commit, add="+")
-        cb.bind("<Return>", commit, add="+")
-        cb.bind("<FocusOut>", commit, add="+")
-        return cb
+        def pick(e=None):
+            sel = lb.curselection()
+            if sel:
+                v = lb.get(sel[0])
+                var.set(v)
+                commit(v)
+            return "break"
+
+        def to_list(e=None):
+            if lb.size():
+                lb.focus_set()
+                lb.selection_clear(0, tk.END)
+                lb.selection_set(0)
+                lb.activate(0)
+            return "break"
+
+        ent.bind("<KeyRelease>", on_type, add="+")
+        ent.bind("<Down>", to_list)
+        ent.bind("<Return>", lambda e: (commit(var.get().strip()), "break")[1])
+        ent.bind("<FocusOut>", lambda e: commit(var.get().strip()), add="+")
+        lb.bind("<ButtonRelease-1>", pick)   # fires after a click sets the selection
+        lb.bind("<Return>", pick)
+        lb.bind("<Double-1>", pick)
+        repopulate()
+        return frame
 
     def _geom_spec_widget(self, node):
         """Optimize-node geometry constraints / relaxed scan. Applies to every molecule
@@ -2524,6 +2647,9 @@ class WorkflowTab(ttk.Frame):
                   "its own Transform aligning the chosen axis/plane to the same lab axis — then "
                   "Combine.", foreground="#777", wraplength=220, justify=tk.LEFT).pack(
                       anchor=tk.W, padx=8, pady=(4, 0))
+        # Preview / Write the transformed geometry — the same 'run until here' debug
+        # view the Combine panel offers (computed in memory; project untouched).
+        self._add_preview_button(node)
 
     def _edit_op_dialog(self, node, op):
         """Open the op editor, with the first input molecule's atoms as reference
@@ -3285,13 +3411,14 @@ class WorkflowTab(ttk.Frame):
             # knows its own config (this closure has self.wf), so no signature change.
             onode = self.wf.node(origin_node)
             gspec = onode.config.get("geom_spec") if onode is not None else None
+            xkw = onode.config.get("extra_keywords") if onode is not None else None
             existing = self._find_existing_calc(origin_node, mol, category, recipe_name)
             if existing is not None:
                 # Adopt this graph node so future runs match by node identity too.
                 if getattr(existing, "origin_node", None) is None:
                     existing.origin_node = origin_node
                 # Keep finished steps verbatim; let unfinished ones adopt any
-                # edits made to the graph (recipe / geometry / gate / geom_spec).
+                # edits made to the graph (recipe / geometry / gate / geom_spec / keywords).
                 if not self._calc_done(existing):
                     existing.recipe_name = recipe_name
                     existing.category = category
@@ -3299,11 +3426,12 @@ class WorkflowTab(ttk.Frame):
                     existing.parent_id = parent_id
                     existing.gate = gate
                     existing.geom_spec = gspec
+                    existing.extra_keywords = xkw
                 return existing
             return PlannedCalc(id=new_calc_id(), molecule_filename=mol, recipe_name=recipe_name,
                                category=category, geometry_source=geometry_source,
                                parent_id=parent_id, gate=gate, origin_node=origin_node,
-                               geom_spec=gspec)
+                               geom_spec=gspec, extra_keywords=xkw)
 
         # Geometry backend: Transform/Combine nodes compute their derived
         # molecules in memory during expansion; they're only written into the

@@ -90,7 +90,13 @@ def test_sequence_variants_letter_both_cases():
     # (this was the 'rebind to Ctrl+Shift+M does nothing' bug).
     v3 = keymap.sequence_variants("<Control-Shift-m>")
     assert "<Control-Shift-m>" in v3 and "<Control-Shift-M>" in v3
-    assert keymap.sequence_variants("<Control-s>") == ["<Control-s>", "<Control-S>"]
+    # a MODIFIED key WITHOUT Shift binds ONLY the base letter — adding the upper-case
+    # form would also capture Ctrl+Shift+<key>, stealing it from a separate Shift
+    # shortcut (Ctrl+S / Ctrl+Shift+S, Ctrl+N / Ctrl+Shift+N).
+    assert keymap.sequence_variants("<Control-s>") == ["<Control-s>"]
+    assert keymap.sequence_variants("<Control-n>") == ["<Control-n>"]
+    # ...so Ctrl+S and Ctrl+Shift+S don't collide
+    assert "<Control-s>" not in keymap.sequence_variants("<Control-Shift-S>")
     # non-letter keys are bound as-is
     assert keymap.sequence_variants("<F5>") == ["<F5>"]
 

@@ -630,6 +630,16 @@ class BaseSpectrumWindow(tk.Toplevel):
         """Baseline of the topmost stacked trace (0 when not offset)."""
         return self.baseline(len(self.mols) - 1, ref_amplitude)
 
+    # Draw ordering for stacked traces. A y-offset waterfall should read
+    # front-to-back like Mestrenova: the BOTTOM trace (i=0) sits in FRONT and the
+    # higher-offset traces recede BEHIND it. matplotlib draws higher zorder on top,
+    # so trace 0 gets the highest value and trace N-1 the lowest (2 = mpl's default
+    # line z, still above the grid). Hover/label artists use HOVER_Z to stay on top.
+    HOVER_Z = 50
+
+    def _trace_zorder(self, i):
+        return 2 + (len(self.mols) - 1 - i)
+
     # ------------------------------------------------------ redraw skeleton
 
     def _redraw(self):
@@ -801,19 +811,22 @@ class IRSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(curves):
             base = self.baseline(i, ref)
             m["_base"] = base
+            m["_z"] = self._trace_zorder(i)
             if transmission:
                 ypk = max(ys) or 1.0
                 tvals = [base + 100.0 * (1.0 - y / ypk) for y in ys]
-                ax.plot(xs, tvals, color=m["color"], lw=0.8, label=m["short"])
+                ax.plot(xs, tvals, color=m["color"], lw=0.8, label=m["short"], zorder=m["_z"])
             else:
-                ax.plot(xs, [y + base for y in ys], color=m["color"], lw=0.8, label=m["short"])
+                ax.plot(xs, [y + base for y in ys], color=m["color"], lw=0.8,
+                        label=m["short"], zorder=m["_z"])
 
         if self.sticks_var.get():
             for i, (m, xs, ys) in enumerate(curves):
                 base = m["_base"]
                 for c, it in zip(m["centers"], m["intens"]):
                     y0, y1 = self._stick_span(it, base, transmission)
-                    ax.vlines(c, y0, y1, color=m["color"], linewidth=0.5, alpha=0.6)
+                    ax.vlines(c, y0, y1, color=m["color"], linewidth=0.5, alpha=0.6,
+                              zorder=m["_z"])
 
         if transmission:
             ax.set_ylim(-2.0, 102.0 + self.stack_top(ref))
@@ -857,12 +870,13 @@ class IRSpectrumWindow(BaseSpectrumWindow):
             for c, it in near:
                 y0, y1 = self._stick_span(it, m.get("_base", 0.0), self._transmission)
                 self._hover_artists.append(
-                    ax.vlines(c, y0, y1, color=(0.05, 0.05, 0.05), linewidth=0.9))
+                    ax.vlines(c, y0, y1, color=(0.05, 0.05, 0.05), linewidth=0.9,
+                              zorder=self.HOVER_Z))
         near_sorted = sorted(near, key=lambda t: t[0], reverse=True)
         text = "\n".join("{:.1f}   I={:.1f}".format(c, it) for c, it in near_sorted)
         self._hover_artists.append(ax.annotate(
             text, xy=(0.02, 0.98), xycoords="axes fraction", va="top", ha="left",
-            fontsize=9, family="monospace",
+            fontsize=9, family="monospace", zorder=self.HOVER_Z,
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
@@ -952,7 +966,9 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(curves):
             base = self.baseline(i, ref)
             m["_base"] = base
-            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.0, label=m["short"])
+            m["_z"] = self._trace_zorder(i)
+            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.0,
+                    label=m["short"], zorder=m["_z"])
 
         if self.sticks_var.get():
             for m in self.mols:
@@ -961,7 +977,8 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
                     if f <= 0:
                         continue
                     ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
-                              color=m["color"], linewidth=0.6, alpha=0.6)
+                              color=m["color"], linewidth=0.6, alpha=0.6,
+                              zorder=m.get("_z", 2))
 
         ax.set_xlim(lo, hi)
         ax.set_ylim(0, (self._ymax + self.stack_top(ref)) * 1.12)
@@ -1004,13 +1021,13 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
                     continue
                 self._hover_artists.append(
                     ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
-                              color=(0.05, 0.05, 0.05), linewidth=0.9))
+                              color=(0.05, 0.05, 0.05), linewidth=0.9, zorder=self.HOVER_Z))
         text = "\n".join("{:.1f} {}   f={:.3f}".format(c, unit, f)
                          for c, f in sorted(near, key=lambda t: t[0]))
         if text:
             self._hover_artists.append(ax.annotate(
                 text, xy=(0.02, 0.98), xycoords="axes fraction", va="top", ha="left",
-                fontsize=9, family="monospace",
+                fontsize=9, family="monospace", zorder=self.HOVER_Z,
                 bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
@@ -1216,7 +1233,9 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(curves):
             base = self.baseline(i, ref)
             m["_base"] = base
-            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.4, label=m["short"])
+            m["_z"] = self._trace_zorder(i)
+            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=0.6,
+                    label=m["short"], zorder=m["_z"])
 
         # Peak-shift labels (Mestrenova-style: the ppm value in a vertical caption
         # above each peak apex, coloured to its trace). Off by default; when off the
@@ -1241,14 +1260,19 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
         return m.get("_base", 0.0) + sum(S.lorentzian(center, c, fwhm) for c in m["shifts"])
 
     def _draw_shift_label(self, ax, m, center, fwhm, bold=False, hover=False):
-        """A vertical ppm caption above a peak apex. Persistent labels are drawn in
-        plot(); hover labels go through _hover_artists so they clear on the next move."""
+        """A vertical ppm caption held a little above a peak apex, joined to the apex
+        by a fine black leader line (Mestrenova-style): the offset keeps the number
+        clear of the peak, the connector shows which peak it belongs to. The leader is
+        always black/hairline regardless of trace colour. Persistent labels are drawn
+        in plot(); hover labels go through _hover_artists so they clear on the next move."""
         apex = self._peak_apex(m, center, fwhm)
         art = ax.annotate("{:.2f}".format(center), xy=(center, apex),
-                          xytext=(0, 3), textcoords="offset points", rotation=90,
+                          xytext=(0, 16), textcoords="offset points", rotation=90,
                           ha="center", va="bottom", fontsize=9 if hover else 8,
-                          color=m["color"], clip_on=False,
-                          fontweight="bold" if bold else "normal")
+                          color=m["color"], clip_on=False, zorder=self.HOVER_Z,
+                          fontweight="bold" if bold else "normal",
+                          arrowprops=dict(arrowstyle="-", color="black",
+                                          linewidth=0.4, shrinkA=1.5, shrinkB=1.5))
         if hover:
             self._hover_artists.append(art)
 
@@ -1483,12 +1507,13 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
         for i, (m, field, trace) in enumerate(traces):
             base = self.baseline(i, ref)
             m["_base"] = base
-            ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
+            m["_z"] = self._trace_zorder(i)
+            ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5, zorder=1)
             xs = [clo] + list(field) + [chi]
             ys = [base] + [v + base for v in trace] + [base]
             # g_iso in the (colour-coded) legend label — replaces the old permanent
             # top-left text box, which would eventually collide with offset traces.
-            ax.plot(xs, ys, color=m["color"], lw=1.0,
+            ax.plot(xs, ys, color=m["color"], lw=1.0, zorder=m["_z"],
                     label="{}  g={:.4f}".format(m["short"], m["g_iso"]))
 
         # Line markers: draw for EVERY trace at its own baseline (works stacked too now),
@@ -1502,7 +1527,8 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
                 imax = max((it for _, it in sticks), default=1.0) or 1.0
                 for bc, inten in sticks:
                     ax.vlines(bc, base, base + peak * (inten / imax),
-                              color="#888888", linewidth=0.6, alpha=0.6)
+                              color="#888888", linewidth=0.6, alpha=0.6,
+                              zorder=m.get("_z", 2))
 
         ax.set_xlim(clo, chi)
         ax.set_xlabel("magnetic field (mT)")
@@ -1569,7 +1595,7 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
         self._hover_artists.append(ax.annotate(
             "{}\ng_iso = {:.5f}\ng(cursor) = {:.5f}".format(m["short"], m["g_iso"], g_cursor),
             xy=(0.99, 0.02), xycoords="axes fraction", va="bottom", ha="right",
-            fontsize=9, family="monospace",
+            fontsize=9, family="monospace", zorder=self.HOVER_Z,
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
@@ -1664,11 +1690,12 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(traces):
             base = self.baseline(i, ref)
             m["_base"] = base
+            m["_z"] = self._trace_zorder(i)
             if base or deriv:
-                ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
+                ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5, zorder=1)
             xx = [clo] + list(xs) + [chi]
             yy = [base] + [v + base for v in ys] + [base]
-            ax.plot(xx, yy, color=m["color"], lw=1.0, label=m["short"])
+            ax.plot(xx, yy, color=m["color"], lw=1.0, label=m["short"], zorder=m["_z"])
         ax.set_xlim(clo, chi)
 
         if self.sticks_var.get():
@@ -1680,7 +1707,8 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
                 smax = max((it for _, it in sticks), default=1.0) or 1.0
                 for fc, inten in sticks:
                     ax.vlines(fc, base, base + peak * (inten / smax),
-                              color="#888888", linewidth=0.6, alpha=0.6)
+                              color="#888888", linewidth=0.6, alpha=0.6,
+                              zorder=m.get("_z", 2))
 
         ax.set_xlabel("RF frequency (MHz)")
         ax.set_ylabel("first-derivative (a.u.)" if deriv else "ENDOR intensity (a.u.)")
@@ -1730,7 +1758,7 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
         self._hover_artists.append(ax.annotate(
             "{}\nRF = {:.2f} MHz".format(m["short"], event.xdata),
             xy=(0.99, 0.02), xycoords="axes fraction", va="bottom", ha="right",
-            fontsize=9, family="monospace",
+            fontsize=9, family="monospace", zorder=self.HOVER_Z,
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
