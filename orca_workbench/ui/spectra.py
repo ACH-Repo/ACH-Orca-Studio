@@ -251,9 +251,16 @@ class BaseSpectrumWindow(tk.Toplevel):
     # Breathing room above and below the data, as a fraction of the y-span: a peak
     # touching the frame reads as clipped. Applied after the subclass has drawn.
     Y_MARGIN = 0.05
-    # One wheel notch scales the y-axis by this factor (Mestrenova-style intensity
-    # scaling); Ctrl+wheel zooms x by the same step about the cursor.
+    # One wheel notch scales intensities by this factor (Mestrenova-style);
+    # Ctrl+wheel zooms x by the same step about the cursor.
     WHEEL_STEP = 1.2
+    # True: the wheel scales each trace's AMPLITUDE about its own baseline (a data
+    # transform — every trace grows by the same amount and the stack spacing is
+    # untouched). False: the wheel scales the VIEW about y_anchor(), which is right
+    # for a plot whose y-values are the quantity itself (the SCF bar chart — you
+    # cannot "turn up" an energy).
+    WHEEL_SCALES_AMPLITUDE = True
+    Y_SCALE_LIMITS = (1e-3, 1e6)
 
     def __init__(self, parent, window_title):
         super().__init__(parent)
@@ -273,6 +280,12 @@ class BaseSpectrumWindow(tk.Toplevel):
         self._home_ylim = None
         self._nav_mode = None     # None | zoom_h/zoom_v/zoom_box | pan_h/pan_v/pan_free
         self._drag = None         # active zoom/pan drag state
+        # Intensity scaling (the wheel): a multiplier on every trace's amplitude,
+        # applied about its own baseline so a stack keeps its spacing.
+        self.y_scale = 1.0
+        # (xlim, ylim) to re-apply after the next redraw instead of the data view —
+        # set when a redraw must NOT move the view (a wheel notch, see _on_scroll).
+        self._pin_view = None
         self._mpl_ok = True
         try:
             self._Figure, self._Canvas, self._NavToolbar = _load_mpl_full()
@@ -501,6 +514,9 @@ class BaseSpectrumWindow(tk.Toplevel):
             self._lim["y0"].set(""); self._lim["y1"].set("")
             ax.set_ylim(self._home_ylim)
             self.canvas.draw_idle()
+        elif abs(self.y_scale - 1.0) > 1e-9:
+            # both axes already home: the only thing left to undo is the wheel
+            self.set_y_scale(1.0, pin=False)
 
     # ------------------------------------------------------- margins & wheel
 
@@ -525,42 +541,75 @@ class BaseSpectrumWindow(tk.Toplevel):
             pass
 
     def y_anchor(self):
-        """The 'neutral horizontal' the wheel scales about — the spectrum's
-        baseline. 0 for anything drawn up from zero (absorbance, intensity, a
-        derivative); IR in transmission mode overrides it to 100 %, where the
-        baseline sits at the TOP and peaks hang downwards."""
+        """The 'neutral horizontal' a VIEW-scaling wheel pivots about (only used
+        when WHEEL_SCALES_AMPLITUDE is False). 0 for anything drawn up from zero."""
         return 0.0
 
-    def _on_scroll(self, event):
-        """Wheel = vertical intensity scaling, like Mestrenova: the y-axis is
-        squeezed towards (or stretched away from) the baseline, so peaks grow and
-        shrink while the baseline stays put. Ctrl+wheel zooms x about the cursor.
+    def amp(self, value):
+        """Scale one amplitude — a curve value, a stick height, a peak apex —
+        by the current intensity factor. Everything a subclass draws RELATIVE TO
+        ITS BASELINE goes through here; baselines themselves must not, or the
+        stack would spread out as you scale."""
+        return value * self.y_scale
 
-        A trackpad's two-finger scroll arrives as the same events, so it works
-        there too."""
+    def set_y_scale(self, value, pin=True):
+        """Set the intensity factor and redraw. `pin` keeps the current view, so
+        the peaks visibly grow inside it instead of the axis growing with them."""
+        lo, hi = self.Y_SCALE_LIMITS
+        value = min(max(float(value), lo), hi)
+        if value == self.y_scale:
+            return
+        self.y_scale = value
+        if pin and self.ax is not None:
+            self._pin_view = (self.ax.get_xlim(), self.ax.get_ylim())
+        for k in ("y0", "y1"):                  # a typed y-limit would fight the wheel
+            if k in self._lim:
+                self._lim[k].set("")
+        self._redraw()
+        self._show_y_scale()
+
+    def _show_y_scale(self):
+        try:
+            if self._nav_mode:
+                return                          # the nav mode owns the label
+            self._mode_label.configure(
+                text="" if abs(self.y_scale - 1.0) < 1e-9
+                else "  intensity x{:g}  (F resets)".format(round(self.y_scale, 3)))
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _on_scroll(self, event):
+        """Wheel = vertical intensity scaling, like Mestrenova: every trace grows
+        or shrinks about ITS OWN baseline, so a stacked plot keeps its spacing and
+        the traces higher up don't fly off the top. Ctrl+wheel zooms x about the
+        cursor. (A trackpad's two-finger scroll arrives as the same events.)"""
         ax = self.ax
         if ax is None or event.button not in ("up", "down"):
             return
         step = self.WHEEL_STEP if event.button == "up" else 1.0 / self.WHEEL_STEP
-        if event.key in ("control", "ctrl+control") or (event.key or "").startswith("control"):
+        if (event.key or "").startswith("control"):
             if event.xdata is None:
                 return
-            x0, x1 = ax.get_xlim()
             f = 1.0 / step
+            x0, x1 = ax.get_xlim()
             ax.set_xlim(event.xdata + (x0 - event.xdata) * f,
                         event.xdata + (x1 - event.xdata) * f)
-        else:
-            a = self.y_anchor()
-            if a is None:                       # no meaningful baseline: use the centre
-                y0, y1 = ax.get_ylim()
-                a = 0.5 * (y0 + y1)
+            self.canvas.draw_idle()
+            return
+        if self.WHEEL_SCALES_AMPLITUDE:
+            self.set_y_scale(self.y_scale * step)
+            return
+        # View scaling about the baseline: for plots whose y IS the quantity.
+        a = self.y_anchor()
+        if a is None:
             y0, y1 = ax.get_ylim()
-            f = 1.0 / step                      # wheel up -> tighter range -> taller peaks
-            ax.set_ylim(a + (y0 - a) * f, a + (y1 - a) * f)
-            # a manual y-limit box would fight the wheel on the next redraw
-            for k in ("y0", "y1"):
-                if k in self._lim:
-                    self._lim[k].set("")
+            a = 0.5 * (y0 + y1)
+        y0, y1 = ax.get_ylim()
+        f = 1.0 / step
+        ax.set_ylim(a + (y0 - a) * f, a + (y1 - a) * f)
+        for k in ("y0", "y1"):
+            if k in self._lim:
+                self._lim[k].set("")
         self.canvas.draw_idle()
 
     # -------------------------------------------------- custom zoom / pan (no toolbar)
@@ -734,9 +783,28 @@ class BaseSpectrumWindow(tk.Toplevel):
 
     # ------------------------------------------------------ redraw skeleton
 
+    def _keep_view(self):
+        """(xlim, ylim) to restore after a redraw — each entry None when that axis
+        is still at its data view.
+
+        A redraw is triggered by things that change the DRAWING (the stack offset,
+        FWHM, sticks, an intensity change), not the region you're looking at, so
+        throwing away a zoom every time the offset slider moves is just lost work.
+        Axes still at home follow the new data instead."""
+        ax = self.ax
+        if ax is None or not self._home_xlim:
+            return (None, None)
+        x = ax.get_xlim()
+        y = ax.get_ylim()
+        return (None if self._lims_close(x, self._home_xlim) else x,
+                None if self._lims_close(y, self._home_ylim) else y)
+
     def _redraw(self):
         if not getattr(self, "fig", None):
             return
+        keep_x, keep_y = self._keep_view()
+        pin = self._pin_view
+        self._pin_view = None
         try:
             self.fig.clear()
             self._hover_artists = []
@@ -750,6 +818,17 @@ class BaseSpectrumWindow(tk.Toplevel):
             self._home_xlim = ax.get_xlim()
             self._home_ylim = ax.get_ylim()
             self._apply_limit_boxes(ax)
+            # Restore the view: everything for a pinned redraw (a wheel notch, where
+            # the point is that the peaks grow INSIDE the current view), otherwise
+            # just the axes the user had moved off their data view.
+            if pin is not None:
+                ax.set_xlim(pin[0])
+                ax.set_ylim(pin[1])
+            else:
+                if keep_x is not None:
+                    ax.set_xlim(keep_x)
+                if keep_y is not None:
+                    ax.set_ylim(keep_y)
             if self._stacked:
                 if self.AUTO_LEGEND:
                     # Fixed location, NOT 'best': loc='best' recomputes the legend
@@ -890,8 +969,8 @@ class IRSpectrumWindow(BaseSpectrumWindow):
         inflated wherever two lines overlapped — the 'sticks too tall' bug.)"""
         if transmission:
             frac = it / self._imax_all()
-            return (base + 100.0, base + 100.0 * (1.0 - frac))
-        return (base, base + it)
+            return (base + 100.0, base + 100.0 * (1.0 - self.amp(frac)))
+        return (base, base + self.amp(it))
 
     def plot(self, ax):
         fwhm = max(1.0, float(self.fwhm_var.get()))
@@ -916,10 +995,10 @@ class IRSpectrumWindow(BaseSpectrumWindow):
             m["_z"] = self._trace_zorder(i)
             if transmission:
                 ypk = max(ys) or 1.0
-                tvals = [base + 100.0 * (1.0 - y / ypk) for y in ys]
+                tvals = [base + 100.0 * (1.0 - self.amp(y / ypk)) for y in ys]
                 ax.plot(xs, tvals, color=m["color"], lw=0.8, label=m["short"], zorder=m["_z"])
             else:
-                ax.plot(xs, [y + base for y in ys], color=m["color"], lw=0.8,
+                ax.plot(xs, [self.amp(y) + base for y in ys], color=m["color"], lw=0.8,
                         label=m["short"], zorder=m["_z"])
 
         if self.sticks_var.get():
@@ -934,7 +1013,7 @@ class IRSpectrumWindow(BaseSpectrumWindow):
             ax.set_ylim(0.0, 100.0 + self.stack_top(ref))
             ax.set_ylabel("transmittance (%)")
         else:
-            ax.set_ylim(0, self._ymax + self.stack_top(ref))
+            ax.set_ylim(0, self.amp(self._ymax) + self.stack_top(ref))
             ax.set_ylabel("IR absorbance (a.u.)")
 
         ax.set_xlim(hi, lo)   # IR convention: high wavenumber on the left
@@ -1069,7 +1148,7 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
             base = self.baseline(i, ref)
             m["_base"] = base
             m["_z"] = self._trace_zorder(i)
-            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.0,
+            ax.plot(xs, [self.amp(y) + base for y in ys], color=m["color"], lw=1.0,
                     label=m["short"], zorder=m["_z"])
 
         if self.sticks_var.get():
@@ -1078,12 +1157,12 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
                 for c, f in zip(self._centers(m), m["fosc"]):
                     if f <= 0:
                         continue
-                    ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
+                    ax.vlines(c, base, base + self.amp(self._ymax * (f / m["_fmax"])),
                               color=m["color"], linewidth=0.6, alpha=0.6,
                               zorder=m.get("_z", 2))
 
         ax.set_xlim(lo, hi)
-        ax.set_ylim(0, self._ymax + self.stack_top(ref))
+        ax.set_ylim(0, self.amp(self._ymax) + self.stack_top(ref))
         ax.set_xlabel("wavelength (nm)" if nm_axis else "energy (eV)")
         ax.set_ylabel("oscillator strength / absorbance (a.u.)")
         ax.set_title("Simulated UV-Vis spectrum")
@@ -1122,7 +1201,7 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
                 if f <= 0:
                     continue
                 self._hover_artists.append(
-                    ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
+                    ax.vlines(c, base, base + self.amp(self._ymax * (f / m["_fmax"])),
                               color=(0.05, 0.05, 0.05), linewidth=0.9, zorder=self.HOVER_Z))
         text = "\n".join("{:.1f} {}   f={:.3f}".format(c, unit, f)
                          for c, f in sorted(near, key=lambda t: t[0]))
@@ -1336,7 +1415,7 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
             base = self.baseline(i, ref)
             m["_base"] = base
             m["_z"] = self._trace_zorder(i)
-            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=0.6,
+            ax.plot(xs, [self.amp(y) + base for y in ys], color=m["color"], lw=0.6,
                     label=m["short"], zorder=m["_z"])
 
         # Peak-shift labels (Mestrenova-style: the ppm value in a vertical caption
@@ -1352,14 +1431,16 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
                   else "isotropic shielding σ (ppm)")
         # NMR convention: high shift / low shielding on the left (axis reversed).
         ax.set_xlim(view_hi, view_lo)
-        ax.set_ylim(0, ref + self.stack_top(ref))
+        ax.set_ylim(0, self.amp(ref) + self.stack_top(ref))
         ax.set_xlabel(xlabel)
         ax.set_ylabel("intensity (a.u.)")
         ax.set_title("Simulated {} NMR".format(self.nucleus_label))
 
     def _peak_apex(self, m, center, fwhm):
-        """y of a peak's apex (baseline + the summed Lorentzian at that center)."""
-        return m.get("_base", 0.0) + sum(S.lorentzian(center, c, fwhm) for c in m["shifts"])
+        """y of a peak's apex (baseline + the summed Lorentzian at that center),
+        following the current intensity scale so labels stay on their peaks."""
+        return m.get("_base", 0.0) + self.amp(
+            sum(S.lorentzian(center, c, fwhm) for c in m["shifts"]))
 
     def _draw_shift_label(self, ax, m, center, fwhm, bold=False, hover=False):
         """A vertical ppm caption held a little above a peak apex, joined to the apex
@@ -1612,7 +1693,7 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
             m["_z"] = self._trace_zorder(i)
             ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5, zorder=1)
             xs = [clo] + list(field) + [chi]
-            ys = [base] + [v + base for v in trace] + [base]
+            ys = [base] + [self.amp(v) + base for v in trace] + [base]
             # g_iso in the (colour-coded) legend label — replaces the old permanent
             # top-left text box, which would eventually collide with offset traces.
             ax.plot(xs, ys, color=m["color"], lw=1.0, zorder=m["_z"],
@@ -1628,7 +1709,7 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
                 peak = max((abs(v) for v in trace), default=1.0) or 1.0
                 imax = max((it for _, it in sticks), default=1.0) or 1.0
                 for bc, inten in sticks:
-                    ax.vlines(bc, base, base + peak * (inten / imax),
+                    ax.vlines(bc, base, base + self.amp(peak * (inten / imax)),
                               color="#888888", linewidth=0.6, alpha=0.6,
                               zorder=m.get("_z", 2))
 
@@ -1796,7 +1877,7 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
             if base or deriv:
                 ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5, zorder=1)
             xx = [clo] + list(xs) + [chi]
-            yy = [base] + [v + base for v in ys] + [base]
+            yy = [base] + [self.amp(v) + base for v in ys] + [base]
             ax.plot(xx, yy, color=m["color"], lw=1.0, label=m["short"], zorder=m["_z"])
         ax.set_xlim(clo, chi)
 
@@ -1808,7 +1889,7 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
                 peak = max((abs(v) for v in trace), default=1.0) or 1.0
                 smax = max((it for _, it in sticks), default=1.0) or 1.0
                 for fc, inten in sticks:
-                    ax.vlines(fc, base, base + peak * (inten / smax),
+                    ax.vlines(fc, base, base + self.amp(peak * (inten / smax)),
                               color="#888888", linewidth=0.6, alpha=0.6,
                               zorder=m.get("_z", 2))
 
@@ -1887,6 +1968,9 @@ class SCFEnergyBarWindow(BaseSpectrumWindow):
 
     SHOW_OFFSET = False     # bars have no vertical-stack semantics
     AUTO_LEGEND = False     # draw_scf_bars draws its own (calc-type) legend
+    # A bar's height IS the energy — scaling it would be a lie. The wheel zooms the
+    # VIEW about 0 (where the bars start) instead.
+    WHEEL_SCALES_AMPLITUDE = False
 
     def __init__(self, parent, title, entries):
         # type: (tk.Misc, str, List[dict]) -> None

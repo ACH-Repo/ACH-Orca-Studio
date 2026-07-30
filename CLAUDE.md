@@ -888,6 +888,23 @@ off the core path and gracefully degradable.
   copyback). Verified against the real local ORCA 6.0.1 water TightOpt (click step 3 → frame 3
   coordinates; ring survives an auto-refresh). Merge candidate once tested on ThinLinc.
 
+- **Plot interaction batch** (v1.4.4+) — (a) every spectrum window pads y by `Y_MARGIN`
+  (5%) after the subclass draws; the old per-window headroom factors (`*1.12`, `*1.18`,
+  the `-2..102` transmission fudge) are gone. (b) **Wheel = intensity scaling** and it is
+  a DATA transform, not a view one: `y_scale` multiplies each trace's amplitude about its
+  own baseline via `BaseSpectrumWindow.amp()`, so on a stacked plot every trace grows by
+  the same factor and the stack spacing is untouched (scaling the *view* about a single
+  anchor moved trace i's baseline i× as far — the reported bug). `_pin_view` keeps the
+  axes fixed across the wheel's redraw so the peaks grow INSIDE the current view. The
+  SCF bar chart sets `WHEEL_SCALES_AMPLITUDE = False` (a bar's height IS the energy) and
+  keeps view scaling about `y_anchor()`. Ctrl+wheel zooms x. **F** is now a three-stage
+  reset: x home → y home → intensity back to 1. (c) `_redraw` **preserves the view**
+  (`_keep_view`): moving the stack-offset slider or the FWHM spinbox no longer throws
+  away a zoom — only axes still at their data view follow the new data. (d) a box zoom
+  survives the cursor leaving the axes (`_drag_data_xy`: pixels through the press-time
+  transform, clamped to the view) — in the spectrum base AND the progress window, which
+  also got wheel y-zoom about the cursor (log-aware on the gradient panel).
+
 ## Open work / TODO
 - `--execute_project` now expands the Workflow graph AND materialises Transform/Combine
   geometries headlessly (see `core/workflow_expand.py`) — the old `--expand_and_execute` gap is
