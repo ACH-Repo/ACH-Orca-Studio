@@ -419,6 +419,49 @@ class LivePlotWindow(tk.Toplevel):
                           if parts and not done else "")
 
     # ------------------------------------------------------------- drawing
+    def _build_axes(self, panels):
+        """Create this redraw's panels in `self._axes`.
+
+        The energy and gradient panels are both indexed by geometry step, so they
+        sit in a NESTED gridspec with hspace=0 — they share one x-axis and touch,
+        with no wasted band between them — while the SCF panel (its own iteration
+        axis) keeps a normal gap. That needs the *constrained* layout engine:
+        `tight` recomputes spacing and would push the pair apart again. If either
+        the engine or nested gridspecs are unavailable (older matplotlib), we fall
+        back to plain stacked subplots with the tight engine, which is what this
+        window did before."""
+        share_pair = "energy" in panels and "conv" in panels
+        if share_pair:
+            try:
+                groups = [[p for p in panels if p in ("energy", "conv")]]
+                if "scf" in panels:
+                    groups.append(["scf"])
+                self.fig.set_layout_engine("constrained", hspace=0.0, h_pad=0.02)
+                outer = self.fig.add_gridspec(len(groups), 1, hspace=0.12,
+                                              height_ratios=[len(g) for g in groups])
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        self._axes[group[0]] = self.fig.add_subplot(outer[gi])
+                        continue
+                    inner = outer[gi].subgridspec(len(group), 1, hspace=0.0)
+                    first = None
+                    for k, name in enumerate(group):
+                        ax = self.fig.add_subplot(inner[k], sharex=first)
+                        first = first or ax
+                        self._axes[name] = ax
+                return
+            except Exception:
+                self.fig.clear()
+                self._axes = {}
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            pass
+        n = len(panels)
+        for i, name in enumerate(panels):
+            share = self._axes.get("energy") if name == "conv" else None
+            self._axes[name] = self.fig.add_subplot(n, 1, i + 1, sharex=share)
+
     @staticmethod
     def _corner_title(ax, text):
         """A panel caption INSIDE the axes, upper right, in a small font — instead
@@ -461,10 +504,7 @@ class LivePlotWindow(tk.Toplevel):
         self.fig.clear()
         self._axes = {}
         self._step_points = {}
-        n = len(panels)
-        for i, name in enumerate(panels):
-            share = self._axes.get("energy") if name == "conv" else None
-            self._axes[name] = self.fig.add_subplot(n, 1, i + 1, sharex=share)
+        self._build_axes(panels)
         shared = "energy" in self._axes and "conv" in self._axes
 
         ax = self._axes.get("energy")

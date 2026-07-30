@@ -118,7 +118,12 @@ NODE_TYPES = {
         # molecule (and therefore its run directory) is named after it, so an
         # auto-generated name would make every re-expansion produce fresh
         # molecules and duplicate calcs (see combine_needs_fields).
-        "config": {"name": "", "mode": "merge", "charge": None, "mult": None},
+        # placements: INTER-molecular ops (core.transform.apply_placements) that
+        # move whole fragments relative to each other — "snap this donor H onto
+        # that acceptor at 1.9 A" — applied just before the append. Transform
+        # nodes orient each fragment; placements position them against each other.
+        "config": {"name": "", "mode": "merge", "charge": None, "mult": None,
+                   "placements": []},
     },
     # A Write node exports the CURRENT geometries flowing into it to disk — either
     # a single multi-structure file (a trajectory / collection: one xyz/sdf/pdb/
@@ -412,6 +417,26 @@ class Workflow(object):
             stack.extend(adj.get(nid, ()))
         return {n.id for n in self.nodes if n.type == "molecules" and n.id in seen}
 
+    def ancestors(self, node_ids, include_self=True):
+        # type: (list, bool) -> set
+        """Every node the given ones depend on, following edges BACKWARDS (all
+        port types, not just geometry). With `include_self`, the given nodes are
+        in the result too.
+
+        This is "run up to here": the sub-graph that has to execute for a chosen
+        node to produce its result, and nothing downstream of it."""
+        seen = set()
+        stack = list(node_ids or [])
+        while stack:
+            nid = stack.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            stack.extend(e.src_node for e in self.edges_into(nid))
+        if not include_self:
+            seen -= set(node_ids or [])
+        return seen
+
     def traces_to_type(self, node_id, node_type):
         # type: (str, str) -> bool
         """True if `node_id` is, or has a geometry-input ancestor that is, of
@@ -645,8 +670,16 @@ class Workflow(object):
                                   "— place it BEFORE the calculation nodes (between "
                                   "Molecules and the first Optimize/Property step).")
             elif n.type == "combine":
-                if not self.edges_into(n.id, "geometry"):
+                n_wires = len(self.edges_into(n.id, "geometry"))
+                if not n_wires:
                     issues.append("Combine node has no inputs connected.")
+                try:
+                    from orca_workbench.core import transform as transform_mod
+                    for msg in transform_mod.validate_placements(
+                            n.config.get("placements") or [], n_fragments=n_wires or None):
+                        issues.append("Combine: " + msg)
+                except ImportError:
+                    pass
                 if self.has_calc_upstream(n.id):
                     issues.append("Combine reads geometries when the graph is expanded "
                                   "— place it before the calculation nodes.")
@@ -703,6 +736,13 @@ class Workflow(object):
         elif t == "combine":
             if not self.edges_into(n.id, "geometry") or self.has_calc_upstream(n.id):
                 return False
+            try:
+                from orca_workbench.core import transform as _tmod
+                if _tmod.validate_placements(n.config.get("placements") or [],
+                                             n_fragments=len(self.edges_into(n.id, "geometry"))):
+                    return False
+            except ImportError:
+                pass
             if self.has_calc_downstream(n.id) and any(
                     not combine_field_set(n.config, k) for k in self.COMBINE_REQUIRED_KEYS):
                 return False
@@ -810,12 +850,16 @@ def compute_streams(workflow, source_mols, transform_apply=None):
 
 
 def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_ids=None,
-                    transform_apply=None):
+                    transform_apply=None, only_nodes=None):
     # type: (Workflow, List[str], callable, Optional[set], Optional[callable]) -> Tuple[list, List[str], Dict[str, list]]
     """Expand a workflow into PlannedCalcs, attaching conditional gates.
 
     If `source_ids` is given, only the networks rooted at those Molecules nodes
-    are expanded (used to run one pipeline of several on the canvas).
+    are expanded (used to run one pipeline of several on the canvas). If
+    `only_nodes` is given, only calculation nodes in that set produce calcs —
+    that's "run up to here": pass a node plus its ancestors (see
+    Workflow.ancestors) and everything downstream of it is left alone. Upstream
+    nodes still resolve normally, so parent/geometry links are unaffected.
 
     Each calc node runs once per molecule in the stream ARRIVING at it (see
     compute_streams — filters subset it, Transform/Combine nodes replace it
@@ -944,6 +988,8 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
     for nid in order:
         node = workflow.node(nid)
         if node.type not in CALC_NODE_TYPES:
+            continue
+        if only_nodes is not None and nid not in only_nodes:
             continue
         ein = workflow.edges_into(node.id, "geometry")
         if not ein:

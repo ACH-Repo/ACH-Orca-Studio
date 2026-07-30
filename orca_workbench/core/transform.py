@@ -106,12 +106,21 @@ def _unit(v):
 
 
 def _axis_vec(axis):
-    """'x'/'y'/'z' or a 3-vector -> unit vector."""
+    """'x'/'y'/'z' (optionally signed: '-x', '+z') or a 3-vector -> unit vector.
+
+    The sign matters for anything DIRECTED: aligning one molecule's donor bond to
+    +x and the partner's acceptor to -x is how two fragments end up facing each
+    other, and a placement's snap direction is likewise signed."""
     if isinstance(axis, str):
         key = axis.strip().lower()
+        sign = 1.0
+        if key[:1] in ("+", "-"):
+            sign = -1.0 if key[0] == "-" else 1.0
+            key = key[1:].strip()
         if key not in _AXES:
-            raise ValueError("unknown axis {!r} (use x/y/z or a 3-vector)".format(axis))
-        return _AXES[key].copy()
+            raise ValueError("unknown axis {!r} (use x/y/z, -x/-y/-z, or a 3-vector)"
+                             .format(axis))
+        return _AXES[key] * sign
     return _unit(axis)
 
 
@@ -264,6 +273,38 @@ def align_axis(coords, i, j, target="x"):
         raise ValueError("align_axis needs two distinct in-range atoms")
     R = rotation_between(c[j] - c[i], _axis_vec(target))
     return (c - c[i]).dot(R.T) + c[i]
+
+
+def bisector(coords, i, j, k):
+    """Unit vector from atom `j` along the bisector of the j->i and j->k bonds.
+
+    For a water oxygen (i, k = the hydrogens, j = O) that's the H-O-H bisector;
+    the LONE PAIRS point the other way. That distinction is what makes a
+    hydrogen-bond acceptor work: it has to present its lone-pair side to the
+    donor, which is a direction no pair of atoms defines."""
+    c = _coords(coords)
+    for name, idx in (("i", i), ("j", j), ("k", k)):
+        if not (0 <= int(idx) < len(c)):
+            raise ValueError("bisector: atom {} ({}) out of range".format(idx, name))
+    u = _unit(c[int(i)] - c[int(j)])
+    v = _unit(c[int(k)] - c[int(j)])
+    s = u + v
+    if float(np.linalg.norm(s)) < 1e-9:
+        raise ValueError("bisector: the two bonds are exactly opposite (no bisector)")
+    return _unit(s)
+
+
+def align_bisector(coords, i, j, k, target="x"):
+    """Rotate so the i-j-k bisector (see `bisector`) points along `target`
+    (x/y/z, optionally signed, or a vector). Atom `j` is left where it is.
+
+    The acceptor half of a hydrogen-bond build: align the H-O-H bisector to +x
+    and the oxygen's lone pairs face -x, ready for a donor snapped in from that
+    side."""
+    c = _coords(coords)
+    anchor = c[int(j)].copy()
+    R = rotation_between(bisector(c, i, j, k), _axis_vec(target))
+    return (c - anchor).dot(R.T) + anchor
 
 
 def plane_normal(coords, i, j, k):
@@ -577,11 +618,151 @@ def min_distance(coords_a, coords_b):
 
 
 # ---------------------------------------------------------------------------
+# INTER-molecular placement (Combine)
+#
+# Everything above transforms ONE geometry. Placements act on the SET of
+# fragments arriving at a Combine node: they move a whole fragment relative to
+# another one, which is what building a non-covalent complex (an H-bonded dimer,
+# a solvated solute, a stacked pair) actually needs. Each fragment keeps the
+# orientation its own Transform node gave it — a placement only TRANSLATES.
+# ---------------------------------------------------------------------------
+def snap_translation(point_fixed, point_mobile, distance, direction=None):
+    """The translation that puts `point_mobile` exactly `distance` Å from
+    `point_fixed`, along `direction`.
+
+    `direction` is a unit-ish vector (or an axis name via _axis_vec) pointing
+    FROM the fixed point TO where the mobile point should land. None keeps the
+    current fixed->mobile direction, so a pure distance adjustment doesn't
+    disturb an orientation you set up with align_axis / set_plane_angle. If the
+    two points coincide (no current direction), +x is used."""
+    a = np.asarray(point_fixed, dtype=float)
+    b = np.asarray(point_mobile, dtype=float)
+    if direction is None or (isinstance(direction, str) and direction == "auto"):
+        u = b - a
+        if float(np.linalg.norm(u)) < 1e-9:
+            u = _AXES["x"].copy()
+    else:
+        u = _axis_vec(direction)
+    u = _unit(u)
+    return (a + float(distance) * u) - b
+
+
+def snap_fragment(coords_fixed, i, coords_mobile, j, distance, direction=None):
+    """Translate the mobile fragment so its atom `j` sits `distance` Å from atom
+    `i` of the fixed fragment, in `direction`. Returns the new mobile coords.
+
+    This is the "snap A to B" primitive: with A's donor bond aligned to +x and
+    B's acceptor lone pair to -x (two ordinary Transform nodes), snapping at
+    1.9 Å along x builds the hydrogen bond exactly."""
+    cf, cm = _coords(coords_fixed), _coords(coords_mobile)
+    if not (0 <= int(i) < len(cf)):
+        raise ValueError("fixed-fragment atom {} out of range (it has {} atoms)"
+                         .format(i, len(cf)))
+    if not (0 <= int(j) < len(cm)):
+        raise ValueError("mobile-fragment atom {} out of range (it has {} atoms)"
+                         .format(j, len(cm)))
+    return cm + snap_translation(cf[int(i)], cm[int(j)], distance, direction)
+
+
+PLACEMENT_TYPES = ("snap",)
+
+
+def describe_placement(p):
+    """One short human line per placement (for the Combine node's list)."""
+    p = p or {}
+    if p.get("op") == "snap":
+        d = p.get("direction") or "auto"
+        return "snap frag {}[{}] to frag {}[{}] at {:g} A along {}".format(
+            p.get("mobile", 1), p.get("j", 0), p.get("fixed", 0), p.get("i", 0),
+            float(p.get("distance", 0.0)),
+            d if isinstance(d, str) else "({:g}, {:g}, {:g})".format(*d))
+    return str(p.get("op", "?"))
+
+
+def validate_placements(placements, n_fragments=None, frag_sizes=None):
+    """Static checks on a placement list; returns issue strings (empty = OK).
+    `frag_sizes` (atom count per fragment, when known) range-checks the atom
+    indices. Disabled placements are skipped, like disabled ops."""
+    issues = []
+    for k, p in enumerate(placements or []):
+        if not op_enabled(p):
+            continue
+        p = p or {}
+        if p.get("op") not in PLACEMENT_TYPES:
+            issues.append("placement {}: unknown type {!r}".format(k + 1, p.get("op")))
+            continue
+        try:
+            fixed, mobile = int(p.get("fixed")), int(p.get("mobile"))
+        except (TypeError, ValueError):
+            issues.append("placement {}: needs a fixed and a mobile fragment".format(k + 1))
+            continue
+        if fixed == mobile:
+            issues.append("placement {}: the fixed and mobile fragment are the same"
+                          .format(k + 1))
+        if n_fragments is not None:
+            for role, v in (("fixed", fixed), ("mobile", mobile)):
+                if not (0 <= v < n_fragments):
+                    issues.append("placement {}: {} fragment {} doesn't exist ({} wires "
+                                  "connected)".format(k + 1, role, v, n_fragments))
+        try:
+            dist = float(p.get("distance"))
+        except (TypeError, ValueError):
+            issues.append("placement {}: needs a distance in Angstrom".format(k + 1))
+            dist = None
+        if dist is not None and dist <= 0:
+            issues.append("placement {}: distance must be positive".format(k + 1))
+        for key, frag in (("i", fixed), ("j", mobile)):
+            try:
+                idx = int(p.get(key))
+            except (TypeError, ValueError):
+                issues.append("placement {}: '{}' needs an atom index".format(k + 1, key))
+                continue
+            if frag_sizes and 0 <= frag < len(frag_sizes) and not (0 <= idx < frag_sizes[frag]):
+                issues.append("placement {}: atom {} out of range (fragment {} has {} "
+                              "atoms)".format(k + 1, idx, frag, frag_sizes[frag]))
+        d = p.get("direction")
+        if d is not None and not isinstance(d, str):
+            if not (isinstance(d, (list, tuple)) and len(d) == 3):
+                issues.append("placement {}: direction must be an axis name or a 3-vector"
+                              .format(k + 1))
+    return issues
+
+
+def apply_placements(fragments, placements):
+    """Apply a placement list to [(symbols, coords), ...]; returns new fragments.
+
+    Placements run IN ORDER and each moves one whole fragment, so they chain: snap
+    B to A, then C to B. Disabled entries are skipped. Raises ValueError (naming
+    the placement's position) on a bad one."""
+    out = [(list(s), _coords(c)) for s, c in fragments]
+    for k, p in enumerate(placements or []):
+        if not op_enabled(p):
+            continue
+        p = p or {}
+        try:
+            if p.get("op") != "snap":
+                raise ValueError("unknown placement type {!r}".format(p.get("op")))
+            fixed, mobile = int(p["fixed"]), int(p["mobile"])
+            if fixed == mobile:
+                raise ValueError("fixed and mobile fragment are the same")
+            for role, v in (("fixed", fixed), ("mobile", mobile)):
+                if not (0 <= v < len(out)):
+                    raise ValueError("{} fragment {} doesn't exist ({} connected)"
+                                     .format(role, v, len(out)))
+            new_c = snap_fragment(out[fixed][1], p["i"], out[mobile][1], p["j"],
+                                  p.get("distance", 0.0), p.get("direction"))
+            out[mobile] = (out[mobile][0], new_c)
+        except (ValueError, KeyError, TypeError) as e:
+            raise ValueError("placement {} ({}): {}".format(k + 1, (p or {}).get("op", "?"), e))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # The ops-list interpreter (what a Transform node's config stores)
 # ---------------------------------------------------------------------------
 OP_TYPES = ("translate", "rotate", "center", "mirror", "flatten", "align_axis",
-            "align_plane", "set_plane_angle", "align_principal", "align_moiety",
-            "set_dihedral")
+            "align_bisector", "align_plane", "set_plane_angle", "align_principal",
+            "align_moiety", "set_dihedral")
 
 
 def op_enabled(op):
@@ -638,6 +819,9 @@ def _apply_one(symbols, c, op):
         return flatten(c, op.get("plane", "xy"), op.get("atoms"))
     if kind == "align_axis":
         return align_axis(c, int(op["i"]), int(op["j"]), op.get("target", "x"))
+    if kind == "align_bisector":
+        return align_bisector(c, int(op["i"]), int(op["j"]), int(op["k"]),
+                              op.get("target", "x"))
     if kind == "align_plane":
         return align_plane(c, int(op["i"]), int(op["j"]), int(op["k"]),
                            op.get("target", "z"))
@@ -743,7 +927,7 @@ def validate_ops(ops, n_atoms=None):
             chk_idx(op, ("i", "j"), k)
             if op.get("i") == op.get("j"):
                 issues.append("op {}: the two atoms must differ".format(k + 1))
-        elif kind == "align_plane":
+        elif kind in ("align_plane", "align_bisector"):
             chk_idx(op, ("i", "j", "k"), k)
             if len({op.get("i"), op.get("j"), op.get("k")}) != 3:
                 issues.append("op {}: the three atoms must differ".format(k + 1))
@@ -851,6 +1035,9 @@ def describe_op(op):
         if kind == "align_axis":
             return "align atoms {}-{} axis -> {}".format(
                 op.get("i"), op.get("j"), op.get("target", "x"))
+        if kind == "align_bisector":
+            return "align bisector {}-{}-{} -> {}".format(
+                op.get("i"), op.get("j"), op.get("k"), op.get("target", "x"))
         if kind == "align_plane":
             return "align plane ({},{},{}) normal -> {}".format(
                 op.get("i"), op.get("j"), op.get("k"), op.get("target", "z"))

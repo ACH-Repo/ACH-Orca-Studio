@@ -1170,10 +1170,13 @@ class WorkflowTab(ttk.Frame):
         if node.type == "combine":
             nm = str(node.config.get("name") or "").strip()
             pairwise = node.config.get("mode", "merge") == "pairwise"
+            n_place = len(node.config.get("placements") or [])
+            suffix = (" (pairwise)" if pairwise else "") + \
+                     (" +{} snap".format(n_place) if n_place else "")
             if not nm:
                 return "(name required)" if self.wf.has_calc_downstream(node.id) \
-                    else ("pairwise" if pairwise else "merge all inputs")
-            return nm + (" (pairwise)" if pairwise else "")
+                    else ("pairwise" if pairwise else "merge all inputs") + suffix
+            return nm + suffix
         if node.type == "image":
             return os.path.basename(node.config.get("path", "")) or "(paste an image)"
         return ""
@@ -2296,6 +2299,11 @@ class WorkflowTab(ttk.Frame):
             if nid not in self._sel_nodes:
                 self._select_only(nid)
             n = len(self._sel_nodes)
+            node = self.wf.node(nid)
+            if node is not None and not self._is_annotation(node):
+                menu.add_command(label="Run up to here",
+                                 command=lambda i=nid: self.on_run_up_to_here(i))
+                menu.add_separator()
             if n == 2:
                 menu.add_command(label="Connect the 2 selected  (J)",
                                  command=self._connect_selected)
@@ -3131,9 +3139,158 @@ class WorkflowTab(ttk.Frame):
                           "ferromagnetically):", "mult",
                           "Antiferromagnetic / low-spin cases: set it here. Required when "
                           "this Combine feeds a calculation.")
+        self._build_placement_section(node)
         # Preview / Write the merged geometry — same 'run until here' debug view the
         # Transform panel offers (computed in memory; nothing is written to the project).
         self._add_preview_button(node)
+
+    def _build_placement_section(self, node):
+        """The INTER-molecular half of Combine: move whole fragments relative to
+        each other before they're appended (snap a donor H onto an acceptor at
+        1.9 A, …). Same list UX as the Transform ops — [x] tick boxes, Space /
+        On-Off, Delete, Ctrl+Z — because it is the same kind of ordered recipe,
+        just acting on fragments instead of atoms."""
+        from orca_workbench.core import transform as transform_mod
+        f = self.cfg_frame
+        ttk.Separator(f, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Label(f, text="Placement (between fragments):",
+                  font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=8)
+        ttk.Label(f, text="Transform nodes orient each fragment; these position them "
+                  "against each other. Applied in order, just before the append.",
+                  foreground="#555", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        lb = tk.Listbox(f, height=4, exportselection=False, selectmode=tk.EXTENDED,
+                        activestyle="dotbox")
+        lb.pack(fill=tk.X, padx=8, pady=4)
+        self._placement_listbox = lb
+        _OFF_FG = "#9a9a9a"
+
+        def items():
+            return list(node.config.get("placements") or [])
+
+        def refill(select_indices=()):
+            lb.delete(0, tk.END)
+            for i, p in enumerate(items()):
+                on = transform_mod.op_enabled(p)
+                lb.insert(tk.END, "{} {}".format("[x]" if on else "[ ]",
+                                                 transform_mod.describe_placement(p)))
+                if not on:
+                    lb.itemconfigure(i, foreground=_OFF_FG)
+            for i in select_indices:
+                if 0 <= i < lb.size():
+                    lb.selection_set(i)
+
+        def commit(new_items, select_indices=()):
+            self._set_cfg(node, "placements", new_items)
+            refill(select_indices)
+
+        def on_add():
+            p = self._edit_placement_dialog(node, None)
+            if p is not None:
+                new = items() + [p]
+                commit(new, [len(new) - 1])
+
+        def on_edit(_e=None):
+            sel = list(lb.curselection())
+            if len(sel) != 1:
+                return
+            p = self._edit_placement_dialog(node, items()[sel[0]])
+            if p is not None:
+                lst = items()
+                lst[sel[0]] = p
+                commit(lst, [sel[0]])
+
+        def on_remove(_e=None):
+            idx = set(lb.curselection())
+            if not idx:
+                return "break"
+            commit([p for k, p in enumerate(items()) if k not in idx],
+                   [min(idx)] if len(items()) > len(idx) else [])
+            return "break"
+
+        def toggle(_e=None):
+            lst = items()
+            idx = [i for i in lb.curselection() if 0 <= i < len(lst)]
+            if not idx:
+                return "break"
+            target = not all(transform_mod.op_enabled(lst[i]) for i in idx)
+            for i in idx:
+                p = dict(lst[i])
+                if target:
+                    p.pop("enabled", None)
+                else:
+                    p["enabled"] = False
+                lst[i] = p
+            commit(lst, idx)
+            return "break"
+
+        def on_click(e):
+            idx = lb.nearest(e.y)
+            bbox = lb.bbox(idx)
+            if bbox is None or not (0 <= idx < len(items())):
+                return None
+            if e.x <= bbox[0] + 22 and bbox[1] <= e.y <= bbox[1] + bbox[3]:
+                lb.selection_clear(0, tk.END)
+                lb.selection_set(idx)
+                toggle()
+                return "break"
+            return None
+
+        refill()
+        lb.bind("<Double-1>", on_edit)
+        lb.bind("<ButtonPress-1>", on_click, add="+")
+        lb.bind("<space>", toggle)
+        lb.bind("<Delete>", on_remove)
+        lb.bind("<BackSpace>", on_remove)
+        for seq in ("<Control-z>", "<Control-Z>"):
+            lb.bind(seq, self._undo_op_list)
+        for seq in ("<Control-y>", "<Control-Y>", "<Control-Shift-z>", "<Control-Shift-Z>"):
+            lb.bind(seq, self._redo_op_list)
+        lb.bind("<Enter>", lambda e: lb.focus_set(), add="+")
+
+        row = ttk.Frame(f)
+        row.pack(fill=tk.X, padx=8)
+        b = ttk.Button(row, text="Snap...", width=8, command=on_add)
+        b.pack(side=tk.LEFT, padx=1)
+        tip(b, "Add a placement: put an atom of one fragment at a chosen distance from "
+               "an atom of another (e.g. a donor H 1.9 A from an acceptor O), along a "
+               "chosen direction. The mobile fragment is translated only — the "
+               "orientation you built with Transform nodes is preserved.")
+        ttk.Button(row, text="Edit...", width=7, command=on_edit).pack(side=tk.LEFT, padx=1)
+        ttk.Button(row, text="Remove", width=8, command=on_remove).pack(side=tk.LEFT, padx=1)
+        ttk.Button(row, text="On/Off", width=8, command=toggle).pack(side=tk.LEFT, padx=1)
+
+    def _edit_placement_dialog(self, node, placement):
+        """Open the placement editor with one reference geometry PER INBOUND WIRE
+        (fragment order = connection order), so both anchor atom indices can be
+        read off the real structures."""
+        from orca_workbench.ui.placement_dialog import PlacementDialog
+        frags = self._combine_fragment_geoms(node)
+        dlg = PlacementDialog(self, placement=placement, fragments=frags)
+        return dlg.result
+
+    def _combine_fragment_geoms(self, node):
+        """[(label, symbols, coords), ...] — the FIRST molecule arriving on each
+        wire into this Combine, in connection order. That's the fragment order the
+        placements index, and chained Transform/Combine upstream are computed in
+        memory (nothing is materialised)."""
+        backend, cache, _pending, _notes = self._make_geom_backend()
+        try:
+            streams, _warns = wf_mod.compute_streams(self.wf, self._source_molsets(), backend)
+        except Exception:
+            return []
+        out = []
+        for e in self.wf.edges_into(node.id, "geometry"):
+            names = streams.get(e.src_node, [])
+            if not names:
+                out.append(("(no molecules)", [], []))
+                continue
+            try:
+                g = self._read_geom(names[0], cache)
+                out.append((names[0], g["symbols"], g["coords"]))
+            except Exception:
+                out.append((names[0], [], []))
+        return out
 
     def _guide_combine_fix(self, node_id, missing):
         """Select the offending Combine, red-highlight the empty name/charge/mult
@@ -3754,11 +3911,12 @@ class WorkflowTab(ttk.Frame):
         except Exception:
             return False
 
-    def _expand(self, verb, source_ids=None):
+    def _expand(self, verb, source_ids=None, only_nodes=None):
         """Validate + expand the graph into PlannedCalcs, asking the user to
         confirm. Reuses existing calcs for the same (graph node, molecule) so a
         re-run continues rather than duplicating. If `source_ids` is given, only
-        those networks are expanded. Returns (calcs, node_map) or None."""
+        those networks are expanded; if `only_nodes` is given, only those calc
+        nodes produce calcs ("run up to here"). Returns (calcs, node_map) or None."""
         # A Combine that feeds a calc but lacks an explicit name / charge / mult gets
         # a dedicated guided fix (popup -> select node -> highlight + focus the
         # missing box), which takes priority over the generic blocker list.
@@ -3830,7 +3988,8 @@ class WorkflowTab(ttk.Frame):
         geom_backend, _geom_cache, geom_pending, geom_notes = self._make_geom_backend()
         calcs, warnings, node_map = wf_mod.expand_to_calcs(self.wf, mol_files, factory,
                                                            source_ids=source_ids,
-                                                           transform_apply=geom_backend)
+                                                           transform_apply=geom_backend,
+                                                           only_nodes=only_nodes)
         warnings.extend(geom_notes)   # per-molecule transform skips, shown in the confirm
         if not calcs:
             messagebox.showinfo("Nothing generated",
@@ -3839,7 +3998,12 @@ class WorkflowTab(ttk.Frame):
         new_calcs = [c for c in calcs if id(c) not in existing_before]
         reused = len(calcs) - len(new_calcs)
         n_gated = sum(1 for c in calcs if getattr(c, "gate", None))
-        scope = "selected pipeline" if source_ids is not None else "pipeline"
+        if only_nodes is not None:
+            scope = "sub-pipeline (up to the selected node)"
+        elif source_ids is not None:
+            scope = "selected pipeline"
+        else:
+            scope = "pipeline"
         msg = "{} {} calculation(s) from this {} in category '{}'?".format(
             verb, len(calcs), scope, self.wf.category)
         if reused:
@@ -3958,6 +4122,40 @@ class WorkflowTab(ttk.Frame):
         scope = "selected pipeline" if source_ids is not None else "pipeline"
         self.app.set_status("{} running: {} calculation(s) under automatic control."
                             .format(scope.capitalize(), len(calcs)))
+        self.refresh_live()
+
+    def on_run_up_to_here(self, node_id):
+        """KNIME's "execute up to here": run the chosen node and everything it
+        DEPENDS on, and nothing else. Anything downstream is left untouched, so
+        you can bring a long pipeline up to a checkpoint, look at the result, and
+        only then let the rest go. Already-finished steps are reused, not re-run."""
+        node = self.wf.node(node_id)
+        if node is None:
+            return
+        upto = self.wf.ancestors([node_id])
+        calc_nodes = [n for n in self.wf.nodes
+                      if n.id in upto and n.type in wf_mod.CALC_NODE_TYPES]
+        if not calc_nodes:
+            messagebox.showinfo(
+                "Run up to here",
+                "'{}' has no calculation node at or before it — there's nothing to run "
+                "yet.\n\nGeometry-building nodes (Molecules / Transform / Combine) are "
+                "evaluated when the pipeline is generated; use 'Preview output (3D)' to "
+                "see what they produce.".format(node.label))
+            return
+        res = self._expand("Run", source_ids=self.wf.network_sources([node_id]),
+                           only_nodes=upto)
+        if res is None:
+            return
+        calcs, _ = res
+        self.app.refresh_all_tabs()
+        try:
+            self.app.notebook.select(self.app.calculations_tab)
+        except Exception:
+            pass
+        self.app.calculations_tab.start_pipeline([c.id for c in calcs], reports=[])
+        self.app.set_status("Running up to '{}': {} calculation(s) ({} node(s))."
+                            .format(node.label, len(calcs), len(calc_nodes)))
         self.refresh_live()
 
     def on_submit_unattended(self):

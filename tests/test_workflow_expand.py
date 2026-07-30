@@ -179,6 +179,75 @@ def test_fan_in_optimises_raw_and_combined_molecules_from_one_node(tmp_path):
     assert all(c.origin_node == opt.id for c in proj.planned_calcs)
 
 
+def test_combine_placement_snaps_the_fragments_together(tmp_path):
+    """A Combine placement builds the non-covalent complex: fragment 1's atom 0 is
+    put exactly 1.9 A from fragment 0's atom 1, along +x, before the append."""
+    import numpy as np
+    proj = _project(tmp_path, n_mols=2)
+    w = wf_mod.Workflow()
+    m1 = w.add_node("molecules", config={"mode": "selection", "filenames": ["000"]})
+    m2 = w.add_node("molecules", config={"mode": "selection", "filenames": ["001"]})
+    comb = w.add_node("combine", config={
+        "name": "dimer", "charge": 0, "mult": 1,
+        "placements": [{"op": "snap", "fixed": 0, "mobile": 1, "i": 1, "j": 0,
+                        "distance": 1.9, "direction": "x"}]})
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    w.add_edge(m1.id, "geometry", comb.id, "geometry")
+    w.add_edge(m2.id, "geometry", comb.id, "geometry")
+    w.add_edge(comb.id, "geometry", opt.id, "geometry")
+    proj.workflow = w.to_dict()
+
+    res = wexp.expand_project_workflow(proj)
+    assert res["expanded"], res["blockers"]
+    dimer = next(mol for mol in proj.molecules if mol.filename.startswith("dimer"))
+    atoms, _ = coords_mod.read_xyz(os.path.join(proj.root(), dimer.xyz_path))
+    assert len(atoms) == 6
+    a1 = np.array(atoms[1][1:])        # fragment 0, atom 1 (the anchor)
+    b0 = np.array(atoms[3][1:])        # fragment 1, atom 0 (its anchor)
+    assert abs(np.linalg.norm(b0 - a1) - 1.9) < 1e-4
+    assert abs((b0 - a1)[0] - 1.9) < 1e-4      # along +x
+
+
+def test_combine_placement_clash_is_reported_but_not_fatal(tmp_path):
+    proj = _project(tmp_path, n_mols=2)
+    w = wf_mod.Workflow()
+    m1 = w.add_node("molecules", config={"mode": "selection", "filenames": ["000"]})
+    m2 = w.add_node("molecules", config={"mode": "selection", "filenames": ["001"]})
+    comb = w.add_node("combine", config={
+        "name": "clash", "charge": 0, "mult": 1,
+        "placements": [{"op": "snap", "fixed": 0, "mobile": 1, "i": 0, "j": 0,
+                        "distance": 0.3, "direction": "x"}]})
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    w.add_edge(m1.id, "geometry", comb.id, "geometry")
+    w.add_edge(m2.id, "geometry", comb.id, "geometry")
+    w.add_edge(comb.id, "geometry", opt.id, "geometry")
+    proj.workflow = w.to_dict()
+
+    res = wexp.expand_project_workflow(proj)
+    assert res["expanded"]                              # still built
+    assert any("come within" in x for x in res["warnings"])
+
+
+def test_invalid_placement_is_a_blocker(tmp_path):
+    proj = _project(tmp_path, n_mols=2)
+    w = wf_mod.Workflow()
+    m1 = w.add_node("molecules", config={"mode": "selection", "filenames": ["000"]})
+    m2 = w.add_node("molecules", config={"mode": "selection", "filenames": ["001"]})
+    comb = w.add_node("combine", config={
+        "name": "bad", "charge": 0, "mult": 1,
+        "placements": [{"op": "snap", "fixed": 0, "mobile": 0, "i": 0, "j": 0,
+                        "distance": 1.9}]})       # fixed == mobile
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    w.add_edge(m1.id, "geometry", comb.id, "geometry")
+    w.add_edge(m2.id, "geometry", comb.id, "geometry")
+    w.add_edge(comb.id, "geometry", opt.id, "geometry")
+    proj.workflow = w.to_dict()
+
+    res = wexp.expand_project_workflow(proj)
+    assert res["expanded"] is False
+    assert any("same" in b for b in res["blockers"])
+
+
 def test_combine_without_a_name_is_a_blocker(tmp_path):
     proj = _project(tmp_path, n_mols=2)
     w = wf_mod.Workflow()

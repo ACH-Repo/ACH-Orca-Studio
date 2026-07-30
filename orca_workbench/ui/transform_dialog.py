@@ -24,6 +24,7 @@ _TYPES = [
     ("mirror", "Mirror across a plane"),
     ("flatten", "Flatten onto a plane (planarize)"),
     ("align_axis", "Align 2-atom axis to x/y/z"),
+    ("align_bisector", "Align 3-atom bisector to x/y/z (lone-pair side)"),
     ("align_plane", "Align 3-atom plane (face) to x/y/z"),
     ("set_plane_angle", "Set 3-atom plane angle to a coordinate plane"),
     ("align_moiety", "Align a moiety onto a template molecule"),
@@ -140,8 +141,10 @@ class TransformOpDialog(tk.Toplevel):
         f = self._fields_frame
         ttk.Label(f, text="Target lab axis:").pack(anchor=tk.W, pady=(4, 0))
         var = tk.StringVar(value=str(self._op.get("target", default)))
-        ttk.Combobox(f, textvariable=var, state="readonly", values=["x", "y", "z"],
-                     width=5).pack(anchor=tk.W)
+        # Signed axes matter for anything DIRECTED (which way a bond or a
+        # lone pair faces), e.g. pointing two fragments at each other.
+        ttk.Combobox(f, textvariable=var, state="readonly",
+                     values=["x", "-x", "y", "-y", "z", "-z"], width=5).pack(anchor=tk.W)
         self._vars["target"] = var
 
     def _field_list(self, label, key):
@@ -246,6 +249,18 @@ class TransformOpDialog(tk.Toplevel):
             self._field("Atom i (stays fixed):", "i", default="0", width=8)
             self._field("Atom j:", "j", default="1", width=8)
             self._target_combo("x")
+        elif kind == "align_bisector":
+            self._field("Atom i (first bond partner, e.g. an H):", "i", default="0")
+            self._field("Atom j (the CENTRE atom, e.g. the O):", "j", default="1")
+            self._field("Atom k (second bond partner, e.g. the other H):", "k", default="2")
+            self._target_combo("x")
+            ttk.Label(self._fields_frame,
+                      text="Points the i-j-k bisector along the target axis. The LONE "
+                           "PAIRS then point the opposite way — so for a hydrogen-bond "
+                           "acceptor, aim the bisector AWAY from the donor (e.g. +x when "
+                           "the donor sits at -x).",
+                      foreground="#777", wraplength=250, justify=tk.LEFT).pack(
+                          anchor=tk.W, pady=(4, 0))
         elif kind == "align_plane":
             self._field("Atom i:", "i", default="0", width=8)
             self._field("Atom j:", "j", default="1", width=8)
@@ -404,7 +419,7 @@ class TransformOpDialog(tk.Toplevel):
                 op["i"] = int(self._vars["i"].get())
                 op["j"] = int(self._vars["j"].get())
                 op["target"] = self._vars["target"].get()
-            elif kind == "align_plane":
+            elif kind in ("align_bisector", "align_plane"):
                 for key in ("i", "j", "k"):
                     op[key] = int(self._vars[key].get())
                 op["target"] = self._vars["target"].get()

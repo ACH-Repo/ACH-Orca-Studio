@@ -73,6 +73,29 @@ class GeometryBackend(object):
     def read_geom(self, fname):
         return read_geometry(self.project, fname, self.cache)
 
+    # Below this, two fragments are interpenetrating rather than interacting.
+    # (A hydrogen bond is ~1.6-2.2 A H...acceptor, so this only fires on a real
+    # mistake — a wrong atom index or a sign flip in the snap direction.)
+    _CLASH_A = 0.9
+
+    def _clash_note(self, frags, names):
+        """A warning if placement left two fragments overlapping. Non-fatal: the
+        geometry is still built (you may be deliberately close), but silence
+        here would mean discovering it in a failed SCF an hour later."""
+        worst = None
+        for a in range(len(frags)):
+            for b in range(a + 1, len(frags)):
+                d = transform_mod.min_distance(frags[a][1], frags[b][1])
+                if worst is None or d < worst[0]:
+                    worst = (d, a, b)
+        if worst and worst[0] < self._CLASH_A:
+            na = names[worst[1]] if worst[1] < len(names) else worst[1]
+            nb = names[worst[2]] if worst[2] < len(names) else worst[2]
+            return ("Combine: after placement, '{}' and '{}' come within {:.2f} A — check "
+                    "the snap atoms/direction (they may be overlapping)."
+                    .format(na, nb, worst[0]))
+        return None
+
     def _emit(self, name, syms, xyz, q, mult, note, node_id):
         self.cache[name] = {"symbols": syms, "coords": xyz, "charge": q, "mult": mult}
         self.pending.append({"fname": name, "symbols": syms, "coords": xyz, "charge": q,
@@ -115,10 +138,20 @@ class GeometryBackend(object):
         else:
             rows = [[nm for s in streams for nm in s]]
         base = (node.config.get("name") or "").strip() or "combined"
+        placements = node.config.get("placements") or []
         out = []
         for i, row in enumerate(rows):
             geoms = [self.read_geom(nm) for nm in row]
-            syms, xyz = transform_mod.combine([(g["symbols"], g["coords"]) for g in geoms])
+            frags = [(g["symbols"], g["coords"]) for g in geoms]
+            if placements:
+                # INTER-molecular placement: move whole fragments relative to each
+                # other (e.g. snap a donor H onto an acceptor at 1.9 A) before the
+                # append. Each fragment keeps the orientation its Transform gave it.
+                frags = transform_mod.apply_placements(frags, placements)
+                clash = self._clash_note(frags, row)
+                if clash:
+                    self.notes.append(clash)
+            syms, xyz = transform_mod.combine(frags)
             q = sum(g["charge"] for g in geoms)
             mult = sum(g["mult"] - 1 for g in geoms) + 1
             if node.config.get("charge") is not None:

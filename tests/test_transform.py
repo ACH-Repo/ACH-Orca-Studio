@@ -155,6 +155,192 @@ def test_apply_ops_reports_bad_op_position():
     assert "op 2" in str(e.value)
 
 
+# --- inter-molecular placement (the Combine node) --------------------------
+
+# A water: O, then two H. Atom 1 (an H) is the donor hydrogen.
+WATER_SYMS = ["O", "H", "H"]
+WATER = np.array([[0.0, 0.0, 0.0], [0.9572, 0.0, 0.0], [-0.2400, 0.9267, 0.0]])
+
+
+def test_signed_axis_vectors():
+    assert np.allclose(T._axis_vec("-x"), [-1, 0, 0])
+    assert np.allclose(T._axis_vec("+z"), [0, 0, 1])
+    assert np.allclose(T._axis_vec("x"), [1, 0, 0])
+    with pytest.raises(ValueError):
+        T._axis_vec("-q")
+
+
+def test_snap_fragment_sets_the_exact_distance_and_direction():
+    """The H-bond build: donor H of A at 1.9 A from acceptor O of B, along +x."""
+    a = WATER.copy()                       # fixed: atom 1 = donor H
+    b = WATER.copy() + np.array([50.0, 3.0, -7.0])   # mobile, far away
+    moved = T.snap_fragment(a, 1, b, 0, 1.9, "x")
+    d = moved[0] - a[1]
+    assert np.linalg.norm(d) == pytest.approx(1.9)
+    assert np.allclose(d, [1.9, 0.0, 0.0])
+    # a translation: the mobile fragment's internal geometry is untouched
+    assert np.allclose(_dists(moved), _dists(b))
+
+
+def test_snap_auto_direction_keeps_the_current_orientation():
+    a = WATER.copy()
+    b = WATER.copy() + np.array([0.0, 6.0, 0.0])     # sitting +y from A
+    moved = T.snap_fragment(a, 0, b, 0, 2.5, None)   # auto: keep +y, fix distance
+    d = moved[0] - a[0]
+    assert np.linalg.norm(d) == pytest.approx(2.5)
+    assert np.allclose(T._unit(d), [0.0, 1.0, 0.0])
+
+
+def test_snap_negative_axis_and_bad_indices():
+    a, b = WATER.copy(), WATER.copy() + 10.0
+    moved = T.snap_fragment(a, 0, b, 0, 2.0, "-z")
+    assert np.allclose(moved[0] - a[0], [0.0, 0.0, -2.0])
+    with pytest.raises(ValueError):
+        T.snap_fragment(a, 9, b, 0, 2.0, "x")
+    with pytest.raises(ValueError):
+        T.snap_fragment(a, 0, b, 9, 2.0, "x")
+
+
+def test_apply_placements_builds_a_dimer_and_chains():
+    frags = [(WATER_SYMS, WATER.copy()),
+             (WATER_SYMS, WATER.copy() + 20.0),
+             (WATER_SYMS, WATER.copy() - 30.0)]
+    placements = [{"op": "snap", "fixed": 0, "mobile": 1, "i": 1, "j": 0,
+                   "distance": 1.9, "direction": "x"},
+                  # chained: fragment 2 hangs off fragment 1
+                  {"op": "snap", "fixed": 1, "mobile": 2, "i": 1, "j": 0,
+                   "distance": 2.1, "direction": "y"}]
+    out = T.apply_placements(frags, placements)
+    assert np.linalg.norm(out[1][1][0] - out[0][1][1]) == pytest.approx(1.9)
+    assert np.linalg.norm(out[2][1][0] - out[1][1][1]) == pytest.approx(2.1)
+    assert np.allclose(out[0][1], WATER)          # the fixed fragment never moves
+    syms, xyz = T.combine(out)
+    assert len(syms) == 9 and xyz.shape == (9, 3)
+
+
+def test_disabled_placement_is_skipped():
+    frags = [(WATER_SYMS, WATER.copy()), (WATER_SYMS, WATER.copy() + 20.0)]
+    p = {"op": "snap", "fixed": 0, "mobile": 1, "i": 1, "j": 0, "distance": 1.9,
+         "direction": "x", "enabled": False}
+    out = T.apply_placements(frags, [p])
+    assert np.allclose(out[1][1], WATER + 20.0)   # untouched
+
+
+def test_apply_placements_reports_the_offending_position():
+    frags = [(WATER_SYMS, WATER.copy()), (WATER_SYMS, WATER.copy() + 5.0)]
+    with pytest.raises(ValueError) as e:
+        T.apply_placements(frags, [
+            {"op": "snap", "fixed": 0, "mobile": 1, "i": 1, "j": 0, "distance": 2.0},
+            {"op": "snap", "fixed": 0, "mobile": 5, "i": 0, "j": 0, "distance": 2.0}])
+    assert "placement 2" in str(e.value)
+
+
+def test_validate_placements():
+    ok = [{"op": "snap", "fixed": 0, "mobile": 1, "i": 1, "j": 0, "distance": 1.9,
+           "direction": "-x"}]
+    assert T.validate_placements(ok, n_fragments=2, frag_sizes=[3, 3]) == []
+    issues = T.validate_placements([
+        {"op": "warp", "fixed": 0, "mobile": 1},
+        {"op": "snap", "fixed": 0, "mobile": 0, "i": 0, "j": 0, "distance": 1.0},
+        {"op": "snap", "fixed": 0, "mobile": 3, "i": 0, "j": 0, "distance": 1.0},
+        {"op": "snap", "fixed": 0, "mobile": 1, "i": 9, "j": 0, "distance": 1.0},
+        {"op": "snap", "fixed": 0, "mobile": 1, "i": 0, "j": 0, "distance": -1.0},
+        {"op": "snap", "fixed": 0, "mobile": 1, "i": 0, "j": 0, "distance": 1.0,
+         "direction": [1, 0]},
+    ], n_fragments=2, frag_sizes=[3, 3])
+    assert len(issues) == 6
+    # a disabled placement is never an issue
+    assert T.validate_placements([{"op": "warp", "enabled": False}], n_fragments=2) == []
+
+
+def test_describe_placement():
+    text = T.describe_placement({"op": "snap", "fixed": 0, "mobile": 1, "i": 1,
+                                 "j": 0, "distance": 1.9, "direction": "x"})
+    assert "1.9" in text and "frag 1[0]" in text and "frag 0[1]" in text
+
+
+def test_align_bisector_points_the_lone_pairs():
+    """The H-O-H bisector goes along the target axis, so the lone-pair side faces
+    the other way — and atom j (the centre) doesn't move."""
+    out = T.align_bisector(WATER, 1, 0, 2, "x")
+    b = T.bisector(out, 1, 0, 2)
+    assert np.allclose(b, [1, 0, 0], atol=1e-9)
+    assert np.allclose(out[0], WATER[0])                 # the O stayed put
+    assert np.allclose(_dists(out), _dists(WATER))       # rigid
+    # both hydrogens end up on the +x side, lone pairs towards -x
+    assert out[1][0] > 0 and out[2][0] > 0
+    flipped = T.align_bisector(WATER, 1, 0, 2, "-x")
+    assert np.allclose(T.bisector(flipped, 1, 0, 2), [-1, 0, 0], atol=1e-9)
+
+
+def test_align_bisector_errors():
+    with pytest.raises(ValueError):
+        T.bisector(WATER, 1, 0, 9)                       # out of range
+    linear = np.array([[-1.0, 0, 0], [0.0, 0, 0], [1.0, 0, 0]])
+    with pytest.raises(ValueError):
+        T.bisector(linear, 0, 1, 2)                      # opposite bonds: undefined
+
+
+def test_align_bisector_through_the_ops_interpreter():
+    op = {"op": "align_bisector", "i": 1, "j": 0, "k": 2, "target": "x"}
+    assert T.validate_ops([op], n_atoms=3) == []
+    assert "bisector" in T.describe_op(op)
+    out = T.apply_ops(WATER_SYMS, WATER, [op])
+    assert np.allclose(T.bisector(out, 1, 0, 2), [1, 0, 0], atol=1e-9)
+    assert T.validate_ops([{"op": "align_bisector", "i": 1, "j": 1, "k": 2}], n_atoms=3)
+
+
+def test_hbond_dimer_recipe_gives_a_real_hydrogen_bond():
+    """The recipe that ORCA confirms: donor O-H along +x, ACCEPTOR BISECTOR along
+    +x (so its lone pairs face -x, back at the donor), snapped at 1.95 A.
+
+    Verified against real ORCA 6.0.1 (HF/def2-SVP): -5.1 kcal/mol, i.e. a proper
+    water dimer. Aligning the acceptor's O-H instead of its bisector gives a
+    near-unbound -0.5 kcal/mol arrangement, which is why align_bisector exists."""
+    donor = T.apply_ops(WATER_SYMS, WATER, [{"op": "align_axis", "i": 0, "j": 1,
+                                             "target": "x"}])
+    acceptor = T.apply_ops(WATER_SYMS, WATER, [{"op": "align_bisector", "i": 1, "j": 0,
+                                                "k": 2, "target": "x"}])
+    frags = T.apply_placements([(WATER_SYMS, donor), (WATER_SYMS, acceptor)],
+                               [{"op": "snap", "fixed": 0, "mobile": 1, "i": 1, "j": 0,
+                                 "distance": 1.95, "direction": "x"}])
+    donor_h, acc_o = frags[0][1][1], frags[1][1][0]
+    assert np.linalg.norm(acc_o - donor_h) == pytest.approx(1.95)
+    # near-linear O-H...O (the hallmark of a hydrogen bond)
+    v1 = donor_h - frags[0][1][0]
+    v2 = acc_o - donor_h
+    cos = float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+    assert cos > 0.999
+    # the acceptor's hydrogens point AWAY from the donor, not at it
+    assert frags[1][1][1][0] > acc_o[0] and frags[1][1][2][0] > acc_o[0]
+    assert T.min_distance(frags[0][1], frags[1][1]) == pytest.approx(1.95, abs=1e-6)
+
+
+def test_full_hbond_workflow_align_then_snap():
+    """The end-to-end recipe: orient each monomer with ordinary Transform ops,
+    then snap them together into a water dimer.
+
+    Both monomers get their O->H along +x: the donor's H then points AT the
+    partner, and the acceptor's O leads with its lone-pair side (its own H
+    points away, downstream). Aligning the acceptor's O-H to -x instead would
+    aim its hydrogen straight back at the donor H — an H...H contact, not an
+    H bond — which is exactly the mistake the clash check warns about."""
+    a = T.apply_ops(WATER_SYMS, WATER, [{"op": "align_axis", "i": 0, "j": 1,
+                                         "target": "x"}])
+    b = T.apply_ops(WATER_SYMS, WATER, [{"op": "align_axis", "i": 0, "j": 1,
+                                         "target": "x"}])
+    frags = T.apply_placements([(WATER_SYMS, a), (WATER_SYMS, b)],
+                               [{"op": "snap", "fixed": 0, "mobile": 1, "i": 1,
+                                 "j": 0, "distance": 1.9, "direction": "x"}])
+    donor_h, acceptor_o = frags[0][1][1], frags[1][1][0]
+    assert np.linalg.norm(acceptor_o - donor_h) == pytest.approx(1.9)
+    # nothing else got closer than the H bond itself: a sane, non-clashing dimer
+    assert T.min_distance(frags[0][1], frags[1][1]) == pytest.approx(1.9, abs=1e-6)
+    # ... and both monomers kept their internal geometry
+    assert np.allclose(_dists(frags[0][1]), _dists(WATER), atol=1e-9)
+    assert np.allclose(_dists(frags[1][1]), _dists(WATER), atol=1e-9)
+
+
 def test_disabled_op_is_skipped_but_keeps_its_place():
     """Unticking one op of a chain must change only that step's contribution —
     the rest still run, in order, and the op stays in the list."""

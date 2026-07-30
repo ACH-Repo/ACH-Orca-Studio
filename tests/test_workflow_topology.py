@@ -22,6 +22,43 @@ def _factory(mol, recipe, category, gsource, parent, gate, origin):
                        gate=gate, origin_node=origin)
 
 
+def test_ancestors_are_the_run_up_to_here_subgraph():
+    w = wf.Workflow()
+    m = w.add_node("molecules")
+    opt = w.add_node("optimize", config={"recipe": "o"})
+    frq = w.add_node("frequencies", config={"recipe": "f"})
+    nmr = w.add_node("property", config={"recipe": "n"})
+    rep = w.add_node("report")
+    w.add_edge(m.id, "geometry", opt.id, "geometry")
+    w.add_edge(opt.id, "geometry", frq.id, "geometry")
+    w.add_edge(frq.id, "geometry", nmr.id, "geometry")
+    w.add_edge(nmr.id, "results", rep.id, "results")
+    assert w.ancestors([frq.id]) == {m.id, opt.id, frq.id}
+    assert w.ancestors([frq.id], include_self=False) == {m.id, opt.id}
+    assert w.ancestors([opt.id]) == {m.id, opt.id}
+    assert w.ancestors([rep.id]) == {m.id, opt.id, frq.id, nmr.id, rep.id}
+
+
+def test_expand_only_nodes_runs_up_to_a_checkpoint():
+    w = wf.Workflow()
+    m = w.add_node("molecules")
+    opt = w.add_node("optimize", config={"recipe": "o"})
+    frq = w.add_node("frequencies", config={"recipe": "f"})
+    nmr = w.add_node("property", config={"recipe": "n"})
+    w.add_edge(m.id, "geometry", opt.id, "geometry")
+    w.add_edge(opt.id, "geometry", frq.id, "geometry")
+    w.add_edge(frq.id, "geometry", nmr.id, "geometry")
+    calcs, _warn, _nm = wf.expand_to_calcs(w, ["A"], _factory,
+                                           only_nodes=w.ancestors([frq.id]))
+    assert [c.recipe_name for c in calcs] == ["o", "f"]        # nothing downstream
+    # the parent link into the checkpoint still resolves
+    by = {c.recipe_name: c for c in calcs}
+    assert by["f"].parent_id == by["o"].id
+    # and the full graph still expands to everything
+    all_calcs, _w2, _n2 = wf.expand_to_calcs(w, ["A"], _factory)
+    assert sorted(c.recipe_name for c in all_calcs) == ["f", "n", "o"]
+
+
 def test_to_dict_snapshots_are_independent_of_the_live_config():
     """The editor's undo history is a list of to_dict() snapshots, so a snapshot
     must not alias the node's config — otherwise editing the config also rewrites
