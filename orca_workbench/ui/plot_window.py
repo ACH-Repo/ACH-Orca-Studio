@@ -72,6 +72,10 @@ class LivePlotWindow(tk.Toplevel):
         self._drag = None
         self._arrivals = []            # (wall time, total SCF iters, opt steps)
         self._last_parsed = None
+        # Click-a-point-to-see-that-geometry (EXPERIMENTAL): the plotted (step,
+        # value) pairs per panel, and which step the user last opened.
+        self._step_points = {}         # panel -> [(step, value), ...]
+        self._picked_step = None
 
         try:
             import matplotlib
@@ -107,6 +111,12 @@ class LivePlotWindow(tk.Toplevel):
         ttk.Label(left, textvariable=self.rate_var, foreground="#446", anchor=tk.W).pack(
             side=tk.TOP, fill=tk.X)
         ttk.Label(left, text=out_path, foreground="#666", anchor=tk.W).pack(
+            side=tk.TOP, fill=tk.X)
+        # Click-a-point hint / result (only meaningful when there's a trajectory).
+        self.pick_var = tk.StringVar(
+            value=("Tip: click a point on the optimisation curve to open THAT step's "
+                   "geometry in the 3D viewer." if self.trj_path else ""))
+        ttk.Label(left, textvariable=self.pick_var, foreground="#146", anchor=tk.W).pack(
             side=tk.TOP, fill=tk.X)
         if self.geom_path:
             b = ttk.Button(right, text="Optimized geometry (3D)...",
@@ -149,6 +159,7 @@ class LivePlotWindow(tk.Toplevel):
         ttk.Button(btns, text="Close", command=self._on_close).pack(side=tk.RIGHT)
 
         self._bind_plot_keys()
+        self.canvas.mpl_connect("button_press_event", self._on_point_click)
         self.canvas.mpl_connect("button_press_event", self._drag_press)
         self.canvas.mpl_connect("motion_notify_event", self._drag_motion)
         self.canvas.mpl_connect("button_release_event", self._drag_release)
@@ -449,6 +460,7 @@ class LivePlotWindow(tk.Toplevel):
 
         self.fig.clear()
         self._axes = {}
+        self._step_points = {}
         n = len(panels)
         for i, name in enumerate(panels):
             share = self._axes.get("energy") if name == "conv" else None
@@ -459,6 +471,7 @@ class LivePlotWindow(tk.Toplevel):
         if ax is not None:
             if len(fe) > 1:
                 ax.plot(range(1, len(fe) + 1), fe, marker="o", color="#1f77b4")
+                self._step_points["energy"] = list(zip(range(1, len(fe) + 1), fe))
                 if not shared:
                     ax.set_xlabel("geometry step")
                 ax.set_ylabel("energy (Eh)")
@@ -477,6 +490,7 @@ class LivePlotWindow(tk.Toplevel):
             if rms:
                 ax.semilogy(range(1, len(rms) + 1), rms, marker="o",
                             label="RMS gradient", color="#d62728")
+                self._step_points["conv"] = list(zip(range(1, len(rms) + 1), rms))
             if mx:
                 ax.semilogy(range(1, len(mx) + 1), mx, marker="s",
                             label="MAX gradient", color="#ff7f0e")
@@ -513,7 +527,119 @@ class LivePlotWindow(tk.Toplevel):
             if a is not None:
                 a.set_xlim(lims[0])
                 a.set_ylim(lims[1])
+        # the figure was rebuilt, so re-ring the step whose geometry is open
+        self._mark_picked_step()
 
+        self.canvas.draw_idle()
+
+    # ------------------------------- click a point -> that step's geometry (3D)
+    # EXPERIMENTAL. The optimisation-energy and gradient panels are indexed by
+    # geometry step, and ORCA's <mol>_trj.xyz holds one frame per step — so a click
+    # on a marker can open exactly the structure that produced that energy. Frames
+    # are matched by the energy stamped in their comment when possible (robust if
+    # the counts don't line up), else by position.
+    _PICK_TOL_PX = 14.0
+
+    def _on_point_click(self, event):
+        if (self._nav_mode or event.button != 1 or event.inaxes is None
+                or event.xdata is None or event.ydata is None):
+            return                      # a nav drag / a click off the axes
+        panel = None
+        for name, ax in self._axes.items():
+            if ax is event.inaxes:
+                panel = name
+                break
+        pts = self._step_points.get(panel) or []
+        if not pts:
+            return
+        ax = event.inaxes
+        best = None
+        for step, val in pts:
+            try:
+                px, py = ax.transData.transform((step, val))
+            except Exception:
+                continue
+            d = ((px - event.x) ** 2 + (py - event.y) ** 2) ** 0.5
+            if best is None or d < best[0]:
+                best = (d, step, val)
+        if best is None or best[0] > self._PICK_TOL_PX:
+            return                      # not close enough to a marker: ignore
+        self._show_step_geometry(int(best[1]))
+
+    def _trj_frame_for_step(self, frames, step):
+        """(index, energy) of the trajectory frame belonging to geometry `step`.
+
+        Prefers matching the frame whose comment energy equals the plotted energy
+        of that step; falls back to positional indexing (clamped)."""
+        target = None
+        fe = (self._last_parsed or {}).get("final_energies") or []
+        if 1 <= step <= len(fe):
+            target = fe[step - 1]
+        if target is not None:
+            best = None
+            for i, (_atoms, meta) in enumerate(frames):
+                e = orca_parser.trj_comment_energy((meta or {}).get("comment"))
+                if e is None:
+                    continue
+                d = abs(e - target)
+                if best is None or d < best[0]:
+                    best = (d, i, e)
+            if best is not None and best[0] < 1e-6:
+                return best[1], best[2]
+        idx = min(max(0, step - 1), len(frames) - 1)
+        meta = frames[idx][1] or {}
+        return idx, orca_parser.trj_comment_energy(meta.get("comment"))
+
+    def _show_step_geometry(self, step):
+        """Open the geometry of optimisation step `step` in the external 3D viewer."""
+        from tkinter import messagebox
+        p = self.trj_path
+        if not p or not os.path.isfile(p):
+            self.pick_var.set("step {}: no trajectory on disk yet.".format(step))
+            messagebox.showinfo(
+                "No trajectory yet",
+                "Opening the geometry of a single optimisation step reads the job's "
+                "trajectory:\n{}\n\nIt isn't there yet. A local run writes it after the "
+                "first step; a cluster job keeps it on the compute node's scratch until "
+                "it ends and copies back then.".format(p or "(unknown)"), parent=self)
+            return
+        try:
+            from orca_workbench.core import coords as coords_mod
+            frames = coords_mod._read_xyz_frames(p)
+            if not frames:
+                raise ValueError("no frames in {}".format(p))
+            idx, energy = self._trj_frame_for_step(frames, step)
+            atoms, _meta = frames[idx]
+            import tempfile
+            tdir = tempfile.mkdtemp(prefix="orca_wb_step_")
+            out = os.path.join(tdir, "opt_step_{:03d}.xyz".format(idx + 1))
+            coords_mod.write_xyz(out, atoms, {
+                "name": "opt step {}".format(idx + 1),
+                "comment": "geometry of optimisation step {}{}".format(
+                    idx + 1, "" if energy is None else " (E = {:.8f} Eh)".format(energy))})
+        except Exception as e:
+            messagebox.showwarning("Step geometry", str(e), parent=self)
+            return
+        self._picked_step = step
+        self._mark_picked_step()
+        self.pick_var.set("opened step {} of {}{} — click another point for its geometry."
+                          .format(idx + 1, len(frames),
+                                  "" if energy is None else
+                                  "  (E = {:.8f} Eh)".format(energy)))
+        from orca_workbench.ui.molecules_tab import open_xyz_3d
+        open_xyz_3d(self, self.app, out)
+
+    def _mark_picked_step(self):
+        """Ring the point whose geometry is open, in every step-indexed panel."""
+        step = self._picked_step
+        if step is None:
+            return
+        for name, ax in self._axes.items():
+            for s, val in (self._step_points.get(name) or []):
+                if s != step:
+                    continue
+                ax.plot([s], [val], marker="o", ms=13, mfc="none", mec="#c62828",
+                        mew=1.8, zorder=5, label="_picked")
         self.canvas.draw_idle()
 
     # ------------------------------------------------- geometry (OPT) launchers

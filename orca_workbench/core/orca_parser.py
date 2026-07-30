@@ -478,6 +478,28 @@ _SCAN_HEADER = re.compile(r"(?im)^\s*The Calculated Surface using the .*energy\s
 _SCAN_ROW = re.compile(r"^\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*$")
 
 
+_TRJ_E = re.compile(r"\bE\s+(-?\d+\.\d+)")
+
+
+def trj_comment_energy(comment):
+    # type: (Optional[str]) -> Optional[float]
+    """The energy ORCA stamps into a trajectory frame's comment line, e.g.
+    ``Coordinates from ORCA-job wat E -74.964220507248`` -> -74.96422…, or None.
+
+    Lets a trajectory frame be matched to a point on the optimisation-energy plot
+    by VALUE rather than by position, which survives a job whose trajectory and
+    printed energies don't line up one-to-one (a restart, a scan)."""
+    if not comment:
+        return None
+    m = _TRJ_E.search(comment)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
 def parse_relaxed_scan(text):
     # type: (str) -> List[dict]
     """Relaxed surface-scan profile from an OPT+Scan .out: a list of
