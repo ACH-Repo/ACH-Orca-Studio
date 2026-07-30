@@ -29,3 +29,6 @@ submit_all.sh
 
 # Per-user app config (lives in ~/.orca_workbench.json anyway; never commit one)
 .orca_workbench.json
+
+# App autosave scratch file (written into the cwd when the GUI runs from here)
+tempsave.json

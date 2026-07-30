@@ -54,7 +54,10 @@ class GeomSpecDialog(tk.Toplevel):
         ttk.Label(self, text=(
             "Freeze coordinates and/or run ONE relaxed surface scan for this optimisation. "
             "Atom indices are 0-based (see the list). A blank constraint value freezes the "
-            "current value. Needs an OPT recipe (`! Opt`)."),
+            "current value. Needs an OPT recipe (`! Opt`).\n"
+            "Values may be a number OR an expression measured from the input geometry: "
+            "current (the scanned/constrained coordinate), B(i,j), A(i,j,k), D(i,j,k,l), "
+            "plus + - * /.  e.g. scan from 'current' to 'current + 1.5'."),
             justify=tk.LEFT, wraplength=600, foreground="#444").pack(
             side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
 
@@ -179,8 +182,10 @@ class GeomSpecDialog(tk.Toplevel):
         self._scan_steps = tk.StringVar(value="10")
         self._scan_steps_e = ttk.Entry(row, textvariable=self._scan_steps, width=5)
         self._scan_steps_e.pack(side=tk.LEFT)
-        ttk.Label(outer, text="Distances in Å, angles/dihedrals in degrees.",
-                  foreground="#666").pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 4))
+        ttk.Label(outer, text="Distances in Å, angles/dihedrals in degrees. from/to accept "
+                  "expressions, e.g. from=current, to=current+1.5 (elongate the bond by 1.5 Å).",
+                  foreground="#666", wraplength=560, justify=tk.LEFT).pack(
+                      side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 4))
         self._scan_widgets = [self._scan_type_cb, self._scan_atoms_e, self._scan_start_e,
                               self._scan_end_e, self._scan_steps_e]
 
@@ -246,7 +251,7 @@ class GeomSpecDialog(tk.Toplevel):
 
     def _save(self):
         spec = self._collect()
-        errs = G.validate(spec, n_atoms=len(self._atoms))
+        errs = G.validate(spec, n_atoms=len(self._atoms), atoms=self._atoms)
         if errs:
             messagebox.showerror("Check the spec", "\n".join(errs), parent=self)
             return

@@ -248,6 +248,19 @@ class BaseSpectrumWindow(tk.Toplevel):
     # own legend, so it turns these off (no dead offset slider, no duplicate legend).
     SHOW_OFFSET = True
     AUTO_LEGEND = True
+    # Breathing room above and below the data, as a fraction of the y-span: a peak
+    # touching the frame reads as clipped. Applied after the subclass has drawn.
+    Y_MARGIN = 0.05
+    # One wheel notch scales intensities by this factor (Mestrenova-style);
+    # Ctrl+wheel zooms x by the same step about the cursor.
+    WHEEL_STEP = 1.2
+    # True: the wheel scales each trace's AMPLITUDE about its own baseline (a data
+    # transform — every trace grows by the same amount and the stack spacing is
+    # untouched). False: the wheel scales the VIEW about y_anchor(), which is right
+    # for a plot whose y-values are the quantity itself (the SCF bar chart — you
+    # cannot "turn up" an energy).
+    WHEEL_SCALES_AMPLITUDE = True
+    Y_SCALE_LIMITS = (1e-3, 1e6)
 
     def __init__(self, parent, window_title):
         super().__init__(parent)
@@ -267,6 +280,12 @@ class BaseSpectrumWindow(tk.Toplevel):
         self._home_ylim = None
         self._nav_mode = None     # None | zoom_h/zoom_v/zoom_box | pan_h/pan_v/pan_free
         self._drag = None         # active zoom/pan drag state
+        # Intensity scaling (the wheel): a multiplier on every trace's amplitude,
+        # applied about its own baseline so a stack keeps its spacing.
+        self.y_scale = 1.0
+        # (xlim, ylim) to re-apply after the next redraw instead of the data view —
+        # set when a redraw must NOT move the view (a wheel notch, see _on_scroll).
+        self._pin_view = None
         self._mpl_ok = True
         try:
             self._Figure, self._Canvas, self._NavToolbar = _load_mpl_full()
@@ -336,6 +355,7 @@ class BaseSpectrumWindow(tk.Toplevel):
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         self.canvas.mpl_connect("button_press_event", self._drag_press)
         self.canvas.mpl_connect("button_release_event", self._drag_release)
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self._bind_plot_keys()
 
         fit_to_content(self)     # non-modal: keep real WM decorations (maximize button)
@@ -374,8 +394,8 @@ class BaseSpectrumWindow(tk.Toplevel):
             e.bind("<Return>", lambda _e: self._redraw())
             self._lim_entries[k] = e
         ttk.Button(row, text="Apply", width=6, command=self._redraw).pack(side=tk.LEFT, padx=(3, 1))
-        ttk.Label(row, text="   keys over plot:  F reset · M limits · Z zoom · P pan · "
-                  "R redraw · Ctrl+S save · Ctrl+W close",
+        ttk.Label(row, text="   over the plot:  wheel = scale y · Ctrl+wheel = zoom x · "
+                  "F reset · M limits · Z zoom · P pan · R redraw · Ctrl+S save · Ctrl+W close",
                   foreground="#777").pack(side=tk.LEFT, padx=8)
         self._mode_label = ttk.Label(row, text="", foreground="#0055aa",
                                      font=("TkDefaultFont", 9, "bold"))
@@ -494,6 +514,103 @@ class BaseSpectrumWindow(tk.Toplevel):
             self._lim["y0"].set(""); self._lim["y1"].set("")
             ax.set_ylim(self._home_ylim)
             self.canvas.draw_idle()
+        elif abs(self.y_scale - 1.0) > 1e-9:
+            # both axes already home: the only thing left to undo is the wheel
+            self.set_y_scale(1.0, pin=False)
+
+    # ------------------------------------------------------- margins & wheel
+
+    def _pad_ylim(self, ax):
+        """Give the traces `Y_MARGIN` of headroom above and below.
+
+        Subclasses set explicit y-limits (an IR transmission axis runs 0-100, a
+        stacked NMR is sized from its offsets), which overrides matplotlib's own
+        default margin and leaves peaks touching the frame. This re-applies it on
+        whatever the subclass ended up with, respecting the axis direction."""
+        if not self.Y_MARGIN:
+            return
+        try:
+            lo, hi = ax.get_ylim()
+            reverse = lo > hi
+            lo, hi = (hi, lo) if reverse else (lo, hi)
+            pad = (hi - lo) * float(self.Y_MARGIN)
+            if pad <= 0:
+                return
+            ax.set_ylim((hi + pad, lo - pad) if reverse else (lo - pad, hi + pad))
+        except Exception:
+            pass
+
+    def y_anchor(self):
+        """The 'neutral horizontal' a VIEW-scaling wheel pivots about (only used
+        when WHEEL_SCALES_AMPLITUDE is False). 0 for anything drawn up from zero."""
+        return 0.0
+
+    def amp(self, value):
+        """Scale one amplitude — a curve value, a stick height, a peak apex —
+        by the current intensity factor. Everything a subclass draws RELATIVE TO
+        ITS BASELINE goes through here; baselines themselves must not, or the
+        stack would spread out as you scale."""
+        return value * self.y_scale
+
+    def set_y_scale(self, value, pin=True):
+        """Set the intensity factor and redraw. `pin` keeps the current view, so
+        the peaks visibly grow inside it instead of the axis growing with them."""
+        lo, hi = self.Y_SCALE_LIMITS
+        value = min(max(float(value), lo), hi)
+        if value == self.y_scale:
+            return
+        self.y_scale = value
+        if pin and self.ax is not None:
+            self._pin_view = (self.ax.get_xlim(), self.ax.get_ylim())
+        for k in ("y0", "y1"):                  # a typed y-limit would fight the wheel
+            if k in self._lim:
+                self._lim[k].set("")
+        self._redraw()
+        self._show_y_scale()
+
+    def _show_y_scale(self):
+        try:
+            if self._nav_mode:
+                return                          # the nav mode owns the label
+            self._mode_label.configure(
+                text="" if abs(self.y_scale - 1.0) < 1e-9
+                else "  intensity x{:g}  (F resets)".format(round(self.y_scale, 3)))
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _on_scroll(self, event):
+        """Wheel = vertical intensity scaling, like Mestrenova: every trace grows
+        or shrinks about ITS OWN baseline, so a stacked plot keeps its spacing and
+        the traces higher up don't fly off the top. Ctrl+wheel zooms x about the
+        cursor. (A trackpad's two-finger scroll arrives as the same events.)"""
+        ax = self.ax
+        if ax is None or event.button not in ("up", "down"):
+            return
+        step = self.WHEEL_STEP if event.button == "up" else 1.0 / self.WHEEL_STEP
+        if (event.key or "").startswith("control"):
+            if event.xdata is None:
+                return
+            f = 1.0 / step
+            x0, x1 = ax.get_xlim()
+            ax.set_xlim(event.xdata + (x0 - event.xdata) * f,
+                        event.xdata + (x1 - event.xdata) * f)
+            self.canvas.draw_idle()
+            return
+        if self.WHEEL_SCALES_AMPLITUDE:
+            self.set_y_scale(self.y_scale * step)
+            return
+        # View scaling about the baseline: for plots whose y IS the quantity.
+        a = self.y_anchor()
+        if a is None:
+            y0, y1 = ax.get_ylim()
+            a = 0.5 * (y0 + y1)
+        y0, y1 = ax.get_ylim()
+        f = 1.0 / step
+        ax.set_ylim(a + (y0 - a) * f, a + (y1 - a) * f)
+        for k in ("y0", "y1"):
+            if k in self._lim:
+                self._lim[k].set("")
+        self.canvas.draw_idle()
 
     # -------------------------------------------------- custom zoom / pan (no toolbar)
 
@@ -548,9 +665,29 @@ class BaseSpectrumWindow(tk.Toplevel):
             except Exception:
                 self._drag["rect"] = None
 
+    def _drag_data_xy(self, d, event):
+        """Data coords of the cursor DURING a drag, from pixels through the
+        press-time transform, then clamped to the view.
+
+        Deliberately not event.xdata/ydata: those are None the moment the cursor
+        leaves the axes, which used to abort a box zoom mid-drag — so selecting a
+        region that reaches the edge of the plot meant carefully not overshooting.
+        Now the drag simply pins to the edge and keeps going."""
+        inv = d.get("inv")
+        if inv is None:
+            return None, None
+        try:
+            x, y = inv.transform((event.x, event.y))
+        except Exception:
+            return None, None
+        (xa, xb), (ya, yb) = d["xlim"], d["ylim"]
+        x = min(max(x, min(xa, xb)), max(xa, xb))
+        y = min(max(y, min(ya, yb)), max(ya, yb))
+        return float(x), float(y)
+
     def _drag_motion(self, event):
         d = self._drag
-        if d is None or event.xdata is None or event.ydata is None:
+        if d is None:
             return
         ax = self.ax
         mode = d["mode"]
@@ -572,14 +709,17 @@ class BaseSpectrumWindow(tk.Toplevel):
         rect = d.get("rect")
         if rect is None:
             return
+        cx, cy = self._drag_data_xy(d, event)
+        if cx is None:
+            return
         x0, y0 = d["x0"], d["y0"]
         (xa, xb), (ya, yb) = ax.get_xlim(), ax.get_ylim()
         if mode == "zoom_h":
-            rx0, rx1, ry0, ry1 = x0, event.xdata, min(ya, yb), max(ya, yb)
+            rx0, rx1, ry0, ry1 = x0, cx, min(ya, yb), max(ya, yb)
         elif mode == "zoom_v":
-            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, event.ydata
+            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, cy
         else:
-            rx0, rx1, ry0, ry1 = x0, event.xdata, y0, event.ydata
+            rx0, rx1, ry0, ry1 = x0, cx, y0, cy
         rect.set_bounds(min(rx0, rx1), min(ry0, ry1), abs(rx1 - rx0), abs(ry1 - ry0))
         try:
             self.canvas.restore_region(d["bg"])
@@ -604,8 +744,9 @@ class BaseSpectrumWindow(tk.Toplevel):
                 rect.remove()
             except Exception:
                 pass
-        xe = event.xdata if event.xdata is not None else d["x0"]
-        ye = event.ydata if event.ydata is not None else d["y0"]
+        xe, ye = self._drag_data_xy(d, event)
+        if xe is None:
+            xe, ye = d["x0"], d["y0"]
         x0, y0 = d["x0"], d["y0"]
         if mode in ("zoom_h", "zoom_box") and abs(xe - x0) > 1e-12:
             self._set_axis(ax.set_xlim, ax.get_xlim, x0, xe)
@@ -630,11 +771,40 @@ class BaseSpectrumWindow(tk.Toplevel):
         """Baseline of the topmost stacked trace (0 when not offset)."""
         return self.baseline(len(self.mols) - 1, ref_amplitude)
 
+    # Draw ordering for stacked traces. A y-offset waterfall should read
+    # front-to-back like Mestrenova: the BOTTOM trace (i=0) sits in FRONT and the
+    # higher-offset traces recede BEHIND it. matplotlib draws higher zorder on top,
+    # so trace 0 gets the highest value and trace N-1 the lowest (2 = mpl's default
+    # line z, still above the grid). Hover/label artists use HOVER_Z to stay on top.
+    HOVER_Z = 50
+
+    def _trace_zorder(self, i):
+        return 2 + (len(self.mols) - 1 - i)
+
     # ------------------------------------------------------ redraw skeleton
+
+    def _keep_view(self):
+        """(xlim, ylim) to restore after a redraw — each entry None when that axis
+        is still at its data view.
+
+        A redraw is triggered by things that change the DRAWING (the stack offset,
+        FWHM, sticks, an intensity change), not the region you're looking at, so
+        throwing away a zoom every time the offset slider moves is just lost work.
+        Axes still at home follow the new data instead."""
+        ax = self.ax
+        if ax is None or not self._home_xlim:
+            return (None, None)
+        x = ax.get_xlim()
+        y = ax.get_ylim()
+        return (None if self._lims_close(x, self._home_xlim) else x,
+                None if self._lims_close(y, self._home_ylim) else y)
 
     def _redraw(self):
         if not getattr(self, "fig", None):
             return
+        keep_x, keep_y = self._keep_view()
+        pin = self._pin_view
+        self._pin_view = None
         try:
             self.fig.clear()
             self._hover_artists = []
@@ -642,11 +812,23 @@ class BaseSpectrumWindow(tk.Toplevel):
             ax = self.fig.add_subplot(111)
             self.ax = ax
             self.plot(ax)
+            self._pad_ylim(ax)
             # Capture the data-driven view as 'home' (for the F reset) BEFORE any
             # manual limit-box overrides are applied on top.
             self._home_xlim = ax.get_xlim()
             self._home_ylim = ax.get_ylim()
             self._apply_limit_boxes(ax)
+            # Restore the view: everything for a pinned redraw (a wheel notch, where
+            # the point is that the peaks grow INSIDE the current view), otherwise
+            # just the axes the user had moved off their data view.
+            if pin is not None:
+                ax.set_xlim(pin[0])
+                ax.set_ylim(pin[1])
+            else:
+                if keep_x is not None:
+                    ax.set_xlim(keep_x)
+                if keep_y is not None:
+                    ax.set_ylim(keep_y)
             if self._stacked:
                 if self.AUTO_LEGEND:
                     # Fixed location, NOT 'best': loc='best' recomputes the legend
@@ -766,6 +948,15 @@ class IRSpectrumWindow(BaseSpectrumWindow):
         self.mode_btn.configure(text="Show: " + self.mode_var.get().capitalize())
         self._redraw()
 
+    def y_anchor(self):
+        """IR is the one spectrum whose baseline moves: in ABSORBANCE it's 0 and
+        bands grow upwards, in TRANSMITTANCE it's 100 % and they hang down from
+        the top. The wheel scales about whichever it currently is, so bands grow
+        out of the baseline either way instead of sliding off the axis."""
+        # Anchor on the FIRST trace's baseline in both modes, so the bottom trace
+        # stays put and a stack compresses/expands away from it.
+        return 100.0 if getattr(self, "_transmission", False) else 0.0
+
     def _imax_all(self):
         return max((m.get("_imax", 1.0) for m in self.mols), default=1.0) or 1.0
 
@@ -778,8 +969,8 @@ class IRSpectrumWindow(BaseSpectrumWindow):
         inflated wherever two lines overlapped — the 'sticks too tall' bug.)"""
         if transmission:
             frac = it / self._imax_all()
-            return (base + 100.0, base + 100.0 * (1.0 - frac))
-        return (base, base + it)
+            return (base + 100.0, base + 100.0 * (1.0 - self.amp(frac)))
+        return (base, base + self.amp(it))
 
     def plot(self, ax):
         fwhm = max(1.0, float(self.fwhm_var.get()))
@@ -801,25 +992,28 @@ class IRSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(curves):
             base = self.baseline(i, ref)
             m["_base"] = base
+            m["_z"] = self._trace_zorder(i)
             if transmission:
                 ypk = max(ys) or 1.0
-                tvals = [base + 100.0 * (1.0 - y / ypk) for y in ys]
-                ax.plot(xs, tvals, color=m["color"], lw=0.8, label=m["short"])
+                tvals = [base + 100.0 * (1.0 - self.amp(y / ypk)) for y in ys]
+                ax.plot(xs, tvals, color=m["color"], lw=0.8, label=m["short"], zorder=m["_z"])
             else:
-                ax.plot(xs, [y + base for y in ys], color=m["color"], lw=0.8, label=m["short"])
+                ax.plot(xs, [self.amp(y) + base for y in ys], color=m["color"], lw=0.8,
+                        label=m["short"], zorder=m["_z"])
 
         if self.sticks_var.get():
             for i, (m, xs, ys) in enumerate(curves):
                 base = m["_base"]
                 for c, it in zip(m["centers"], m["intens"]):
                     y0, y1 = self._stick_span(it, base, transmission)
-                    ax.vlines(c, y0, y1, color=m["color"], linewidth=0.5, alpha=0.6)
+                    ax.vlines(c, y0, y1, color=m["color"], linewidth=0.5, alpha=0.6,
+                              zorder=m["_z"])
 
         if transmission:
-            ax.set_ylim(-2.0, 102.0 + self.stack_top(ref))
+            ax.set_ylim(0.0, 100.0 + self.stack_top(ref))
             ax.set_ylabel("transmittance (%)")
         else:
-            ax.set_ylim(0, (self._ymax + self.stack_top(ref)) * 1.12)
+            ax.set_ylim(0, self.amp(self._ymax) + self.stack_top(ref))
             ax.set_ylabel("IR absorbance (a.u.)")
 
         ax.set_xlim(hi, lo)   # IR convention: high wavenumber on the left
@@ -857,12 +1051,13 @@ class IRSpectrumWindow(BaseSpectrumWindow):
             for c, it in near:
                 y0, y1 = self._stick_span(it, m.get("_base", 0.0), self._transmission)
                 self._hover_artists.append(
-                    ax.vlines(c, y0, y1, color=(0.05, 0.05, 0.05), linewidth=0.9))
+                    ax.vlines(c, y0, y1, color=(0.05, 0.05, 0.05), linewidth=0.9,
+                              zorder=self.HOVER_Z))
         near_sorted = sorted(near, key=lambda t: t[0], reverse=True)
         text = "\n".join("{:.1f}   I={:.1f}".format(c, it) for c, it in near_sorted)
         self._hover_artists.append(ax.annotate(
             text, xy=(0.02, 0.98), xycoords="axes fraction", va="top", ha="left",
-            fontsize=9, family="monospace",
+            fontsize=9, family="monospace", zorder=self.HOVER_Z,
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
@@ -952,7 +1147,9 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(curves):
             base = self.baseline(i, ref)
             m["_base"] = base
-            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.0, label=m["short"])
+            m["_z"] = self._trace_zorder(i)
+            ax.plot(xs, [self.amp(y) + base for y in ys], color=m["color"], lw=1.0,
+                    label=m["short"], zorder=m["_z"])
 
         if self.sticks_var.get():
             for m in self.mols:
@@ -960,11 +1157,12 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
                 for c, f in zip(self._centers(m), m["fosc"]):
                     if f <= 0:
                         continue
-                    ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
-                              color=m["color"], linewidth=0.6, alpha=0.6)
+                    ax.vlines(c, base, base + self.amp(self._ymax * (f / m["_fmax"])),
+                              color=m["color"], linewidth=0.6, alpha=0.6,
+                              zorder=m.get("_z", 2))
 
         ax.set_xlim(lo, hi)
-        ax.set_ylim(0, (self._ymax + self.stack_top(ref)) * 1.12)
+        ax.set_ylim(0, self.amp(self._ymax) + self.stack_top(ref))
         ax.set_xlabel("wavelength (nm)" if nm_axis else "energy (eV)")
         ax.set_ylabel("oscillator strength / absorbance (a.u.)")
         ax.set_title("Simulated UV-Vis spectrum")
@@ -1003,14 +1201,14 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
                 if f <= 0:
                     continue
                 self._hover_artists.append(
-                    ax.vlines(c, base, base + self._ymax * (f / m["_fmax"]),
-                              color=(0.05, 0.05, 0.05), linewidth=0.9))
+                    ax.vlines(c, base, base + self.amp(self._ymax * (f / m["_fmax"])),
+                              color=(0.05, 0.05, 0.05), linewidth=0.9, zorder=self.HOVER_Z))
         text = "\n".join("{:.1f} {}   f={:.3f}".format(c, unit, f)
                          for c, f in sorted(near, key=lambda t: t[0]))
         if text:
             self._hover_artists.append(ax.annotate(
                 text, xy=(0.02, 0.98), xycoords="axes fraction", va="top", ha="left",
-                fontsize=9, family="monospace",
+                fontsize=9, family="monospace", zorder=self.HOVER_Z,
                 bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
@@ -1216,7 +1414,9 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(curves):
             base = self.baseline(i, ref)
             m["_base"] = base
-            ax.plot(xs, [y + base for y in ys], color=m["color"], lw=1.4, label=m["short"])
+            m["_z"] = self._trace_zorder(i)
+            ax.plot(xs, [self.amp(y) + base for y in ys], color=m["color"], lw=0.6,
+                    label=m["short"], zorder=m["_z"])
 
         # Peak-shift labels (Mestrenova-style: the ppm value in a vertical caption
         # above each peak apex, coloured to its trace). Off by default; when off the
@@ -1231,24 +1431,31 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
                   else "isotropic shielding σ (ppm)")
         # NMR convention: high shift / low shielding on the left (axis reversed).
         ax.set_xlim(view_hi, view_lo)
-        ax.set_ylim(0, (ref + self.stack_top(ref)) * 1.18)
+        ax.set_ylim(0, self.amp(ref) + self.stack_top(ref))
         ax.set_xlabel(xlabel)
         ax.set_ylabel("intensity (a.u.)")
         ax.set_title("Simulated {} NMR".format(self.nucleus_label))
 
     def _peak_apex(self, m, center, fwhm):
-        """y of a peak's apex (baseline + the summed Lorentzian at that center)."""
-        return m.get("_base", 0.0) + sum(S.lorentzian(center, c, fwhm) for c in m["shifts"])
+        """y of a peak's apex (baseline + the summed Lorentzian at that center),
+        following the current intensity scale so labels stay on their peaks."""
+        return m.get("_base", 0.0) + self.amp(
+            sum(S.lorentzian(center, c, fwhm) for c in m["shifts"]))
 
     def _draw_shift_label(self, ax, m, center, fwhm, bold=False, hover=False):
-        """A vertical ppm caption above a peak apex. Persistent labels are drawn in
-        plot(); hover labels go through _hover_artists so they clear on the next move."""
+        """A vertical ppm caption held a little above a peak apex, joined to the apex
+        by a fine black leader line (Mestrenova-style): the offset keeps the number
+        clear of the peak, the connector shows which peak it belongs to. The leader is
+        always black/hairline regardless of trace colour. Persistent labels are drawn
+        in plot(); hover labels go through _hover_artists so they clear on the next move."""
         apex = self._peak_apex(m, center, fwhm)
         art = ax.annotate("{:.2f}".format(center), xy=(center, apex),
-                          xytext=(0, 3), textcoords="offset points", rotation=90,
+                          xytext=(0, 16), textcoords="offset points", rotation=90,
                           ha="center", va="bottom", fontsize=9 if hover else 8,
-                          color=m["color"], clip_on=False,
-                          fontweight="bold" if bold else "normal")
+                          color=m["color"], clip_on=False, zorder=self.HOVER_Z,
+                          fontweight="bold" if bold else "normal",
+                          arrowprops=dict(arrowstyle="-", color="black",
+                                          linewidth=0.4, shrinkA=1.5, shrinkB=1.5))
         if hover:
             self._hover_artists.append(art)
 
@@ -1483,12 +1690,13 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
         for i, (m, field, trace) in enumerate(traces):
             base = self.baseline(i, ref)
             m["_base"] = base
-            ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
+            m["_z"] = self._trace_zorder(i)
+            ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5, zorder=1)
             xs = [clo] + list(field) + [chi]
-            ys = [base] + [v + base for v in trace] + [base]
+            ys = [base] + [self.amp(v) + base for v in trace] + [base]
             # g_iso in the (colour-coded) legend label — replaces the old permanent
             # top-left text box, which would eventually collide with offset traces.
-            ax.plot(xs, ys, color=m["color"], lw=1.0,
+            ax.plot(xs, ys, color=m["color"], lw=1.0, zorder=m["_z"],
                     label="{}  g={:.4f}".format(m["short"], m["g_iso"]))
 
         # Line markers: draw for EVERY trace at its own baseline (works stacked too now),
@@ -1501,8 +1709,9 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
                 peak = max((abs(v) for v in trace), default=1.0) or 1.0
                 imax = max((it for _, it in sticks), default=1.0) or 1.0
                 for bc, inten in sticks:
-                    ax.vlines(bc, base, base + peak * (inten / imax),
-                              color="#888888", linewidth=0.6, alpha=0.6)
+                    ax.vlines(bc, base, base + self.amp(peak * (inten / imax)),
+                              color="#888888", linewidth=0.6, alpha=0.6,
+                              zorder=m.get("_z", 2))
 
         ax.set_xlim(clo, chi)
         ax.set_xlabel("magnetic field (mT)")
@@ -1569,7 +1778,7 @@ class EPRSpectrumWindow(BaseSpectrumWindow):
         self._hover_artists.append(ax.annotate(
             "{}\ng_iso = {:.5f}\ng(cursor) = {:.5f}".format(m["short"], m["g_iso"], g_cursor),
             xy=(0.99, 0.02), xycoords="axes fraction", va="bottom", ha="right",
-            fontsize=9, family="monospace",
+            fontsize=9, family="monospace", zorder=self.HOVER_Z,
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
@@ -1664,11 +1873,12 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
         for i, (m, xs, ys) in enumerate(traces):
             base = self.baseline(i, ref)
             m["_base"] = base
+            m["_z"] = self._trace_zorder(i)
             if base or deriv:
-                ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5)
+                ax.axhline(base, color="#dddddd" if base else "#cccccc", lw=0.5, zorder=1)
             xx = [clo] + list(xs) + [chi]
-            yy = [base] + [v + base for v in ys] + [base]
-            ax.plot(xx, yy, color=m["color"], lw=1.0, label=m["short"])
+            yy = [base] + [self.amp(v) + base for v in ys] + [base]
+            ax.plot(xx, yy, color=m["color"], lw=1.0, label=m["short"], zorder=m["_z"])
         ax.set_xlim(clo, chi)
 
         if self.sticks_var.get():
@@ -1679,8 +1889,9 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
                 peak = max((abs(v) for v in trace), default=1.0) or 1.0
                 smax = max((it for _, it in sticks), default=1.0) or 1.0
                 for fc, inten in sticks:
-                    ax.vlines(fc, base, base + peak * (inten / smax),
-                              color="#888888", linewidth=0.6, alpha=0.6)
+                    ax.vlines(fc, base, base + self.amp(peak * (inten / smax)),
+                              color="#888888", linewidth=0.6, alpha=0.6,
+                              zorder=m.get("_z", 2))
 
         ax.set_xlabel("RF frequency (MHz)")
         ax.set_ylabel("first-derivative (a.u.)" if deriv else "ENDOR intensity (a.u.)")
@@ -1730,7 +1941,7 @@ class ENDORSpectrumWindow(BaseSpectrumWindow):
         self._hover_artists.append(ax.annotate(
             "{}\nRF = {:.2f} MHz".format(m["short"], event.xdata),
             xy=(0.99, 0.02), xycoords="axes fraction", va="bottom", ha="right",
-            fontsize=9, family="monospace",
+            fontsize=9, family="monospace", zorder=self.HOVER_Z,
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="#888")))
         if self._stacked:
             self._set_active(best)
@@ -1757,6 +1968,9 @@ class SCFEnergyBarWindow(BaseSpectrumWindow):
 
     SHOW_OFFSET = False     # bars have no vertical-stack semantics
     AUTO_LEGEND = False     # draw_scf_bars draws its own (calc-type) legend
+    # A bar's height IS the energy — scaling it would be a lie. The wheel zooms the
+    # VIEW about 0 (where the bars start) instead.
+    WHEEL_SCALES_AMPLITUDE = False
 
     def __init__(self, parent, title, entries):
         # type: (tk.Misc, str, List[dict]) -> None

@@ -71,3 +71,14 @@ def test_parse_orca_output_carries_both_keys():
 
 def test_no_scf_no_blocks():
     assert P.parse_scf_blocks("nothing to see here\n1 2.0\n") == []
+
+
+def test_trj_comment_energy():
+    """A trajectory frame's comment carries the energy of that optimisation step —
+    what lets a clicked point on the energy plot find its own geometry."""
+    assert P.trj_comment_energy(
+        "Coordinates from ORCA-job wat E -74.964220507248") == -74.964220507248
+    assert P.trj_comment_energy("Coordinates from ORCA-job x E 12.5") == 12.5
+    assert P.trj_comment_energy("no energy here") is None
+    assert P.trj_comment_energy("") is None
+    assert P.trj_comment_energy(None) is None

@@ -73,6 +73,29 @@ class GeometryBackend(object):
     def read_geom(self, fname):
         return read_geometry(self.project, fname, self.cache)
 
+    # Below this, two fragments are interpenetrating rather than interacting.
+    # (A hydrogen bond is ~1.6-2.2 A H...acceptor, so this only fires on a real
+    # mistake — a wrong atom index or a sign flip in the snap direction.)
+    _CLASH_A = 0.9
+
+    def _clash_note(self, frags, names):
+        """A warning if placement left two fragments overlapping. Non-fatal: the
+        geometry is still built (you may be deliberately close), but silence
+        here would mean discovering it in a failed SCF an hour later."""
+        worst = None
+        for a in range(len(frags)):
+            for b in range(a + 1, len(frags)):
+                d = transform_mod.min_distance(frags[a][1], frags[b][1])
+                if worst is None or d < worst[0]:
+                    worst = (d, a, b)
+        if worst and worst[0] < self._CLASH_A:
+            na = names[worst[1]] if worst[1] < len(names) else worst[1]
+            nb = names[worst[2]] if worst[2] < len(names) else worst[2]
+            return ("Combine: after placement, '{}' and '{}' come within {:.2f} A — check "
+                    "the snap atoms/direction (they may be overlapping)."
+                    .format(na, nb, worst[0]))
+        return None
+
     def _emit(self, name, syms, xyz, q, mult, note, node_id):
         self.cache[name] = {"symbols": syms, "coords": xyz, "charge": q, "mult": mult}
         self.pending.append({"fname": name, "symbols": syms, "coords": xyz, "charge": q,
@@ -83,7 +106,12 @@ class GeometryBackend(object):
         if node.type == "transform":
             ops = node.config.get("ops") or []
             out = []
-            note_ops = "; ".join(transform_mod.describe_op(o) for o in ops)
+            # The provenance comment records what actually RAN — disabled ops are
+            # noted as skipped rather than silently claimed.
+            live = transform_mod.enabled_ops(ops)
+            note_ops = "; ".join(transform_mod.describe_op(o) for o in live)
+            if len(live) != len(ops):
+                note_ops += " [{} op(s) disabled]".format(len(ops) - len(live))
             for nm in streams[0]:
                 # Per-molecule: one molecule the ops don't fit (atom index out of
                 # range, ring bond, ...) is SKIPPED with a note — the rest of the
@@ -110,10 +138,20 @@ class GeometryBackend(object):
         else:
             rows = [[nm for s in streams for nm in s]]
         base = (node.config.get("name") or "").strip() or "combined"
+        placements = node.config.get("placements") or []
         out = []
         for i, row in enumerate(rows):
             geoms = [self.read_geom(nm) for nm in row]
-            syms, xyz = transform_mod.combine([(g["symbols"], g["coords"]) for g in geoms])
+            frags = [(g["symbols"], g["coords"]) for g in geoms]
+            if placements:
+                # INTER-molecular placement: move whole fragments relative to each
+                # other (e.g. snap a donor H onto an acceptor at 1.9 A) before the
+                # append. Each fragment keeps the orientation its Transform gave it.
+                frags = transform_mod.apply_placements(frags, placements)
+                clash = self._clash_note(frags, row)
+                if clash:
+                    self.notes.append(clash)
+            syms, xyz = transform_mod.combine(frags)
             q = sum(g["charge"] for g in geoms)
             mult = sum(g["mult"] - 1 for g in geoms) + 1
             if node.config.get("charge") is not None:
@@ -126,15 +164,26 @@ class GeometryBackend(object):
         return out
 
 
-def flush_materialisations(project, pending):
+def flush_materialisations(project, pending, needed=None):
     """Write the pending derived geometries into `project`: a TRANSFORM/<name>.xyz
-    plus a locked Molecule row (updated in place on a re-expand). A molecule whose
-    calcs already left the planning stage (exported / submitted) is left
-    untouched, so a finished result can't silently sit on different coordinates.
-    Returns a list of warning strings."""
+    plus — for the ones a calculation actually uses — a locked Molecule row
+    (updated in place on a re-expand). A molecule whose calcs already left the
+    planning stage (exported / submitted) is left untouched, so a finished result
+    can't silently sit on different coordinates. Returns a list of warning strings.
+
+    `needed` is the set of molecule filenames the expansion's calcs reference
+    (None = all of them, the old behaviour). Intermediate geometries — a Transform
+    whose output only feeds another Transform / a Combine / a Write — get their
+    .xyz written (so you can inspect them) but NO Molecule row: they aren't
+    molecules of the project, they're steps on the way to one, and listing every
+    one of them buried the real inputs in the Molecules tab. A row that exists
+    from an older expansion but is no longer needed (and has no calculations
+    pointing at it) is removed as part of the same clean-up.
+    """
     from orca_workbench.core import coords as coords_mod
     root = project.root()
     warns = []
+    used_by_calc = {c.molecule_filename for c in project.planned_calcs}
     for it in pending:
         fname = it["fname"]
         busy = any(c.molecule_filename == fname and (c.exported or c.job_id)
@@ -151,6 +200,12 @@ def flush_materialisations(project, pending):
                  for k in range(len(it["symbols"]))]
         coords_mod.write_xyz(os.path.join(root, xyz_rel), atoms,
                              {"name": fname, "comment": it["note"]})
+        wanted = needed is None or fname in needed or fname in used_by_calc
+        if not wanted:
+            # An intermediate: keep the file, drop any stale row for it.
+            if existing is not None:
+                project.molecules = [m for m in project.molecules if m.filename != fname]
+            continue
         if existing is None:
             project.molecules.append(Molecule(
                 name=fname, filename=fname, smiles=None, charge=it["charge"],
@@ -219,6 +274,7 @@ def expand_project_workflow(project, calc_done=None, log=None):
     def factory(mol, recipe_name, category, geometry_source, parent_id, gate, origin_node):
         onode = wf.node(origin_node)
         gspec = onode.config.get("geom_spec") if onode is not None else None
+        xkw = onode.config.get("extra_keywords") if onode is not None else None
         existing = find_existing_calc(project, origin_node, mol, category, recipe_name)
         if existing is not None:
             if getattr(existing, "origin_node", None) is None:
@@ -231,11 +287,12 @@ def expand_project_workflow(project, calc_done=None, log=None):
                 existing.parent_id = parent_id
                 existing.gate = gate
                 existing.geom_spec = gspec
+                existing.extra_keywords = xkw
             return existing
         return PlannedCalc(id=new_calc_id(), molecule_filename=mol, recipe_name=recipe_name,
                            category=category, geometry_source=geometry_source,
                            parent_id=parent_id, gate=gate, origin_node=origin_node,
-                           geom_spec=gspec)
+                           geom_spec=gspec, extra_keywords=xkw)
 
     backend = GeometryBackend(project)
     calcs, warnings, _node_map = wf_mod.expand_to_calcs(wf, mol_files, factory,
@@ -244,7 +301,10 @@ def expand_project_workflow(project, calc_done=None, log=None):
     if not calcs:
         return {"expanded": False, "new": 0, "reused": 0, "warnings": warnings, "blockers": []}
     if backend.pending:
-        warnings.extend(flush_materialisations(project, backend.pending))
+        # Only derived geometries a calc actually runs on become project molecules;
+        # intermediate Transform steps stay files on disk (see flush_materialisations).
+        warnings.extend(flush_materialisations(
+            project, backend.pending, needed={c.molecule_filename for c in calcs}))
     new_calcs = [c for c in calcs if id(c) not in existing_before]
     for c in new_calcs:
         project.planned_calcs.append(c)

@@ -50,6 +50,35 @@ def _scan_jobid_from_files(rundir_abs, jobname):
     return best[1] if best else None
 
 
+# The app's local runner writes <jobname>-local.out and tags the calc job_id="local".
+LOCAL_JOB = "local"
+
+
+def _recover_job_id(rundir_abs, jobname, name_to_jobid=None):
+    """Best-available job id for a calc from what's on disk (+ an optional squeue map):
+
+      1. SLURM-numbered output  <jobname>-<digits>.out/.err  -> that numeric id
+      2. squeue name->id map (covers still-PENDING jobs)
+      3. the app's local run     <jobname>-local.out          -> "local"
+      4. a plain output          <jobname>.out                -> "imported" (sentinel)
+
+    Returns (job_id, source) with source "file"/"queue"/"local", or (None, None) when
+    nothing links. Cases 3-4 are what make Detect jobs work on a LOCAL PC, where there
+    are no SLURM job-id files and no squeue — only the runner's plain output."""
+    jid = _scan_jobid_from_files(rundir_abs, jobname)
+    if jid is not None:
+        return jid, "file"
+    entry = (name_to_jobid or {}).get(jobname)
+    jid = entry[0] if isinstance(entry, (list, tuple)) else entry
+    if jid is not None:
+        return jid, "queue"
+    if os.path.isfile(os.path.join(rundir_abs, jobname + "-" + LOCAL_JOB + ".out")):
+        return LOCAL_JOB, "local"
+    if os.path.isfile(os.path.join(rundir_abs, jobname + ".out")):
+        return "imported", "local"
+    return None, None
+
+
 def relink_project(project, name_to_jobid=None, relink_all=False):
     """Backfill planned_calc.job_id from on-disk output files and a squeue map.
 
@@ -71,12 +100,7 @@ def relink_project(project, name_to_jobid=None, relink_all=False):
             summary["unlinked"].append(c.molecule_filename or c.id)
             continue
         rundir_abs = os.path.join(root, c.rundir)
-        jid = _scan_jobid_from_files(rundir_abs, c.molecule_filename)
-        src = "file"
-        if jid is None:
-            entry = name_to_jobid.get(c.molecule_filename)
-            jid = entry[0] if isinstance(entry, (list, tuple)) else entry
-            src = "queue"
+        jid, src = _recover_job_id(rundir_abs, c.molecule_filename, name_to_jobid)
         if jid is None:
             summary["unlinked"].append(c.molecule_filename)
             continue
@@ -84,21 +108,24 @@ def relink_project(project, name_to_jobid=None, relink_all=False):
             c.job_id = jid
             c.exported = True
             summary["changed"] += 1
-        summary["from_files" if src == "file" else "from_queue"] += 1
+        # "local"/plain outputs are recovered from disk, so count them with from_files.
+        summary["from_queue" if src == "queue" else "from_files"] += 1
     return summary
 
 
 def unlinked_with_output(project):
-    """Calcs that have SLURM output files on disk (<jobname>-<jobid>.out/.err)
-    but no job_id -- i.e. submitted outside the app. Distinguishes a real
-    out-of-band submission from a calc that's merely been built (which has only
-    .inp/.slurm and no output yet). Returns the list of such calcs."""
+    """Calcs that have an output file on disk but no job_id -- i.e. run outside the app
+    (a cluster submit_all.sh, OR a local run whose link was lost). Recognises SLURM
+    <jobname>-<jobid>.out, the runner's <jobname>-local.out, and a plain <jobname>.out,
+    so the relink prompt fires on a local PC too. Distinguishes a real out-of-band run
+    from a calc that's merely been built (only .inp/.slurm, no output). Returns them."""
     root = project.root()
     out = []
     for c in project.planned_calcs:
         if c.job_id or not c.rundir or not c.molecule_filename:
             continue
-        if _scan_jobid_from_files(os.path.join(root, c.rundir), c.molecule_filename):
+        jid, _src = _recover_job_id(os.path.join(root, c.rundir), c.molecule_filename)
+        if jid is not None:
             out.append(c)
     return out
 
@@ -414,15 +441,9 @@ def import_dir(project, src_dir, save_recipe=None, category="imported",
             # exactly; honour an explicit provenance "initial".
             geosrc = "initial" if prov.get("geometry_source") == "initial" \
                 else "file:" + rec["inp_rel"]
-            job_id = _scan_jobid_from_files(rec["rundir_abs"], rec["base"])
-            if job_id is None and os.path.isfile(
-                    os.path.join(rec["rundir_abs"], rec["base"] + "-local.out")):
-                # The app's own local runner writes <mol>-local.out with job id
-                # "local" — restore that identity so status/harvest work as if
-                # the run had never left the project.
-                job_id = "local"
-            if job_id is None and os.path.isfile(os.path.join(rec["rundir_abs"], rec["base"] + ".out")):
-                job_id = "imported"   # truthy sentinel; find_output_file globs the .out
+            # Recover the run identity from disk (SLURM id / local / plain output) so
+            # status + harvest work as if the run had never left the project.
+            job_id, _src = _recover_job_id(rec["rundir_abs"], rec["base"])
             if job_id:
                 summary["with_output"] += 1
             slurm_abs = os.path.join(rec["rundir_abs"], rec["base"] + ".slurm")

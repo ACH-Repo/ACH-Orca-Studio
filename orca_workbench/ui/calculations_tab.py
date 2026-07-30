@@ -652,6 +652,14 @@ class CalculationsTab(ttk.Frame):
         rundir_abs = os.path.join(self.app.project.root(), calc.rundir)
         return slurm_runtime.find_output_file(rundir_abs, calc.molecule_filename, calc.job_id)
 
+    def _open_out_text(self, path):
+        """Open an ORCA .out in the user's configured text editor (Settings > External
+        programs > Text editor). Prompts for one if unset; never crashes on a bad path."""
+        from orca_workbench.ui import extprog
+        extprog.open_with(self, "text_editor_path", path, "text editor",
+                          "Choose a plain-text editor for ORCA .out / .inp files "
+                          "(e.g. Notepad++, VS Code, gedit).")
+
     # ------------------------------------------------------- selection/editor
 
     def _on_select(self, _event):
@@ -875,6 +883,18 @@ class CalculationsTab(ttk.Frame):
             lines.append("Job id: {}".format(calc.job_id))
             op = self._out_path(calc)
             lines.append("Output: {}".format(op or "(not found yet)"))
+            # Tail of the output so the last-known state (final energy, a convergence
+            # line, or an error) is visible without opening the file. read_tail only
+            # pulls the end of the file, so it's cheap even for a huge .out on a shared
+            # FS. On the cluster ORCA's stdout streams to this shared-FS .out live (the
+            # SLURM template line-buffers it), so the tail updates for a RUNNING job;
+            # only the aux files (_trj.xyz/.gbw) wait for copyback.
+            if op and os.path.isfile(op):
+                tail = "\n".join(orca_parser.read_tail(op).splitlines()[-20:])
+                if tail.strip():
+                    lines.append("")
+                    lines.append("--- {} (last 20 lines) ---".format(os.path.basename(op)))
+                    lines.append(tail)
         self._set_info("\n".join(lines))
 
     def _set_info(self, text):
@@ -1202,6 +1222,7 @@ class CalculationsTab(ttk.Frame):
             # Unattended chain: read the geometry from a file at run time (the
             # parent writes it before this job starts), rather than embedding it.
             inp_text = inputs_mod.render_inp_xyzfile(recipe, xyz_ref, mol.charge, mol.multiplicity)
+            atoms = None
         else:
             atoms = self._resolve_geometry(calc, mol)
             inp_text = inputs_mod.render_inp(recipe, atoms, mol.charge, mol.multiplicity)
@@ -1221,7 +1242,25 @@ class CalculationsTab(ttk.Frame):
         # calc carries a spec. Injected as a %geom block; the recipe supplies `! Opt`.
         gspec = getattr(calc, "geom_spec", None)
         if not geomspec_mod.is_empty(gspec):
-            inp_text = inputs_mod.add_geom_block(inp_text, geomspec_mod.build_geom_inner(gspec))
+            # Resolve geometry-derived scan/constraint values (e.g. scan start =
+            # "current" bond length, or "B(2,4)+1.5") against the INPUT geometry —
+            # available now, so a scan can start from the molecule's own coordinates
+            # without waiting for a parent OPT to finish (the scan then runs on the
+            # parent's optimised geometry via xyzfile). In the chained case `atoms` is
+            # None, so measure from the molecule's stored geometry instead.
+            try:
+                meas_atoms = atoms if atoms is not None else self._resolve_geometry(calc, mol)
+            except Exception:
+                meas_atoms = None
+            try:
+                inp_text = inputs_mod.add_geom_block(
+                    inp_text, geomspec_mod.build_geom_inner(gspec, meas_atoms))
+            except ValueError as e:
+                self._log("Geometry spec for {} not applied: {}".format(self._short(calc), e))
+        # Extra ORCA keywords appended to the `!` line (e.g. UseSym), if the calc carries any.
+        xkw = getattr(calc, "extra_keywords", None)
+        if xkw:
+            inp_text = inputs_mod.add_keywords(inp_text, xkw)
         # Global hardware defaults (Settings > Default cores / memory per job): if set,
         # override the recipe's %pal nprocs / %maxcore so a user changes their PC specs
         # in ONE place instead of editing every recipe. 0 = leave the recipe's own. The
@@ -1785,6 +1824,24 @@ class CalculationsTab(ttk.Frame):
         else:
             self.on_submit()
 
+    def _cap_local_cores(self, calc, inp_abs):
+        """Cap a built .inp to this PC's physical cores before a LOCAL run — ORCA/MPI
+        won't oversubscribe more procs than the machine has. Rewrites the .inp in place
+        (a Rebuild would regenerate it from the recipe / global default anyway) and logs
+        it. NOT applied to cluster submits: a compute node may have more cores than the
+        machine that built the job."""
+        try:
+            avail = inputs_mod.detect_cores()
+            with open(inp_abs, "r", encoding="utf-8", errors="replace") as fh:
+                txt = fh.read()
+            if inputs_mod.parse_cores(txt) > avail:
+                with open(inp_abs, "w", encoding="utf-8") as fh:
+                    fh.write(inputs_mod.set_cores(txt, avail))
+                self._log("Capped {} to {} core(s) — this PC has {}.".format(
+                    self._short(calc), avail, avail))
+        except Exception as e:
+            self._log("Core-cap check skipped for {}: {}".format(self._short(calc), e))
+
     def on_run_local(self):
         root = self.app.project.root()
         targets = self._selected_or_all()
@@ -1816,6 +1873,10 @@ class CalculationsTab(ttk.Frame):
             self._local_runner = local_runner_mod.LocalRunner(orca, max_concurrent=conc)
         else:
             self._local_runner.max_concurrent = conc
+        # Diagnostic: the exact executable ORCA is launched with. It MUST be an
+        # absolute path — ORCA rejects a bare name for parallel runs.
+        self._log("Local ORCA executable: {}".format(
+            getattr(self._local_runner, "_orca_abs", orca)))
         n = 0
         for calc in candidates:
             # Only run buildable ones (skip derived whose geometry isn't ready).
@@ -1831,6 +1892,7 @@ class CalculationsTab(ttk.Frame):
                 continue
             rundir_abs = os.path.join(root, calc.rundir)
             inp_abs = os.path.join(root, calc.inp_path)
+            self._cap_local_cores(calc, inp_abs)
             out_abs = os.path.join(rundir_abs, calc.molecule_filename + "-" + LOCAL_JOB + ".out")
             calc.job_id = LOCAL_JOB
             self._local_runner.forget(calc.id)
@@ -1890,14 +1952,20 @@ class CalculationsTab(ttk.Frame):
 
     def _ensure_orca_path(self):
         # type: () -> Optional[str]
-        """Return a usable ORCA executable, prompting (and remembering) on first
-        use. Tries config, then PATH, then asks."""
+        """Return a usable ORCA executable as an ABSOLUTE path, prompting (and
+        remembering) on first use. ORCA must be launched by full pathname for parallel
+        runs, so we resolve/store the absolute form here as well as at invocation."""
         import shutil
+        from orca_workbench.core.local_runner import resolve_orca_exe
         path = config_mod.get("orca_path", "")
         if path and os.path.isfile(path):
-            return path
+            ap = resolve_orca_exe(path)     # make a bare/relative config absolute
+            if ap != path:
+                config_mod.set_value("orca_path", ap)
+            return ap
         found = shutil.which("orca")
         if found:
+            found = os.path.abspath(found)
             config_mod.set_value("orca_path", found)
             return found
         chosen = filedialog.askopenfilename(
@@ -1905,6 +1973,7 @@ class CalculationsTab(ttk.Frame):
             parent=self)
         if not chosen:
             return None
+        chosen = os.path.abspath(chosen)
         config_mod.set_value("orca_path", chosen)
         return chosen
 
@@ -1937,6 +2006,8 @@ class CalculationsTab(ttk.Frame):
                 self._local_runner = local_runner_mod.LocalRunner(orca, max_concurrent=conc)
             else:
                 self._local_runner.max_concurrent = conc
+            self._log("Local ORCA executable: {}".format(
+                getattr(self._local_runner, "_orca_abs", orca)))
             self._local_runner.poll()
         elif not slurm_runtime.sbatch_available():
             messagebox.showerror("sbatch not found",
@@ -2126,6 +2197,7 @@ class CalculationsTab(ttk.Frame):
                 return
             rundir_abs = os.path.join(root, calc.rundir)
             inp_abs = os.path.join(root, calc.inp_path)
+            self._cap_local_cores(calc, inp_abs)
             out_abs = os.path.join(rundir_abs, calc.molecule_filename + "-" + LOCAL_JOB + ".out")
             calc.job_id = LOCAL_JOB
             self._local_runner.forget(calc.id)
@@ -2160,18 +2232,28 @@ class CalculationsTab(ttk.Frame):
                                 "submission and try again.")
             return
         LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), out_path,
-                       app=self.app, trj_path=self._expected_trj(calc))
+                       app=self.app, trj_path=self._expected_trj(calc),
+                       geom_path=self._expected_geom(calc))
 
     def _expected_trj(self, calc):
         """The path where an OPT job's _trj.xyz will appear (whether or not it
         exists yet) — for mid-run current-geometry viewing. None for non-OPT."""
+        return self._expected_opt_file(calc, "_trj.xyz")
+
+    def _expected_geom(self, calc):
+        """The path where an OPT job's converged <mol>.xyz will appear (whether or
+        not it exists yet) — for the progress window's optimised-geometry button.
+        None for non-OPT."""
+        return self._expected_opt_file(calc, ".xyz")
+
+    def _expected_opt_file(self, calc, suffix):
         recipe = self.app.get_recipe(calc.recipe_name)
         if recipe is None or "OPT" not in (recipe.calctype or "").upper():
             return None
         if not calc.rundir:
             return None
         return os.path.join(self.app.project.root(), calc.rundir,
-                            calc.molecule_filename + "_trj.xyz")
+                            calc.molecule_filename + suffix)
 
     # --------------------------------------------------- right-click: spectra
 
@@ -2186,15 +2268,44 @@ class CalculationsTab(ttk.Frame):
         calcs = [c for c in calcs if c is not None]
         menu = tk.Menu(self, tearoff=0)
 
+        finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
+        finished_opt = [c for c in calcs if self._is_finished_type(c, "OPT")]
+
+        # Finished OPT: the optimised geometry FIRST — it's what you come here for
+        # after a job converges, so it leads the menu rather than hiding below the
+        # spectra ("Geometry constraints / scan…" reads like an input setting, and
+        # it is one). molden on the gateway, local Avogadro/PyMOL otherwise.
+        if len(finished_opt) == 1:
+            geom = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + ".xyz")
+            trj = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + "_trj.xyz")
+            if geom:
+                menu.add_command(label="Open optimized geometry (3D)",
+                                 command=lambda p=geom: self._open_3d(p))
+            if trj:
+                menu.add_command(label="Open trajectory as movie",
+                                 command=lambda p=trj: self._open_3d(p, slot="traj_viewer_path"))
+            # A relaxed surface scan (OPT + %geom Scan) leaves an energy surface in the
+            # .out — offer to plot it as an energy profile.
+            oc = finished_opt[0]
+            op = self._out_path(oc)
+            if op and os.path.isfile(op):
+                try:
+                    if orca_parser.parse_relaxed_scan(orca_parser.read_tail(op) or ""):
+                        menu.add_command(label="Plot scan energy profile",
+                                         command=lambda c=oc: self._plot_scan(c))
+                except Exception:
+                    pass
+            if geom or trj:
+                menu.add_separator()
+
         # Geometry constraints / relaxed scan (OPT jobs): a per-calc %geom spec.
         if len(calcs) == 1:
             c0 = calcs[0]
             cur = geomspec_mod.describe(getattr(c0, "geom_spec", None))
-            menu.add_command(label="Geometry constraints / scan...  [{}]".format(cur),
+            menu.add_command(label="Geometry constraints / scan (job input)...  [{}]".format(cur),
                              command=lambda cc=c0: self._edit_geom_spec(cc))
             menu.add_separator()
 
-        finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
         finished_nmr = [c for c in calcs if self._is_finished_type(c, "NMR")]
         finished_uvvis = [c for c in calcs if self._is_finished_type(c, "TDDFT")]
         finished_epr = [c for c in calcs if self._is_finished_type(c, "EPR")]
@@ -2241,32 +2352,13 @@ class CalculationsTab(ttk.Frame):
             menu.add_separator()
             menu.add_command(label="Open live progress plot",
                              command=lambda c=calcs[0]: self._open_live(c))
-
-        # Finished OPT: open the optimised geometry / trajectory in 3D (molden on
-        # the gateway, local Avogadro otherwise) — same path as the Molecules tab.
-        finished_opt = [c for c in calcs if self._is_finished_type(c, "OPT")]
-        if len(finished_opt) == 1:
-            geom = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + ".xyz")
-            trj = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + "_trj.xyz")
-            if geom or trj:
-                menu.add_separator()
-            if geom:
-                menu.add_command(label="Open optimized geometry (3D)",
-                                 command=lambda p=geom: self._open_3d(p))
-            if trj:
-                menu.add_command(label="Open trajectory as movie",
-                                 command=lambda p=trj: self._open_3d(p, slot="traj_viewer_path"))
-            # A relaxed surface scan (OPT + %geom Scan) leaves an energy surface in the
-            # .out — offer to plot it as an energy profile.
-            oc = finished_opt[0]
-            op = self._out_path(oc)
-            if op and os.path.isfile(op):
-                try:
-                    if orca_parser.parse_relaxed_scan(orca_parser.read_tail(op) or ""):
-                        menu.add_command(label="Plot scan energy profile",
-                                         command=lambda c=oc: self._plot_scan(c))
-                except Exception:
-                    pass
+            op1 = self._out_path(calcs[0])
+            if op1 and os.path.isfile(op1):
+                menu.add_command(label="Open output (.out) in text editor",
+                                 command=lambda p=op1: self._open_out_text(p))
+            else:
+                menu.add_command(label="Open output (.out)  (no output yet)",
+                                 state=tk.DISABLED)
 
         # A still-RUNNING (or interrupted) OPT whose trajectory is already on
         # disk (local runs; cluster jobs stage on node /scratch until copyback):
@@ -2754,7 +2846,8 @@ class CalculationsTab(ttk.Frame):
         op = self._out_path(calc)
         if op:
             LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), op,
-                           app=self.app, trj_path=self._expected_trj(calc))
+                           app=self.app, trj_path=self._expected_trj(calc),
+                           geom_path=self._expected_geom(calc))
 
     def _plot_scf_energies(self, calcs):
         # Grouped bar chart of final SCF energies for the finished calcs in the

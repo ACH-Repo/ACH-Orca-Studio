@@ -245,6 +245,24 @@ def _has_rdkit():
         return False
 
 
+# ------------------------------------------------------------ molecular weight
+def test_smiles_mol_weight_none_on_bad_input():
+    # Empty/whitespace/unparseable never raises; returns None so callers can skip.
+    assert coords.smiles_mol_weight("") is None
+    assert coords.smiles_mol_weight("   ") is None
+    if _has_rdkit():
+        assert coords.smiles_mol_weight("this is not a smiles [[") is None
+
+
+def test_smiles_mol_weight_known_values():
+    if not _has_rdkit():
+        return
+    # Standard atomic weights (natural abundance), matching a chemist's molar mass.
+    assert abs(coords.smiles_mol_weight("O") - 18.015) < 0.05        # water
+    assert abs(coords.smiles_mol_weight("c1ccccc1") - 78.11) < 0.05  # benzene
+    assert abs(coords.smiles_mol_weight("CCO") - 46.07) < 0.05       # ethanol
+
+
 # --------------------------------------------------------------- SMILES lists
 def test_is_smiles_list_file():
     assert coords.is_smiles_list_file("a.smi")

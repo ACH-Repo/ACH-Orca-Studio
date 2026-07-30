@@ -104,3 +104,92 @@ def test_describe():
             "scan": {"type": "B", "atoms": [0, 2], "start": 1.5, "end": 3.0, "steps": 10}}
     d = G.describe(spec)
     assert "1 constraint" in d and "scan B(0,2)" in d and "x10" in d
+
+
+# ---------------------------------------------------------- geometry-derived values
+
+# A water-like geometry: O + two H. (element, x, y, z), ORCA 0-based indices.
+_WATER = [("O", 0.0, 0.0, 0.117),
+          ("H", 0.0, 0.757, -0.469),
+          ("H", 0.0, -0.757, -0.469)]
+
+
+def test_measure_bond_angle_dihedral():
+    assert abs(G.measure("B", [0, 1], _WATER) - 0.9573) < 0.01     # O-H bond
+    assert abs(G.measure("A", [1, 0, 2], _WATER) - 104.5) < 2.0    # H-O-H angle
+    # symmetric: the two O-H bonds are equal
+    assert abs(G.measure("B", [0, 1], _WATER) - G.measure("B", [0, 2], _WATER)) < 1e-9
+
+
+def test_eval_value_numbers_and_expressions():
+    # plain numbers need no geometry
+    assert G.eval_value(1.5) == 1.5
+    assert G.eval_value("1.5") == 1.5
+    assert G.eval_value("-0.3") == -0.3
+    # geometry references
+    b = G.measure("B", [0, 1], _WATER)
+    assert abs(G.eval_value("B(0,1)", _WATER) - b) < 1e-9
+    assert abs(G.eval_value("B(0,1) + 0.5", _WATER) - (b + 0.5)) < 1e-9
+    # `current` == the scanned coordinate
+    assert abs(G.eval_value("current + 1.5", _WATER, ("B", [0, 1])) - (b + 1.5)) < 1e-9
+    assert abs(G.eval_value("current", _WATER, ("B", [0, 1])) - b) < 1e-9
+
+
+def test_eval_value_errors():
+    for bad, kwargs in [("B(0,1)", {}),          # references geometry but none given
+                        ("current", {"atoms": _WATER}),   # no scanned coord supplied
+                        ("B(0,9)", {"atoms": _WATER}),    # atom index out of range
+                        ("2 +", {"atoms": _WATER}),       # syntax error
+                        ("__import__('os')", {"atoms": _WATER})]:  # not arithmetic
+        try:
+            G.eval_value(bad, **kwargs)
+            assert False, "expected ValueError for {!r}".format(bad)
+        except ValueError:
+            pass
+
+
+def test_is_expr():
+    assert not G.is_expr(1.5) and not G.is_expr("1.5") and not G.is_expr("-3")
+    assert G.is_expr("current") and G.is_expr("B(0,1)") and G.is_expr("current + 1")
+
+
+def test_build_resolves_expressions_from_geometry():
+    b = G.measure("B", [0, 1], _WATER)
+    spec = {"constraints": [{"type": "A", "atoms": [1, 0, 2], "value": "A(1,0,2)"}],
+            "scan": {"type": "B", "atoms": [0, 1], "start": "current",
+                     "end": "current + 1.5", "steps": 15}}
+    inner = G.build_geom_inner(spec, _WATER)
+    scan = [l for l in inner.splitlines() if l.strip().startswith("B 0 1")][0]
+    nums = [float(x) for x in scan.split("=")[1].split(",")[:2]]
+    # tolerance covers the %g 6-sig-fig rounding in the emitted scan line
+    assert abs(nums[0] - b) < 1e-4 and abs(nums[1] - (b + 1.5)) < 1e-4
+    # the constraint value resolved to the measured angle
+    ang = G.measure("A", [1, 0, 2], _WATER)
+    assert "{{ A 1 0 2 {:g} C }}".format(ang) in inner
+
+
+def test_build_without_geometry_raises_on_expression():
+    spec = {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
+            "start": "current", "end": "current + 1", "steps": 5}}
+    try:
+        G.build_geom_inner(spec, None)
+        assert False, "expected ValueError (no geometry to resolve 'current')"
+    except ValueError:
+        pass
+    # numeric-only specs still build with no geometry (back-compat)
+    assert "B 0 1 =" in G.build_geom_inner(
+        {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
+         "start": 1.0, "end": 2.0, "steps": 5}}, None)
+
+
+def test_validate_expressions_with_geometry():
+    # a good expression validates clean when the geometry is supplied
+    spec = {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
+            "start": "current", "end": "current + 1.5", "steps": 10}}
+    assert G.validate(spec, n_atoms=3, atoms=_WATER) == []
+    # without the geometry, an expression is accepted (resolved later at build)
+    assert G.validate(spec, n_atoms=3) == []
+    # a broken expression is caught when the geometry is present
+    bad = {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
+           "start": "B(0,9)", "end": "2.0", "steps": 10}}
+    assert G.validate(bad, n_atoms=3, atoms=_WATER)

@@ -136,6 +136,32 @@ def smiles_charge_and_mult(smiles):
         return None, None
 
 
+def smiles_mol_weight(smiles):
+    # type: (str) -> Optional[float]
+    """Average molecular weight (g/mol) of a SMILES via RDKit's Descriptors.MolWt.
+
+    Uses standard atomic weights (natural isotope abundance), so it matches the
+    "molar mass" a chemist reads off a bottle. Returns None if RDKit is
+    unavailable or the SMILES can't be parsed, so callers can skip the annotation
+    gracefully.
+    """
+    if not smiles or not smiles.strip():
+        return None
+    _ensure_loggers_silenced()
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors
+    except ImportError:
+        return None
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        return float(Descriptors.MolWt(mol))
+    except Exception:
+        return None
+
+
 def diagnose_backends():
     # type: () -> str
     """Probe RDKit and OpenBabel: report version + run a methane embed test.

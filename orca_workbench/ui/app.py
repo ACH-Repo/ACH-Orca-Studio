@@ -161,7 +161,7 @@ class App(object):
         filemenu.add_command(label="New project", command=self.on_new, accelerator="Ctrl+N")
         filemenu.add_command(label="Open project...", command=self.on_open, accelerator="Ctrl+O")
         filemenu.add_command(label="Save", command=self.on_save, accelerator="Ctrl+S")
-        filemenu.add_command(label="Save as...", command=self.on_save_as)
+        filemenu.add_command(label="Save as...", command=self.on_save_as, accelerator="Ctrl+Shift+S")
         filemenu.add_command(label="Archive Export...", command=self.on_archive_export)
         filemenu.add_separator()
         self.autosave_var = tk.BooleanVar(value=self.autosave_enabled)
@@ -217,6 +217,7 @@ class App(object):
             "app.new_project": self.on_new,
             "app.open_project": self.on_open,
             "app.save_project": self.on_save,
+            "app.save_as": self.on_save_as,
             "app.add_by_name": self._add_by_name_shortcut,
             "app.import_files": self._import_files_shortcut,
             "app.refresh": self._on_f5,
@@ -681,7 +682,9 @@ class App(object):
             os.path.basename(self.project.path), time.strftime("%H:%M:%S")))
 
     def _update_title(self):
-        name = os.path.basename(self.project.path) if self.project.path else "(unsaved project)"
+        # Full absolute path (not just the basename) so it's always clear WHICH file /
+        # which directory this session is bound to — catches "launched in the wrong dir".
+        name = os.path.abspath(self.project.path) if self.project.path else "(unsaved project)"
         star = "*" if self._dirty else ""
         mode = "  [simple mode]" if features.is_simple() else ""
         self.root.title("ORCA Workbench {} - {}{}{}".format(__version__, name, star, mode))
@@ -833,7 +836,11 @@ class App(object):
         bullet("Palette buttons / F3: add a node (F3 searches every type; try "
                "typing what you want to DO, e.g. 'align').")
         bullet("Drag output pin -> input pin: wire them. Dropping on an occupied "
-               "input REPLACES its old wire.")
+               "SINGLE input REPLACES its old wire.")
+        bullet("Geometry inputs on calculation nodes (and on Combine / Filter) take "
+               "SEVERAL wires: everything arriving is merged into one molecule list, "
+               "so one Optimize can serve three branches. Each molecule still gets "
+               "its own calculation, resolved along the branch it came in on.")
         bullet("Drag a CONNECTED input pin: pick the wire up — re-plug it "
                "elsewhere, or drop it on empty space to delete it.")
         bullet("Drop an unconnected node onto a wire: splice it in between.")
@@ -856,6 +863,11 @@ class App(object):
         bullet("Right after Q / Shift+WASD: the ARROW keys tune the spacing "
                "(Left/Right = horizontal gap, Up/Down = vertical) until you click.")
         bullet('"C": frame the selection.   "T": add a comment note.')
+        bullet("Ctrl+V with an image on the clipboard (or right-click > Paste image): "
+               "drop a picture on the canvas — a sketch, a spectrum, a screenshot. "
+               "The file is copied into the project's WORKFLOW_IMG folder, so the "
+               "graph stays portable; drag its corner to resize, double-click to open "
+               "it full size.")
         section("Running")
         bullet("Generate only (grey): expand to calcs, don't launch.")
         bullet("Run pipeline (amber): launch automatically; keep app open.")
@@ -866,6 +878,13 @@ class App(object):
         bullet("Ctrl+Z / Ctrl+Y: undo / redo graph edits.")
         bullet("A node that has run locks its recipe and can't be deleted "
                "(delete its calcs first). Report nodes stay editable.")
+        bullet("A Combine that feeds a calculation must have a NAME, a charge and a "
+               "multiplicity: the merged molecule is named after it, so a name you "
+               "chose keeps re-runs pointing at the same results instead of making "
+               "new molecules. The editor walks you to the empty box.")
+        bullet("Only geometries a calculation actually runs on appear in the Molecules "
+               "tab. Intermediate Transform steps are written to TRANSFORM/ as files "
+               "you can inspect, but aren't added as molecules.")
         section("Feel familiar?")
         ttk.Label(inner, wraplength=580, justify=tk.LEFT, foreground="#555",
                   text="This editor is largely inspired by Unreal Engine 5's Blueprint system and "
@@ -905,8 +924,18 @@ class App(object):
         self.set_status("Default memory per core: {}.".format(
             "{} MB".format(n) if n else "use recipe's own"))
 
+    def _on_tempsave(self):
+        # type: () -> bool
+        """True if the project only lives in the scratch autosave (tempsave.json), not
+        a project the user has ever named. Such 'saves' are clobbered by the next New."""
+        return bool(self.project.path) and os.path.basename(self.project.path) == TEMPSAVE_NAME
+
     def on_save(self):
-        if not self.project.path:
+        # A project that only lives in the scratch tempsave has never been given a real
+        # name, so "Save" prompts for one (Save As) instead of silently persisting to
+        # scratch — which a later New/Open would overwrite. Autosave keeps using
+        # save_project() directly, so the scratch copy still updates in the background.
+        if not self.project.path or self._on_tempsave():
             return self.on_save_as()
         try:
             save_project(self.project)
@@ -1028,19 +1057,34 @@ class App(object):
         self.set_status("Diagnostics log saved: {}".format(path) if path
                         else "Could not write diagnostics log.")
 
+    def _has_unsaved_work(self):
+        # type: () -> bool
+        """Work that would be lost by New/Open. The dirty flag alone isn't enough:
+        autosave-to-tempsave clears it, yet scratch tempsave is not a real save — if
+        molecules/calcs only live there, discarding still loses them."""
+        if self._dirty:
+            return True
+        if self._on_tempsave() and (self.project.molecules or self.project.planned_calcs):
+            return True
+        return False
+
     def _confirm_discard(self):
         # type: () -> bool
-        if not self._dirty:
+        if not self._has_unsaved_work():
             return True
         result = messagebox.askyesnocancel(
             "Unsaved changes",
-            "You have unsaved changes. Save before continuing?",
+            "You have changes that aren't saved to a named project file yet.\n"
+            "Save them to a project before continuing?",
         )
         if result is None:
-            return False
+            return False        # Cancel — abort New/Open
         if result:
+            # Yes — save first. For a scratch/unnamed project this routes to Save As, so
+            # the work lands in a named file the following New/Open won't overwrite. If
+            # the user cancels that dialog, on_save returns False and we abort.
             return self.on_save()
-        return True
+        return True             # No — discard and continue
 
 
 def _enable_windows_dpi_awareness():

@@ -25,7 +25,7 @@ from orca_workbench.core import workflow_expand
 from orca_workbench.core.inputs import safe_path_component
 from orca_workbench.core.project import Molecule, PlannedCalc, new_calc_id
 from orca_workbench.ui.modal import make_modal
-from orca_workbench.ui.shortcuts import install_text_shortcuts
+from orca_workbench.ui.shortcuts import bind_mousewheel, install_text_shortcuts
 from orca_workbench.ui.tooltip import tip
 
 
@@ -353,24 +353,9 @@ class WorkflowTab(ttk.Frame):
             self._recipe_search_combo(node, "recipe").pack(anchor=tk.W, padx=8, pady=2)
             if node.type == "optimize":
                 self._geom_spec_widget(node)
+            self._extra_keywords_widget(node)
         elif node.type == "molecules":
-            mode = tk.StringVar(value=node.config.get("mode", "all"))
-            ttk.Radiobutton(self.cfg_frame, text="All molecules", variable=mode, value="all",
-                            command=lambda n=node, m=mode: self._set_cfg(n, "mode", m.get())
-                            ).pack(anchor=tk.W, padx=8)
-            ttk.Radiobutton(self.cfg_frame, text="Selected only:", variable=mode, value="selection",
-                            command=lambda n=node, m=mode: self._set_cfg(n, "mode", m.get())
-                            ).pack(anchor=tk.W, padx=8)
-            lb = tk.Listbox(self.cfg_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
-            for m in self.app.project.molecules:
-                lb.insert(tk.END, m.filename)
-            chosen = set(node.config.get("filenames", []))
-            for i, m in enumerate(self.app.project.molecules):
-                if m.filename in chosen:
-                    lb.selection_set(i)
-            lb.pack(anchor=tk.W, fill=tk.X, padx=8, pady=2)
-            lb.bind("<<ListboxSelect>>", lambda e, n=node, w=lb: self._set_cfg(
-                n, "filenames", [w.get(i) for i in w.curselection()]))
+            self._build_molecules_panel(node)
         elif node.type == "condition":
             ttk.Label(self.cfg_frame, text="Run the downstream branch only if\nthe feeding "
                       "calculation's result:", justify=tk.LEFT).pack(anchor=tk.W, padx=8)
@@ -407,6 +392,8 @@ class WorkflowTab(ttk.Frame):
             self._build_combine_panel(node)
         elif node.type == "write":
             self._build_write_panel(node)
+        elif node.type == "image":
+            self._build_image_panel(node)
         elif self._is_annotation(node):
             what = "title" if node.type == "frame" else "text"
             ttk.Label(self.cfg_frame, text="A {} annotation (not part of the run).".format(
@@ -425,43 +412,181 @@ class WorkflowTab(ttk.Frame):
         ttk.Button(self.cfg_frame, text="Delete node",
                    command=lambda nid=node.id: self._delete_node(nid)).pack(anchor=tk.W, padx=8)
 
+    def _build_molecules_panel(self, node):
+        """Molecules node: pick all / a selection, and show miniature SMILES depictions
+        (3 per row) of the molecules this node emits. Thumbnails re-render on a debounced
+        timer (RDKit rendering is costly — a per-click storm would lag ThinLinc) and are
+        capped so a huge project can't render hundreds of images at once."""
+        from orca_workbench.ui.depict import smiles_to_photoimage
+        MAX_THUMBS = 24
+
+        mode = tk.StringVar(value=node.config.get("mode", "all"))
+        lb = tk.Listbox(self.cfg_frame, selectmode=tk.EXTENDED, height=6, exportselection=False)
+
+        def on_mode():
+            self._set_cfg(node, "mode", mode.get())
+            schedule_refresh()
+
+        ttk.Radiobutton(self.cfg_frame, text="All molecules", variable=mode, value="all",
+                        command=on_mode).pack(anchor=tk.W, padx=8)
+        ttk.Radiobutton(self.cfg_frame, text="Selected only:", variable=mode, value="selection",
+                        command=on_mode).pack(anchor=tk.W, padx=8)
+        for m in self.app.project.molecules:
+            lb.insert(tk.END, m.filename)
+        chosen = set(node.config.get("filenames", []))
+        for i, m in enumerate(self.app.project.molecules):
+            if m.filename in chosen:
+                lb.selection_set(i)
+        lb.pack(anchor=tk.W, fill=tk.X, padx=8, pady=2)
+
+        ttk.Label(self.cfg_frame, text="Structures (SMILES) this node emits:",
+                  foreground="#555", wraplength=210, justify=tk.LEFT).pack(
+                      anchor=tk.W, padx=8, pady=(6, 0))
+        grid = ttk.Frame(self.cfg_frame)
+        grid.pack(anchor=tk.W, fill=tk.X, padx=6, pady=2)
+        self._mol_thumb_refs = []   # keep PhotoImage refs alive against Tk GC
+
+        def active_mols():
+            if mode.get() == "all":
+                return list(self.app.project.molecules)
+            sel = set(lb.get(i) for i in lb.curselection())
+            if not sel:
+                sel = set(node.config.get("filenames", []))
+            return [m for m in self.app.project.molecules if m.filename in sel]
+
+        def refresh_thumbs():
+            self._thumb_after = None
+            if not grid.winfo_exists():
+                return
+            for w in grid.winfo_children():
+                w.destroy()
+            self._mol_thumb_refs = []
+            mols = active_mols()
+            if not mols:
+                ttk.Label(grid, text="(no molecules)", foreground="#999").grid(
+                    row=0, column=0, padx=4, pady=4)
+                return
+            shown = mols[:MAX_THUMBS]
+            for i, m in enumerate(shown):
+                cell = ttk.Frame(grid, relief="groove", borderwidth=1)
+                cell.grid(row=i // 3, column=i % 3, padx=2, pady=2, sticky="n")
+                img = None
+                if m.smiles:
+                    img, _err = smiles_to_photoimage(m.smiles, size=(96, 76), master=grid)
+                if img is not None:
+                    self._mol_thumb_refs.append(img)
+                    ttk.Label(cell, image=img).pack()
+                else:
+                    ttk.Label(cell, text=("no\nSMILES" if not m.smiles else "n/a"),
+                              foreground="#999", justify=tk.CENTER).pack(padx=16, pady=22)
+                ttk.Label(cell, text=m.filename[:14], font=("TkDefaultFont", 7)).pack()
+            if len(mols) > MAX_THUMBS:
+                ttk.Label(grid, text="(+{} more…)".format(len(mols) - MAX_THUMBS),
+                          foreground="#999").grid(row=(len(shown) // 3) + 1, column=0,
+                                                  columnspan=3, sticky="w", pady=(2, 0))
+
+        def schedule_refresh():
+            prev = getattr(self, "_thumb_after", None)
+            if prev is not None:
+                try:
+                    grid.after_cancel(prev)
+                except Exception:
+                    pass
+            self._thumb_after = grid.after(300, refresh_thumbs)
+
+        lb.bind("<<ListboxSelect>>", lambda e: (
+            self._set_cfg(node, "filenames", [lb.get(i) for i in lb.curselection()]),
+            schedule_refresh()))
+        refresh_thumbs()
+
+    def _extra_keywords_widget(self, node):
+        """Free-form extra ORCA `!`-line keywords for this job node (e.g. UseSym,
+        TightSCF). Appended to the recipe's keyword line at build (inputs.add_keywords);
+        locked read-only once the node has launched calcs so it can't desync from them."""
+        ttk.Label(self.cfg_frame, text="Extra ORCA keywords:").pack(anchor=tk.W, padx=8, pady=(6, 0))
+        cur = node.config.get("extra_keywords", "") or ""
+        if self._node_is_locked(node.id):
+            ttk.Label(self.cfg_frame, text="{}  (locked - node has run)".format(cur or "(none)"),
+                      foreground="#555", wraplength=210, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+            return
+        var = tk.StringVar(value=cur)
+        ent = ttk.Entry(self.cfg_frame, textvariable=var, width=28)
+        ent.pack(anchor=tk.W, padx=8, pady=1)
+        var.trace_add("write", lambda *_a: self._set_cfg(node, "extra_keywords", var.get().strip()))
+        tip(ent, "Appended to the recipe's ! line for every job this node builds — e.g. "
+                 "'UseSym' (optimise within the molecule's point group / Cs, C2v, …), "
+                 "'TightSCF', 'Grid5'. Space-separated; duplicates of the recipe's own "
+                 "keywords are ignored.")
+
     def _recipe_search_combo(self, node, key="recipe"):
-        """An editable recipe combobox that filters its list as you TYPE — the
-        recipe library can be long. Only a real recipe name is committed (on pick /
-        Return / focus-out); partial text just narrows the dropdown. Returns the
-        widget so the caller packs it."""
+        """Recipe picker that lets you type AND see the filtered list at the same time
+        — an Entry over an always-visible Listbox that narrows live as you type, like
+        the F3 Add-node popup (a ttk.Combobox can't do both: posting its dropdown steals
+        keyboard focus). Click / Return / Down commits a recipe; partial text just
+        filters. Returns a frame so the caller packs it."""
         # Once a node has launched calcs its recipe is locked (changing it would
-        # silently desync the node from the calcs it spawned). Show the recipe name
-        # read-only so it's still clear which one ran.
+        # silently desync the node from the calcs it spawned). Show it read-only.
         if self._node_is_locked(node.id):
             current = node.config.get(key, "") or "(none set)"
             return ttk.Label(self.cfg_frame, text="{}  (locked - node has run)".format(current),
                              foreground="#555", wraplength=210, justify=tk.LEFT)
         names = [r.name for r in self.app.recipes]
+        frame = ttk.Frame(self.cfg_frame)
         var = tk.StringVar(value=node.config.get(key, ""))
-        cb = ttk.Combobox(self.cfg_frame, textvariable=var, values=names, width=28)
+        ent = ttk.Entry(frame, textvariable=var, width=30)
+        ent.pack(anchor=tk.W, fill=tk.X)
+        lb = tk.Listbox(frame, height=5, exportselection=False, activestyle="dotbox")
+        lb.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
+        bind_mousewheel(lb, lb)
 
-        def commit(*_a):
-            v = var.get().strip()
+        def repopulate():
+            typed = var.get().strip().lower()
+            shown = [n for n in names if typed in n.lower()] if typed else list(names)
+            lb.delete(0, tk.END)
+            for n in shown:
+                lb.insert(tk.END, n)
+            cur = var.get().strip()
+            if cur in shown:
+                i = shown.index(cur)
+                lb.selection_clear(0, tk.END)
+                lb.selection_set(i)
+                lb.see(i)
+
+        def commit(v):
             if v in names:
                 self._set_cfg(node, key, v)
 
-        def on_key(e):
-            if e.keysym in ("Up", "Down", "Return", "Escape", "Tab", "Left", "Right"):
+        def on_type(e=None):
+            if e is not None and e.keysym in ("Up", "Down", "Return", "Escape", "Tab"):
                 return
-            # Narrow the dropdown list to what's been typed. We deliberately do NOT
-            # re-post the dropdown here: posting it on every keystroke grabs keyboard
-            # focus to the listbox (the async grab beats a synchronous focus_set),
-            # which is what made typing lose focus letter-by-letter. The filtered
-            # matches show when the user opens the list (Down / the arrow).
-            typed = var.get().strip().lower()
-            cb["values"] = [n for n in names if typed in n.lower()] if typed else names
+            repopulate()
+            commit(var.get().strip())   # live-commit only when it's an exact recipe name
 
-        cb.bind("<KeyRelease>", on_key, add="+")
-        cb.bind("<<ComboboxSelected>>", commit, add="+")
-        cb.bind("<Return>", commit, add="+")
-        cb.bind("<FocusOut>", commit, add="+")
-        return cb
+        def pick(e=None):
+            sel = lb.curselection()
+            if sel:
+                v = lb.get(sel[0])
+                var.set(v)
+                commit(v)
+            return "break"
+
+        def to_list(e=None):
+            if lb.size():
+                lb.focus_set()
+                lb.selection_clear(0, tk.END)
+                lb.selection_set(0)
+                lb.activate(0)
+            return "break"
+
+        ent.bind("<KeyRelease>", on_type, add="+")
+        ent.bind("<Down>", to_list)
+        ent.bind("<Return>", lambda e: (commit(var.get().strip()), "break")[1])
+        ent.bind("<FocusOut>", lambda e: commit(var.get().strip()), add="+")
+        lb.bind("<ButtonRelease-1>", pick)   # fires after a click sets the selection
+        lb.bind("<Return>", pick)
+        lb.bind("<Double-1>", pick)
+        repopulate()
+        return frame
 
     def _geom_spec_widget(self, node):
         """Optimize-node geometry constraints / relaxed scan. Applies to every molecule
@@ -576,8 +701,8 @@ class WorkflowTab(ttk.Frame):
                 b.pack(side=tk.LEFT, padx=1)
                 tip(b, "Open the live SCF / geometry-convergence plot.")
             if done:
-                lbl3d = "Modes" if ctype == "FREQ" else "Struct"
-                b = ttk.Button(btns, text=lbl3d, width=7,
+                lbl3d = {"FREQ": "Modes", "OPT": "Geometry"}.get(ctype, "Struct")
+                b = ttk.Button(btns, text=lbl3d, width=max(7, len(lbl3d) + 1),
                                command=lambda c=calc: self._open_structure(c))
                 b.pack(side=tk.LEFT, padx=1)
                 tip(b, "Open in your external 3D viewer (Avogadro/molden). For a FREQ job this "
@@ -743,8 +868,47 @@ class WorkflowTab(ttk.Frame):
         self._sel_nodes = [nid for nid in self._sel_nodes if self.wf.node(nid) is not None]
         if self._sel_edge is not None and self.wf.edge(self._sel_edge) is None:
             self._sel_edge = None
+        self._migrate_combine_names()
+        # Rebuild node -> calcs from the project so a graph whose calcs were run
+        # elsewhere (a reopened project, or `--execute_project` on the cluster)
+        # shows its node status + per-node result buttons without a manual refresh.
+        self._remap_node_calcs()
         self._redraw()
         self._build_config_panel()
+
+    def _migrate_combine_names(self):
+        """Give a legacy Combine node (blank name, but molecules already derived
+        from it) the name it effectively used, so the now-required name doesn't
+        orphan an already-run pipeline.
+
+        The derived molecule is `<base>_cb<node id[:4]>`, so the base is
+        recoverable from the project's molecules. Adopting it keeps re-expansion
+        pointing at the SAME molecule (and run directory) as the finished calcs;
+        typing a different name would create fresh molecules and duplicate work."""
+        changed = []
+        for n in self.wf.nodes:
+            if n.type != "combine" or str(n.config.get("name") or "").strip():
+                continue
+            base = self._derived_combine_base(n)
+            if base:
+                n.config["name"] = base
+                changed.append(base)
+        if changed:
+            self._commit()
+            self.app.set_status("Combine node name(s) recovered from the previous run: "
+                                + ", ".join(sorted(set(changed))))
+
+    def _derived_combine_base(self, node):
+        """The base name a Combine node's already-materialised molecules used, or
+        '' if it hasn't produced any. Strips the `_cb<id>` node suffix and a
+        `_NN` pairwise row index."""
+        import re
+        suffix = "_cb{}".format(node.id[:4])
+        for m in self.app.project.molecules:
+            fn = m.filename or ""
+            if fn.endswith(suffix):
+                return re.sub(r"_\d{2}$", "", fn[:-len(suffix)])
+        return ""
 
     def _commit(self):
         cur = self.wf.to_dict()
@@ -792,6 +956,16 @@ class WorkflowTab(ttk.Frame):
         self._restore_graph(self._redo_stack.pop())
         self.app.set_status("Redo (node graph).")
         return "break"
+
+    def _undo_op_list(self, event=None):
+        """Ctrl+Z from inside a node's list widget (e.g. the Transform ops list).
+        Same whole-graph undo as on the canvas — the panel is rebuilt by
+        _restore_graph, so the list shows the reverted state — but bound on the
+        widget, because canvas-scoped keys don't reach a focused Listbox."""
+        return self._undo_graph(event)
+
+    def _redo_op_list(self, event=None):
+        return self._redo_graph(event)
 
     # --------------------------------------------------------------- geometry
 
@@ -871,11 +1045,17 @@ class WorkflowTab(ttk.Frame):
     def _redraw(self):
         self.canvas.delete("all")
         self._hover_node = None   # the glow ring was cleared with "all"; next Motion re-adds
+        # References to the PhotoImages currently ON the canvas: Tk doesn't own
+        # them, so without this an image vanishes the moment Python GCs it.
+        self._img_live = []
         # Frames sit behind everything; comments behind the real nodes; then edges;
         # then the real (computational) nodes on top.
         for n in self.wf.nodes:
             if n.type == "frame":
                 self._draw_frame(n)
+        for n in self.wf.nodes:
+            if n.type == "image":
+                self._draw_image(n)
         for n in self.wf.nodes:
             if n.type == "comment":
                 self._draw_comment(n)
@@ -979,11 +1159,26 @@ class WorkflowTab(ttk.Frame):
         if node.type == "report":
             return node.config.get("name", "report") + ".json"
         if node.type == "transform":
-            n = len(node.config.get("ops") or [])
-            return "{} op{}".format(n, "" if n == 1 else "s") if n else "(no ops yet)"
+            from orca_workbench.core import transform as transform_mod
+            all_ops = node.config.get("ops") or []
+            n = len(all_ops)
+            if not n:
+                return "(no ops yet)"
+            off = n - len(transform_mod.enabled_ops(all_ops))
+            base = "{} op{}".format(n, "" if n == 1 else "s")
+            return base + (" ({} off)".format(off) if off else "")
         if node.type == "combine":
-            mode = node.config.get("mode", "merge")
-            return "pairwise" if mode == "pairwise" else "merge all inputs"
+            nm = str(node.config.get("name") or "").strip()
+            pairwise = node.config.get("mode", "merge") == "pairwise"
+            n_place = len(node.config.get("placements") or [])
+            suffix = (" (pairwise)" if pairwise else "") + \
+                     (" +{} snap".format(n_place) if n_place else "")
+            if not nm:
+                return "(name required)" if self.wf.has_calc_downstream(node.id) \
+                    else ("pairwise" if pairwise else "merge all inputs") + suffix
+            return nm + suffix
+        if node.type == "image":
+            return os.path.basename(node.config.get("path", "")) or "(paste an image)"
         return ""
 
     def _draw_port(self, node_id, name, is_input, x, y, ptype):
@@ -1020,6 +1215,95 @@ class WorkflowTab(ttk.Frame):
                                 text=node.config.get("text", ""),
                                 font=("TkDefaultFont", self._fs(9)), fill=np["comment_fg"],
                                 tags=(ntag,))
+        self._draw_resize_handle(x, y, w, h, ntag, outline)
+
+    # ------------------------------------------------------------ image nodes
+
+    def _image_abs(self, node):
+        """Absolute path of an image node's picture ('' if it has none)."""
+        rel = str(node.config.get("path") or "")
+        if not rel:
+            return ""
+        if os.path.isabs(rel):
+            return rel
+        return os.path.join(self.app.project.root(), rel)
+
+    def _image_photo(self, path, w_px, h_px):
+        """A PhotoImage of `path` scaled to w_px × h_px, cached.
+
+        Pillow gives smooth scaling; without it we fall back to PhotoImage's
+        integer subsample/zoom (chunky, but it keeps images working on a bare
+        install — the same reason the depiction code sticks to Tk's native PNG
+        support). The cache is keyed by target size and cleared when it grows,
+        because zooming the canvas asks for a new size every step."""
+        w_px, h_px = max(1, int(w_px)), max(1, int(h_px))
+        cache = getattr(self, "_img_cache", None)
+        if cache is None:
+            cache = self._img_cache = {}
+        key = (path, w_px, h_px)
+        if key in cache:
+            return cache[key]
+        if len(cache) > 48:
+            cache.clear()
+        photo = None
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path)
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            photo = ImageTk.PhotoImage(img.resize((w_px, h_px), resample), master=self.canvas)
+        except Exception:
+            try:
+                base = tk.PhotoImage(file=path, master=self.canvas)
+                bw, bh = base.width(), base.height()
+                if bw and bh:
+                    if w_px < bw or h_px < bh:
+                        k = max(1, int(round(max(bw / float(w_px), bh / float(h_px)))))
+                        base = base.subsample(k, k)
+                    elif w_px > bw * 2 and h_px > bh * 2:
+                        k = max(1, int(min(w_px / float(bw), h_px / float(bh))))
+                        base = base.zoom(k, k)
+                photo = base
+            except Exception:
+                photo = None
+        cache[key] = photo          # cache misses too, so a broken file isn't retried
+        return photo
+
+    def _draw_image(self, node):
+        """An image annotation: the picture, letterboxed inside the node's box
+        (aspect preserved), with a selection border and a resize handle."""
+        z = self._zoom
+        x, y = self._w2s(node.x, node.y)
+        _x, _y, ww, hh = self._node_rect(node)
+        w, h = ww * z, hh * z
+        sel = node.id in self._sel_nodes
+        ntag = "N:" + node.id
+        np = self._np
+        outline = np["sel"] if sel else np["comment_outline"]
+        path = self._image_abs(node)
+        photo = self._image_photo(path, w, h) if path and os.path.isfile(path) else None
+        if photo is not None:
+            # a real image: draw it, then the frame on top so selection reads clearly
+            self.canvas.create_image(x + w / 2.0, y + h / 2.0, image=photo, anchor=tk.CENTER,
+                                     tags=(ntag, "nodebody"))
+            self._img_live.append(photo)     # keep a reference while it's on screen
+            self.canvas.create_rectangle(x, y, x + w, y + h, fill="", outline=outline,
+                                         width=2 if sel else 1, tags=(ntag,))
+        else:
+            self.canvas.create_rectangle(x, y, x + w, y + h, fill=np["comment_bg"],
+                                         outline=outline, width=2 if sel else 1,
+                                         tags=(ntag, "nodebody"))
+            msg = ("(image missing:\n{})".format(os.path.basename(path)) if path
+                   else "(no image — Ctrl+V to paste)")
+            self.canvas.create_text(x + w / 2.0, y + h / 2.0, anchor=tk.CENTER, text=msg,
+                                    width=max(20.0, w - 12 * z), justify=tk.CENTER,
+                                    font=("TkDefaultFont", self._fs(8)), fill=np["comment_fg"],
+                                    tags=(ntag,))
+        cap = str(node.config.get("caption") or "")
+        if cap:
+            self.canvas.create_text(x + w / 2.0, y + h + 8 * z, anchor=tk.CENTER, text=cap,
+                                    width=max(20.0, w), justify=tk.CENTER,
+                                    font=("TkDefaultFont", self._fs(8)), fill=np["comment_fg"],
+                                    tags=(ntag,))
         self._draw_resize_handle(x, y, w, h, ntag, outline)
 
     def _draw_frame(self, node):
@@ -1629,7 +1913,11 @@ class WorkflowTab(ttk.Frame):
         # A/D leave a vertical stack, W/S a horizontal row — arrows now tune
         # the gaps (see _arrow_key).
         self._set_align_ctx()
-        self.app.mark_dirty()
+        # COMMIT, not just mark_dirty: the moves live in self.wf until _commit
+        # writes them into project.workflow, and refresh() (a tab switch, a
+        # status refresh) rebuilds self.wf from there — so an uncommitted
+        # alignment silently reverted. It also puts the align in the undo stack.
+        self._commit()
         self._redraw()
         return "break"
 
@@ -1660,8 +1948,8 @@ class WorkflowTab(ttk.Frame):
         # ...and distribute horizontally with even gaps so nothing overlaps;
         # arrow keys then fine-tune the spacing (see _arrow_key).
         self._set_align_ctx()
-        self._distribute("x")
-        self.app.mark_dirty()
+        self._distribute("x")     # commits the straighten + distribute together
+        self._commit()
         self._redraw()
         return "break"
 
@@ -1694,7 +1982,7 @@ class WorkflowTab(ttk.Frame):
             for n in nodes:
                 n.y = y
                 y += self._node_height(n) + gap
-        self.app.mark_dirty()
+        self._commit()
         self._redraw()
 
     def _arrow_key(self, direction):
@@ -1762,9 +2050,15 @@ class WorkflowTab(ttk.Frame):
 
     def _paste_clipboard(self, _event=None):
         import copy
+        # An IMAGE on the system clipboard wins over copied nodes: Ctrl+V right
+        # after a screenshot / "copy image" obviously means "put that picture
+        # here", and node copy/paste has the internal clipboard to fall back on.
+        if self._paste_image_from_clipboard(quiet=True):
+            return "break"
         clip = getattr(self, "_node_clipboard", None)
         if not clip:
-            self.app.set_status("Nothing copied yet (Ctrl+C on selected nodes first).")
+            self.app.set_status("Nothing copied yet — Ctrl+C on selected nodes, or copy an "
+                                "image to paste it onto the canvas.")
             return "break"
         self._paste_count = getattr(self, "_paste_count", 0) + 1
         off = 40.0 * self._paste_count
@@ -1785,6 +2079,129 @@ class WorkflowTab(ttk.Frame):
         self._build_config_panel()
         self.app.set_status("Pasted {} node(s).".format(len(new_ids)))
         return "break"
+
+    # ---- images on the canvas ----
+
+    def _pointer_world(self, fallback=(60.0, 60.0)):
+        """World coords under the mouse pointer, or `fallback` when it's outside
+        the canvas (e.g. the action came from a menu)."""
+        rx = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+        ry = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+        if not (0 <= rx <= self.canvas.winfo_width() and 0 <= ry <= self.canvas.winfo_height()):
+            return fallback
+        return self._s2w(rx, ry)
+
+    def _paste_image_from_clipboard(self, quiet=False, node=None):
+        """Paste a clipboard image onto the canvas (or into `node`).
+
+        The bytes are stored INSIDE the project (WORKFLOW_IMG/, content-addressed)
+        so the graph stays self-contained and portable — the graph only ever holds
+        a project-relative path. Returns True if an image was pasted; when `quiet`
+        it stays silent on "no image found" so Ctrl+V can fall through to node
+        paste."""
+        from orca_workbench.core import canvas_images as ci
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            text = ""
+        data, why = ci.clipboard_image_bytes(clipboard_text=text)
+        if not data:
+            if not quiet:
+                messagebox.showinfo("Paste image", "Couldn't get an image from the "
+                                                   "clipboard:\n\n{}".format(why))
+            return False
+        try:
+            rel = ci.store_image(self.app.project.root(), data)
+        except Exception as e:
+            messagebox.showwarning("Paste image", "Could not save the image into the "
+                                                  "project:\n{}".format(e))
+            return False
+        self._place_image(rel, ci.image_size(data), node=node)
+        self.app.set_status("Pasted image from {} ({}).".format(why, rel))
+        return True
+
+    def _add_image_from_file(self, node=None):
+        """Load an image file onto the canvas (copied into the project)."""
+        from tkinter import filedialog
+        from orca_workbench.core import canvas_images as ci
+        path = filedialog.askopenfilename(
+            title="Add image to the canvas",
+            filetypes=[("Images", "*.png *.gif *.jpg *.jpeg *.bmp *.tif *.tiff"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        data = ci.read_image_file(path)
+        if not data:
+            messagebox.showwarning("Add image", "Not an image file this app can read:\n"
+                                                "{}".format(path))
+            return
+        try:
+            rel = ci.store_image(self.app.project.root(), ci.to_png(data))
+        except Exception as e:
+            messagebox.showwarning("Add image", str(e))
+            return
+        self._place_image(rel, ci.image_size(data), node=node,
+                          caption=os.path.basename(path))
+        self.app.set_status("Added image {}.".format(rel))
+
+    def _place_image(self, rel, native, node=None, caption=None):
+        """Create (or re-point) an image node at the pointer, sized to the
+        picture's aspect ratio."""
+        from orca_workbench.core import canvas_images as ci
+        w, h = ci.fit_box(native)
+        if node is None:
+            cx, cy = self._pointer_world()
+            cfg = {"path": rel, "w": w, "h": h, "caption": caption or ""}
+            node = self.wf.add_node("image", cx, cy, cfg)
+        else:
+            node.config["path"] = rel
+            node.config["w"], node.config["h"] = w, h
+            if caption is not None:
+                node.config["caption"] = caption
+        self._commit()
+        self._select_only(node.id)
+        self._redraw()
+
+    def _build_image_panel(self, node):
+        f = self.cfg_frame
+        rel = str(node.config.get("path") or "")
+        ttk.Label(f, text="A picture on the canvas (not part of the run). The file is copied "
+                  "into the project's WORKFLOW_IMG folder, so the graph stays portable.",
+                  foreground="#555", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+        ttk.Label(f, text=(rel or "(no image yet)"), foreground="#777", wraplength=220,
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=8, pady=(4, 2))
+        ttk.Button(f, text="Paste from clipboard  (Ctrl+V)",
+                   command=lambda n=node: self._paste_image_from_clipboard(node=n)).pack(
+                       anchor=tk.W, padx=8, pady=1)
+        ttk.Button(f, text="Load from file...",
+                   command=lambda n=node: self._add_image_from_file(node=n)).pack(
+                       anchor=tk.W, padx=8, pady=1)
+        ttk.Button(f, text="Fit to native size",
+                   command=lambda n=node: self._image_fit_native(n)).pack(
+                       anchor=tk.W, padx=8, pady=1)
+        if rel:
+            ttk.Button(f, text="Open in image viewer",
+                       command=lambda n=node: self._os_open(self._image_abs(n))).pack(
+                           anchor=tk.W, padx=8, pady=1)
+        ttk.Label(f, text="Caption (shown under the image):").pack(anchor=tk.W, padx=8,
+                                                                  pady=(6, 0))
+        var = tk.StringVar(value=str(node.config.get("caption") or ""))
+        ent = ttk.Entry(f, textvariable=var, width=26)
+        ent.pack(anchor=tk.W, padx=8, pady=2)
+        var.trace_add("write", lambda *_a, n=node, v=var: self._set_cfg(n, "caption", v.get()))
+        ttk.Label(f, text="Drag the bottom-right corner to resize; double-click it to open the "
+                  "image.", foreground="#999", wraplength=220, justify=tk.LEFT).pack(
+                      anchor=tk.W, padx=8, pady=(2, 0))
+
+    def _image_fit_native(self, node):
+        """Reset the node box to the image's own proportions (scaled to fit)."""
+        from orca_workbench.core import canvas_images as ci
+        path = self._image_abs(node)
+        data = ci.read_image_file(path)
+        w, h = ci.fit_box(ci.image_size(data) if data else (0, 0))
+        node.config["w"], node.config["h"] = w, h
+        self._commit()
+        self._redraw()
 
     def _clear_selection(self):
         self._sel_nodes = []
@@ -1886,6 +2303,11 @@ class WorkflowTab(ttk.Frame):
             if nid not in self._sel_nodes:
                 self._select_only(nid)
             n = len(self._sel_nodes)
+            node = self.wf.node(nid)
+            if node is not None and not self._is_annotation(node):
+                menu.add_command(label="Run up to here",
+                                 command=lambda i=nid: self.on_run_up_to_here(i))
+                menu.add_separator()
             if n == 2:
                 menu.add_command(label="Connect the 2 selected  (J)",
                                  command=self._connect_selected)
@@ -1900,6 +2322,11 @@ class WorkflowTab(ttk.Frame):
             menu.add_command(label="Delete connection", command=self._delete_selected)
         else:
             menu.add_command(label="Add node here…", command=lambda: self._context_add(wx, wy))
+            menu.add_separator()
+            menu.add_command(label="Paste image  (Ctrl+V)",
+                             command=lambda: self._paste_image_from_clipboard())
+            menu.add_command(label="Add image from file...",
+                             command=lambda: self._add_image_from_file())
             menu.add_separator()
             menu.add_command(label="Select all  (Ctrl+A)", command=self._on_select_all)
             menu.add_command(label="Clear selection", command=self._clear_selection)
@@ -2218,6 +2645,13 @@ class WorkflowTab(ttk.Frame):
 
     def _on_double_click(self, event):
         n = self.wf.node(self._node_at(*self._cxy(event)))
+        if n is not None and n.type == "image":
+            path = self._image_abs(n)
+            if path and os.path.isfile(path):
+                self._os_open(path)      # full size in the system image viewer
+            else:
+                self._paste_image_from_clipboard(node=n)
+            return "break"
         if self._is_annotation(n):
             self._edit_annotation_text(n)
             return "break"
@@ -2325,10 +2759,20 @@ class WorkflowTab(ttk.Frame):
         def ops():
             return list(node.config.get("ops") or [])
 
+        # Each row is prefixed with a [x] / [ ] tick box — the same ASCII convention
+        # as the Molecules tab's Lock column (ThinLinc's fonts have no checkbox
+        # glyph, and a Listbox can't hold real Checkbuttons anyway without giving up
+        # the multi-select + drag-reorder behaviour). Disabled rows are also greyed.
+        _OFF_FG = "#9a9a9a"
+
         def refill(select_indices):
             lb.delete(0, tk.END)
-            for op in ops():
-                lb.insert(tk.END, transform_mod.describe_op(op))
+            for i, op in enumerate(ops()):
+                on = transform_mod.op_enabled(op)
+                lb.insert(tk.END, "{} {}".format("[x]" if on else "[ ]",
+                                                 transform_mod.describe_op(op)))
+                if not on:
+                    lb.itemconfigure(i, foreground=_OFF_FG)
             for i in select_indices:
                 if 0 <= i < lb.size():
                     lb.selection_set(i)
@@ -2367,12 +2811,49 @@ class WorkflowTab(ttk.Frame):
                 lst[i] = op
                 commit(lst, [i])
 
-        def on_remove():
+        def on_remove(_e=None):
             idx = set(sel_indices())
             if not idx:
-                return
+                return "break"
             lst = [op for k, op in enumerate(ops()) if k not in idx]
             commit(lst, [min(idx)] if lst else [])
+            return "break"
+
+        def toggle_enabled(indices=None, _e=None):
+            """Tick / untick the given rows (default: the selection). A mixed
+            selection is switched ON as a whole, which is what "toggle" means when
+            some are already off."""
+            lst = ops()
+            idx = [i for i in (indices if indices is not None else sel_indices())
+                   if 0 <= i < len(lst)]
+            if not idx:
+                return "break"
+            target = not all(transform_mod.op_enabled(lst[i]) for i in idx)
+            for i in idx:
+                op = dict(lst[i])
+                if target:
+                    op.pop("enabled", None)      # enabled is the default: keep dicts clean
+                else:
+                    op["enabled"] = False
+                lst[i] = op
+            commit(lst, idx)
+            n_off = sum(1 for o in lst if not transform_mod.op_enabled(o))
+            self.app.set_status("{} op(s) {} — {} disabled in this Transform. Preview to see "
+                                "the effect.".format(len(idx), "enabled" if target else "disabled",
+                                                     n_off))
+            return "break"
+
+        def on_click(e):
+            """A click on the [x] box toggles that row instead of just selecting it."""
+            idx = lb.nearest(e.y)
+            bbox = lb.bbox(idx)
+            if bbox is None or not (0 <= idx < len(ops())):
+                return None
+            bx, by, _bw, bh = bbox
+            if e.x <= bx + 22 and by <= e.y <= by + bh:
+                toggle_enabled([idx])
+                return "break"
+            return None
 
         def move_block(delta):
             """Move the selected (possibly non-contiguous) rows by delta, as a
@@ -2462,9 +2943,22 @@ class WorkflowTab(ttk.Frame):
 
         refill([])
         lb.bind("<Double-1>", on_edit)
+        # The tick-box click must run BEFORE the press-drag handler claims the event.
+        lb.bind("<ButtonPress-1>", on_click, add="+")
         lb.bind("<ButtonPress-1>", on_press, add="+")
         lb.bind("<B1-Motion>", on_drag_motion, add="+")
         lb.bind("<ButtonRelease-1>", on_drop, add="+")
+        lb.bind("<space>", lambda e: toggle_enabled())
+        lb.bind("<Delete>", on_remove)
+        lb.bind("<BackSpace>", on_remove)
+        # Undo/redo while the pointer is IN the list: op edits are graph edits, so
+        # they ride the node editor's whole-graph undo stack (each commit = one step).
+        # The canvas-scoped bindings don't reach a focused Listbox, hence these.
+        for seq in ("<Control-z>", "<Control-Z>"):
+            lb.bind(seq, self._undo_op_list)
+        for seq in ("<Control-y>", "<Control-Y>", "<Control-Shift-z>", "<Control-Shift-Z>"):
+            lb.bind(seq, self._redo_op_list)
+        lb.bind("<Enter>", lambda e: lb.focus_set(), add="+")
 
         row1 = ttk.Frame(f)
         row1.pack(fill=tk.X, padx=8)
@@ -2475,6 +2969,12 @@ class WorkflowTab(ttk.Frame):
         row2.pack(fill=tk.X, padx=8, pady=(2, 0))
         ttk.Button(row2, text="Up", width=5, command=lambda: move_block(-1)).pack(side=tk.LEFT, padx=1)
         ttk.Button(row2, text="Down", width=6, command=lambda: move_block(1)).pack(side=tk.LEFT, padx=1)
+        tbtn = ttk.Button(row2, text="On/Off", width=8, command=lambda: toggle_enabled())
+        tbtn.pack(side=tk.LEFT, padx=1)
+        tip(tbtn, "Enable / disable the selected op(s) without deleting them (Space, or "
+                  "click the [x] box). A disabled op is skipped when the geometry is "
+                  "built — untick one, hit Preview, and you see exactly what it "
+                  "contributes.")
 
         def cycle_moiety():
             """Step the ring-orientation of a moiety op through its N symmetry-
@@ -2519,11 +3019,16 @@ class WorkflowTab(ttk.Frame):
                       "fits and open the 3D preview. Click repeatedly to step through them "
                       "and keep the orientation that looks right (it's saved on the op). "
                       "Cycles the selected moiety op, or the last one.")
-        ttk.Label(f, text="Tip: multi-select ops (Shift/Ctrl-click) and move them as a block, "
-                  "or drag a row to reorder. To align two molecules to EACH OTHER, give each "
-                  "its own Transform aligning the chosen axis/plane to the same lab axis — then "
-                  "Combine.", foreground="#777", wraplength=220, justify=tk.LEFT).pack(
+        ttk.Label(f, text="Tip: click the [x] box (or Space) to switch an op off without losing "
+                  "it; Delete removes the selection; Ctrl+Z / Ctrl+Y undo/redo. Multi-select ops "
+                  "(Shift/Ctrl-click) and move them as a block, or drag a row to reorder. To "
+                  "align two molecules to EACH OTHER, give each its own Transform aligning the "
+                  "chosen axis/plane to the same lab axis — then Combine.",
+                  foreground="#777", wraplength=220, justify=tk.LEFT).pack(
                       anchor=tk.W, padx=8, pady=(4, 0))
+        # Preview / Write the transformed geometry — the same 'run until here' debug
+        # view the Combine panel offers (computed in memory; project untouched).
+        self._add_preview_button(node)
 
     def _edit_op_dialog(self, node, op):
         """Open the op editor, with the first input molecule's atoms as reference
@@ -2557,11 +3062,36 @@ class WorkflowTab(ttk.Frame):
                   "nodes FIRST — Combine is a pure append.", foreground="#555",
                   wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
 
+        # Charge / multiplicity / name — classic tk.Entry so we can flash their bg
+        # red (missing but required) / green (a valid value just entered). References
+        # are stashed in self._combine_fields so the guided-fix flow can highlight
+        # + focus them (see _guide_combine_fix).
+        self._combine_fields = {}
+        _RED, _GREEN = "#e57373", "#66bb6a"
+
         ttk.Label(f, text="Output molecule name:").pack(anchor=tk.W, padx=8, pady=(6, 0))
         nm = tk.StringVar(value=node.config.get("name", ""))
-        ent = ttk.Entry(f, textvariable=nm, width=24)
+        ent = tk.Entry(f, textvariable=nm, width=24)
         ent.pack(anchor=tk.W, padx=8, pady=2)
-        nm.trace_add("write", lambda *_a: self._set_cfg(node, "name", nm.get().strip()))
+        self._combine_fields["name"] = (ent, nm)
+        _nbg, _nfg = ent.cget("bg"), ent.cget("fg")
+
+        def commit_name(*_a):
+            txt = nm.get().strip()
+            self._set_cfg(node, "name", txt)
+            required = "name" in getattr(self, "_combine_required", set())
+            if not txt:
+                ent.configure(bg=(_RED if required else _nbg),
+                              fg=("#000000" if required else _nfg))
+                return
+            getattr(self, "_combine_required", set()).discard("name")
+            ent.configure(bg=_GREEN, fg="#000000")
+            ent.after(800, lambda: ent.winfo_exists() and ent.configure(bg=_nbg, fg=_nfg))
+        nm.trace_add("write", commit_name)
+        ttk.Label(f, text="Required once this Combine feeds a calculation: the merged "
+                  "molecule (and its run directory) is named after it, so a name you "
+                  "chose keeps re-runs pointing at the same results.",
+                  foreground="#777", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
 
         mode = tk.StringVar(value=node.config.get("mode", "merge"))
         ttk.Label(f, text="Mode:").pack(anchor=tk.W, padx=8, pady=(6, 0))
@@ -2575,13 +3105,6 @@ class WorkflowTab(ttk.Frame):
                   "(a single-molecule wire repeats for every row — e.g. add the same water "
                   "to each of n solutes).", foreground="#777", wraplength=220,
                   justify=tk.LEFT).pack(anchor=tk.W, padx=8)
-
-        # Charge / multiplicity — classic tk.Entry so we can flash their bg red
-        # (missing but required) / green (a valid integer just entered). References
-        # are stashed in self._combine_fields so the guided-fix flow can highlight
-        # + focus them (see _guide_combine_fix).
-        self._combine_fields = {}
-        _RED, _GREEN = "#e57373", "#66bb6a"
 
         def int_or_none_entry(label, key, hint):
             ttk.Label(f, text=label).pack(anchor=tk.W, padx=8, pady=(6, 0))
@@ -2620,15 +3143,164 @@ class WorkflowTab(ttk.Frame):
                           "ferromagnetically):", "mult",
                           "Antiferromagnetic / low-spin cases: set it here. Required when "
                           "this Combine feeds a calculation.")
+        self._build_placement_section(node)
         # Preview / Write the merged geometry — same 'run until here' debug view the
         # Transform panel offers (computed in memory; nothing is written to the project).
         self._add_preview_button(node)
 
+    def _build_placement_section(self, node):
+        """The INTER-molecular half of Combine: move whole fragments relative to
+        each other before they're appended (snap a donor H onto an acceptor at
+        1.9 A, …). Same list UX as the Transform ops — [x] tick boxes, Space /
+        On-Off, Delete, Ctrl+Z — because it is the same kind of ordered recipe,
+        just acting on fragments instead of atoms."""
+        from orca_workbench.core import transform as transform_mod
+        f = self.cfg_frame
+        ttk.Separator(f, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Label(f, text="Placement (between fragments):",
+                  font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=8)
+        ttk.Label(f, text="Transform nodes orient each fragment; these position them "
+                  "against each other. Applied in order, just before the append.",
+                  foreground="#555", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+
+        lb = tk.Listbox(f, height=4, exportselection=False, selectmode=tk.EXTENDED,
+                        activestyle="dotbox")
+        lb.pack(fill=tk.X, padx=8, pady=4)
+        self._placement_listbox = lb
+        _OFF_FG = "#9a9a9a"
+
+        def items():
+            return list(node.config.get("placements") or [])
+
+        def refill(select_indices=()):
+            lb.delete(0, tk.END)
+            for i, p in enumerate(items()):
+                on = transform_mod.op_enabled(p)
+                lb.insert(tk.END, "{} {}".format("[x]" if on else "[ ]",
+                                                 transform_mod.describe_placement(p)))
+                if not on:
+                    lb.itemconfigure(i, foreground=_OFF_FG)
+            for i in select_indices:
+                if 0 <= i < lb.size():
+                    lb.selection_set(i)
+
+        def commit(new_items, select_indices=()):
+            self._set_cfg(node, "placements", new_items)
+            refill(select_indices)
+
+        def on_add():
+            p = self._edit_placement_dialog(node, None)
+            if p is not None:
+                new = items() + [p]
+                commit(new, [len(new) - 1])
+
+        def on_edit(_e=None):
+            sel = list(lb.curselection())
+            if len(sel) != 1:
+                return
+            p = self._edit_placement_dialog(node, items()[sel[0]])
+            if p is not None:
+                lst = items()
+                lst[sel[0]] = p
+                commit(lst, [sel[0]])
+
+        def on_remove(_e=None):
+            idx = set(lb.curselection())
+            if not idx:
+                return "break"
+            commit([p for k, p in enumerate(items()) if k not in idx],
+                   [min(idx)] if len(items()) > len(idx) else [])
+            return "break"
+
+        def toggle(_e=None):
+            lst = items()
+            idx = [i for i in lb.curselection() if 0 <= i < len(lst)]
+            if not idx:
+                return "break"
+            target = not all(transform_mod.op_enabled(lst[i]) for i in idx)
+            for i in idx:
+                p = dict(lst[i])
+                if target:
+                    p.pop("enabled", None)
+                else:
+                    p["enabled"] = False
+                lst[i] = p
+            commit(lst, idx)
+            return "break"
+
+        def on_click(e):
+            idx = lb.nearest(e.y)
+            bbox = lb.bbox(idx)
+            if bbox is None or not (0 <= idx < len(items())):
+                return None
+            if e.x <= bbox[0] + 22 and bbox[1] <= e.y <= bbox[1] + bbox[3]:
+                lb.selection_clear(0, tk.END)
+                lb.selection_set(idx)
+                toggle()
+                return "break"
+            return None
+
+        refill()
+        lb.bind("<Double-1>", on_edit)
+        lb.bind("<ButtonPress-1>", on_click, add="+")
+        lb.bind("<space>", toggle)
+        lb.bind("<Delete>", on_remove)
+        lb.bind("<BackSpace>", on_remove)
+        for seq in ("<Control-z>", "<Control-Z>"):
+            lb.bind(seq, self._undo_op_list)
+        for seq in ("<Control-y>", "<Control-Y>", "<Control-Shift-z>", "<Control-Shift-Z>"):
+            lb.bind(seq, self._redo_op_list)
+        lb.bind("<Enter>", lambda e: lb.focus_set(), add="+")
+
+        row = ttk.Frame(f)
+        row.pack(fill=tk.X, padx=8)
+        b = ttk.Button(row, text="Snap...", width=8, command=on_add)
+        b.pack(side=tk.LEFT, padx=1)
+        tip(b, "Add a placement: put an atom of one fragment at a chosen distance from "
+               "an atom of another (e.g. a donor H 1.9 A from an acceptor O), along a "
+               "chosen direction. The mobile fragment is translated only — the "
+               "orientation you built with Transform nodes is preserved.")
+        ttk.Button(row, text="Edit...", width=7, command=on_edit).pack(side=tk.LEFT, padx=1)
+        ttk.Button(row, text="Remove", width=8, command=on_remove).pack(side=tk.LEFT, padx=1)
+        ttk.Button(row, text="On/Off", width=8, command=toggle).pack(side=tk.LEFT, padx=1)
+
+    def _edit_placement_dialog(self, node, placement):
+        """Open the placement editor with one reference geometry PER INBOUND WIRE
+        (fragment order = connection order), so both anchor atom indices can be
+        read off the real structures."""
+        from orca_workbench.ui.placement_dialog import PlacementDialog
+        frags = self._combine_fragment_geoms(node)
+        dlg = PlacementDialog(self, placement=placement, fragments=frags)
+        return dlg.result
+
+    def _combine_fragment_geoms(self, node):
+        """[(label, symbols, coords), ...] — the FIRST molecule arriving on each
+        wire into this Combine, in connection order. That's the fragment order the
+        placements index, and chained Transform/Combine upstream are computed in
+        memory (nothing is materialised)."""
+        backend, cache, _pending, _notes = self._make_geom_backend()
+        try:
+            streams, _warns = wf_mod.compute_streams(self.wf, self._source_molsets(), backend)
+        except Exception:
+            return []
+        out = []
+        for e in self.wf.edges_into(node.id, "geometry"):
+            names = streams.get(e.src_node, [])
+            if not names:
+                out.append(("(no molecules)", [], []))
+                continue
+            try:
+                g = self._read_geom(names[0], cache)
+                out.append((names[0], g["symbols"], g["coords"]))
+            except Exception:
+                out.append((names[0], [], []))
+        return out
+
     def _guide_combine_fix(self, node_id, missing):
-        """Select the offending Combine, red-highlight the empty charge/mult
+        """Select the offending Combine, red-highlight the empty name/charge/mult
         box(es), and focus the FIRST one — then hand control back to the user
-        (we don't chase focus to the second box). Each box greens + clears when a
-        valid integer is typed (see the commit closure)."""
+        (we don't chase focus to the later boxes). Each box greens + clears when a
+        valid value is typed (see the commit closures)."""
         node = self.wf.node(node_id)
         if node is None:
             return
@@ -2761,11 +3433,13 @@ class WorkflowTab(ttk.Frame):
         gb = workflow_expand.GeometryBackend(self.app.project)
         return gb, gb.cache, gb.pending, gb.notes
 
-    def _flush_geom_materialisations(self, pending):
-        """Write the pending derived geometries into the project (TRANSFORM/*.xyz
-        + locked Molecule rows). Delegates to the shared core materialiser; see
-        core.workflow_expand.flush_materialisations. Returns warnings."""
-        return workflow_expand.flush_materialisations(self.app.project, pending)
+    def _flush_geom_materialisations(self, pending, needed=None):
+        """Write the pending derived geometries into the project (TRANSFORM/*.xyz,
+        plus a locked Molecule row for the ones `needed` — i.e. that a calculation
+        runs on; intermediate Transform steps stay files only). Delegates to the
+        shared core materialiser; see core.workflow_expand.flush_materialisations.
+        Returns warnings."""
+        return workflow_expand.flush_materialisations(self.app.project, pending, needed=needed)
 
     def _node_input_geoms(self, node, limit=1):
         """The first geometries ARRIVING at a node — for the op editor's atom
@@ -3241,25 +3915,30 @@ class WorkflowTab(ttk.Frame):
         except Exception:
             return False
 
-    def _expand(self, verb, source_ids=None):
+    def _expand(self, verb, source_ids=None, only_nodes=None):
         """Validate + expand the graph into PlannedCalcs, asking the user to
         confirm. Reuses existing calcs for the same (graph node, molecule) so a
         re-run continues rather than duplicating. If `source_ids` is given, only
-        those networks are expanded. Returns (calcs, node_map) or None."""
-        # A Combine that feeds a calc but lacks explicit charge/mult gets a
-        # dedicated guided fix (popup -> select node -> highlight + focus the
+        those networks are expanded; if `only_nodes` is given, only those calc
+        nodes produce calcs ("run up to here"). Returns (calcs, node_map) or None."""
+        # A Combine that feeds a calc but lacks an explicit name / charge / mult gets
+        # a dedicated guided fix (popup -> select node -> highlight + focus the
         # missing box), which takes priority over the generic blocker list.
-        needs = self.wf.combine_needs_charge_mult()
+        needs = self.wf.combine_needs_fields()
         if needs:
             nid, missing = needs[0]
-            labels = {"charge": "charge", "mult": "multiplicity"}
+            labels = wf_mod.COMBINE_FIELD_LABELS
+            why = {"name": "the merged molecule is named after it (so re-runs find the "
+                           "same results instead of creating new molecules)",
+                   "charge": "auto-summing the fragment charges is rarely right",
+                   "mult": "coupling every unpaired spin ferromagnetically is rarely right"}
             messagebox.showwarning(
-                "Combine: set charge & multiplicity",
-                "A Combine node feeds a calculation, so its total {} must be set "
-                "explicitly — auto-summing charges and coupling every unpaired spin is "
-                "rarely right for a merged molecule.\n\nClick OK and I'll take you to the "
-                "node; fill the highlighted box(es).".format(
-                    " and ".join(labels[k] for k in missing)))
+                "Combine: fill in the required fields",
+                "A Combine node feeds a calculation, so its {} must be set "
+                "explicitly:\n\n  • {}\n\nClick OK and I'll take you to the node; fill "
+                "the highlighted box(es).".format(
+                    " and ".join(labels[k] for k in missing),
+                    "\n  • ".join("{} — {}".format(labels[k], why[k]) for k in missing)))
             self._guide_combine_fix(nid, missing)
             return None
         issues = self.wf.validate()
@@ -3285,13 +3964,14 @@ class WorkflowTab(ttk.Frame):
             # knows its own config (this closure has self.wf), so no signature change.
             onode = self.wf.node(origin_node)
             gspec = onode.config.get("geom_spec") if onode is not None else None
+            xkw = onode.config.get("extra_keywords") if onode is not None else None
             existing = self._find_existing_calc(origin_node, mol, category, recipe_name)
             if existing is not None:
                 # Adopt this graph node so future runs match by node identity too.
                 if getattr(existing, "origin_node", None) is None:
                     existing.origin_node = origin_node
                 # Keep finished steps verbatim; let unfinished ones adopt any
-                # edits made to the graph (recipe / geometry / gate / geom_spec).
+                # edits made to the graph (recipe / geometry / gate / geom_spec / keywords).
                 if not self._calc_done(existing):
                     existing.recipe_name = recipe_name
                     existing.category = category
@@ -3299,11 +3979,12 @@ class WorkflowTab(ttk.Frame):
                     existing.parent_id = parent_id
                     existing.gate = gate
                     existing.geom_spec = gspec
+                    existing.extra_keywords = xkw
                 return existing
             return PlannedCalc(id=new_calc_id(), molecule_filename=mol, recipe_name=recipe_name,
                                category=category, geometry_source=geometry_source,
                                parent_id=parent_id, gate=gate, origin_node=origin_node,
-                               geom_spec=gspec)
+                               geom_spec=gspec, extra_keywords=xkw)
 
         # Geometry backend: Transform/Combine nodes compute their derived
         # molecules in memory during expansion; they're only written into the
@@ -3311,7 +3992,8 @@ class WorkflowTab(ttk.Frame):
         geom_backend, _geom_cache, geom_pending, geom_notes = self._make_geom_backend()
         calcs, warnings, node_map = wf_mod.expand_to_calcs(self.wf, mol_files, factory,
                                                            source_ids=source_ids,
-                                                           transform_apply=geom_backend)
+                                                           transform_apply=geom_backend,
+                                                           only_nodes=only_nodes)
         warnings.extend(geom_notes)   # per-molecule transform skips, shown in the confirm
         if not calcs:
             messagebox.showinfo("Nothing generated",
@@ -3320,7 +4002,12 @@ class WorkflowTab(ttk.Frame):
         new_calcs = [c for c in calcs if id(c) not in existing_before]
         reused = len(calcs) - len(new_calcs)
         n_gated = sum(1 for c in calcs if getattr(c, "gate", None))
-        scope = "selected pipeline" if source_ids is not None else "pipeline"
+        if only_nodes is not None:
+            scope = "sub-pipeline (up to the selected node)"
+        elif source_ids is not None:
+            scope = "selected pipeline"
+        else:
+            scope = "pipeline"
         msg = "{} {} calculation(s) from this {} in category '{}'?".format(
             verb, len(calcs), scope, self.wf.category)
         if reused:
@@ -3333,9 +4020,12 @@ class WorkflowTab(ttk.Frame):
         if not messagebox.askyesno(verb + " calculations", msg):
             return None
         # NOW write any Transform/Combine-derived molecules into the project
-        # (before the calcs that reference them are built).
+        # (before the calcs that reference them are built). Only geometries a calc
+        # actually runs on become Molecules-tab rows; intermediate Transform steps
+        # are written to TRANSFORM/ as files only.
         if geom_pending:
-            gwarns = self._flush_geom_materialisations(geom_pending)
+            gwarns = self._flush_geom_materialisations(
+                geom_pending, needed={c.molecule_filename for c in calcs})
             if gwarns:
                 messagebox.showwarning("Derived geometries", "\n".join(gwarns))
         # Append only the genuinely-new calcs (reused ones are already in place).
@@ -3436,6 +4126,40 @@ class WorkflowTab(ttk.Frame):
         scope = "selected pipeline" if source_ids is not None else "pipeline"
         self.app.set_status("{} running: {} calculation(s) under automatic control."
                             .format(scope.capitalize(), len(calcs)))
+        self.refresh_live()
+
+    def on_run_up_to_here(self, node_id):
+        """KNIME's "execute up to here": run the chosen node and everything it
+        DEPENDS on, and nothing else. Anything downstream is left untouched, so
+        you can bring a long pipeline up to a checkpoint, look at the result, and
+        only then let the rest go. Already-finished steps are reused, not re-run."""
+        node = self.wf.node(node_id)
+        if node is None:
+            return
+        upto = self.wf.ancestors([node_id])
+        calc_nodes = [n for n in self.wf.nodes
+                      if n.id in upto and n.type in wf_mod.CALC_NODE_TYPES]
+        if not calc_nodes:
+            messagebox.showinfo(
+                "Run up to here",
+                "'{}' has no calculation node at or before it — there's nothing to run "
+                "yet.\n\nGeometry-building nodes (Molecules / Transform / Combine) are "
+                "evaluated when the pipeline is generated; use 'Preview output (3D)' to "
+                "see what they produce.".format(node.label))
+            return
+        res = self._expand("Run", source_ids=self.wf.network_sources([node_id]),
+                           only_nodes=upto)
+        if res is None:
+            return
+        calcs, _ = res
+        self.app.refresh_all_tabs()
+        try:
+            self.app.notebook.select(self.app.calculations_tab)
+        except Exception:
+            pass
+        self.app.calculations_tab.start_pipeline([c.id for c in calcs], reports=[])
+        self.app.set_status("Running up to '{}': {} calculation(s) ({} node(s))."
+                            .format(node.label, len(calcs), len(calc_nodes)))
         self.refresh_live()
 
     def on_submit_unattended(self):

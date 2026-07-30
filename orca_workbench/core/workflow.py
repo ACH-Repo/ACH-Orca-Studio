@@ -15,6 +15,7 @@ links — so the whole thing runs through the normal build/submit/monitor path.
 This module is pure (no Tkinter) so it is unit-testable and serialisable.
 """
 
+import copy
 import uuid
 from typing import Dict, List, Optional, Tuple
 
@@ -29,6 +30,12 @@ NODE_TYPES = {
         "kind": "source",
         "config": {"mode": "all", "filenames": []},
     },
+    # Calculation nodes take a VARIADIC geometry input ("fan_in"): several
+    # geometry wires can land on one Optimize/Frequencies/Property node and the
+    # molecules they carry are merged (de-duplicated, in connection order) into
+    # one stream. So "optimise everything from these three branches with the same
+    # recipe" is one node, not three — the same convenience Combine's input has,
+    # except nothing is merged geometrically: each molecule still gets its own calc.
     "optimize": {
         "label": "Optimize",
         "inputs": [("geometry", "geometry")],
@@ -37,6 +44,7 @@ NODE_TYPES = {
         # energy, trajectory, gradient), so it can feed a Report node directly.
         "outputs": [("geometry", "geometry"), ("results", "results")],
         "kind": "calc",
+        "fan_in": ("geometry",),
         # geom_spec: optional geometry constraints / a relaxed scan (core.geomspec),
         # applied to every molecule this node optimizes. None = plain optimization.
         "config": {"recipe": "", "geom_spec": None},
@@ -46,6 +54,7 @@ NODE_TYPES = {
         "inputs": [("geometry", "geometry")],
         "outputs": [("geometry", "geometry"), ("results", "results")],
         "kind": "calc",
+        "fan_in": ("geometry",),
         "config": {"recipe": ""},
     },
     # Any single-geometry property calculation: SP, NMR, dipole, AND TD-DFT
@@ -59,6 +68,7 @@ NODE_TYPES = {
         "inputs": [("geometry", "geometry")],
         "outputs": [("results", "results")],
         "kind": "calc",
+        "fan_in": ("geometry",),
         "config": {"recipe": ""},
     },
     "condition": {
@@ -78,6 +88,8 @@ NODE_TYPES = {
         "inputs": [("geometry", "geometry")],
         "outputs": [("geometry", "geometry")],
         "kind": "filter",
+        # Variadic like the calc nodes: filter the union of several branches.
+        "fan_in": ("geometry",),
         "config": {"mode": "include", "kind": "substring", "pattern": ""},
     },
     # Geometry builders (run at EXPAND time, before any calculation exists):
@@ -102,7 +114,16 @@ NODE_TYPES = {
         # 'geometry' inputs normally take ONE wire; Combine's is variadic —
         # every inbound wire contributes its molecules (in connection order).
         "fan_in": ("geometry",),
-        "config": {"name": "", "mode": "merge", "charge": None, "mult": None},
+        # name: REQUIRED once this Combine feeds a calculation — the merged
+        # molecule (and therefore its run directory) is named after it, so an
+        # auto-generated name would make every re-expansion produce fresh
+        # molecules and duplicate calcs (see combine_needs_fields).
+        # placements: INTER-molecular ops (core.transform.apply_placements) that
+        # move whole fragments relative to each other — "snap this donor H onto
+        # that acceptor at 1.9 A" — applied just before the append. Transform
+        # nodes orient each fragment; placements position them against each other.
+        "config": {"name": "", "mode": "merge", "charge": None, "mult": None,
+                   "placements": []},
     },
     # A Write node exports the CURRENT geometries flowing into it to disk — either
     # a single multi-structure file (a trajectory / collection: one xyz/sdf/pdb/
@@ -161,6 +182,17 @@ NODE_TYPES = {
         "outputs": [],
         "kind": "annotation",
         "config": {"title": "Group", "w": 260.0, "h": 180.0},
+    },
+    # An 'image' annotation shows a picture on the canvas (Ctrl+V pastes one from
+    # the clipboard, or load a file). `path` is PROJECT-RELATIVE: the bytes are
+    # copied into WORKFLOW_IMG/ when pasted, so the graph never depends on a file
+    # outside the project (see core.canvas_images).
+    "image": {
+        "label": "Image",
+        "inputs": [],
+        "outputs": [],
+        "kind": "annotation",
+        "config": {"path": "", "w": 260.0, "h": 180.0, "caption": ""},
     },
 }
 
@@ -221,6 +253,22 @@ def filter_matches(config, mol_filename, index, n_total):
     return matched if mode == "include" else not matched
 
 
+def combine_field_set(config, key):
+    # type: (dict, str) -> bool
+    """Whether a Combine node's required field is filled in. `name` needs
+    non-blank text; charge / multiplicity need any value (charge 0 counts —
+    a neutral merged molecule is a perfectly explicit answer)."""
+    v = config.get(key)
+    if key == "name":
+        return bool(str(v or "").strip())
+    return v is not None
+
+
+# Human labels for the required Combine fields (messages + the guided fix).
+COMBINE_FIELD_LABELS = {"name": "output molecule name", "charge": "charge",
+                        "mult": "multiplicity"}
+
+
 def gate_outcome(predicate, source_done, source_out_text):
     # type: (str, bool, Optional[str]) -> str
     """Resolve a conditional gate to 'pending' | 'open' | 'closed'.
@@ -251,10 +299,14 @@ class WorkflowNode(object):
         self.type = type
         self.x = float(x)
         self.y = float(y)
-        # start from the type's default config, overlaid with any given values
-        base = dict(NODE_TYPES.get(type, {}).get("config", {}))
+        # Start from the type's default config, overlaid with any given values —
+        # both DEEP-COPIED, so a node owns its config outright. Shallow copies
+        # would share the registry's default lists (every new node appending to
+        # NODE_TYPES' own "ops"/"filenames") and, when built from a dict, would
+        # alias the caller's structure (an undo snapshot rewritten by later edits).
+        base = copy.deepcopy(NODE_TYPES.get(type, {}).get("config", {}))
         if config:
-            base.update(config)
+            base.update(copy.deepcopy(config))
         self.config = base
 
     @property
@@ -279,8 +331,13 @@ class WorkflowNode(object):
         return None
 
     def to_dict(self):
+        # The config is DEEP-COPIED: to_dict() is what the editor uses for its
+        # undo/redo snapshots, and handing out the live dict made a snapshot alias
+        # the node it was supposed to preserve — so any config-only edit (a recipe
+        # pick, a Transform op, a Combine charge) compared equal to its own
+        # "before" state and silently dropped out of the undo history.
         return {"id": self.id, "type": self.type, "x": self.x, "y": self.y,
-                "config": self.config}
+                "config": copy.deepcopy(self.config)}
 
     @classmethod
     def from_dict(cls, d):
@@ -360,27 +417,48 @@ class Workflow(object):
             stack.extend(adj.get(nid, ()))
         return {n.id for n in self.nodes if n.type == "molecules" and n.id in seen}
 
+    def ancestors(self, node_ids, include_self=True):
+        # type: (list, bool) -> set
+        """Every node the given ones depend on, following edges BACKWARDS (all
+        port types, not just geometry). With `include_self`, the given nodes are
+        in the result too.
+
+        This is "run up to here": the sub-graph that has to execute for a chosen
+        node to produce its result, and nothing downstream of it."""
+        seen = set()
+        stack = list(node_ids or [])
+        while stack:
+            nid = stack.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            stack.extend(e.src_node for e in self.edges_into(nid))
+        if not include_self:
+            seen -= set(node_ids or [])
+        return seen
+
     def traces_to_type(self, node_id, node_type):
         # type: (str, str) -> bool
         """True if `node_id` is, or has a geometry-input ancestor that is, of
         `node_type`. Used to decide whether a node with an upstream prerequisite
         (e.g. ZPVA, which needs a Frequencies job's .hess) belongs downstream of a
-        given port — a check stronger than raw port-type compatibility."""
-        cur = self.node(node_id)
+        given port — a check stronger than raw port-type compatibility.
+
+        Follows EVERY inbound geometry wire (calc nodes and Combine/Filter fan
+        several in), so a match on any branch counts."""
         seen = set()
-        while cur is not None and cur.id not in seen:
-            seen.add(cur.id)
+        stack = [node_id]
+        while stack:
+            nid = stack.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            cur = self.node(nid)
+            if cur is None:
+                continue
             if cur.type == node_type:
                 return True
-            port = None
-            for name, t in cur.inputs():
-                if t == "geometry":
-                    port = name
-                    break
-            ein = self.edges_into(cur.id, port) if port else []
-            if not ein:
-                return False
-            cur = self.node(ein[0].src_node)
+            stack.extend(self.geometry_feeders(nid))
         return False
 
     def edges_into(self, node_id, port=None):
@@ -496,18 +574,34 @@ class Workflow(object):
             stack.extend(e.dst_node for e in self.edges_out(nid))
         return False
 
-    def combine_needs_charge_mult(self):
+    # Combine config keys that must be filled in explicitly once the merged
+    # molecule feeds a calculation, in the order the guided fix walks them.
+    COMBINE_REQUIRED_KEYS = ("name", "charge", "mult")
+
+    def combine_needs_fields(self):
         # type: () -> list
-        """Combine nodes that feed a calculation but haven't had BOTH charge and
-        multiplicity set explicitly. Returns [(node_id, [missing keys]), ...]."""
+        """Combine nodes that feed a calculation but haven't had all of name,
+        charge and multiplicity set explicitly. Returns [(node_id, [missing
+        keys]), ...].
+
+        `name` matters as much as charge/mult: the merged molecule is named after
+        it, so leaving it blank gives every expansion an auto-named molecule
+        ('combined…') that's hard to tell apart and easy to duplicate. charge /
+        mult matter because auto-summing charges and coupling every unpaired spin
+        ferromagnetically is rarely right for a merged molecule.
+        """
         out = []
         for n in self.nodes:
             if n.type != "combine" or not self.has_calc_downstream(n.id):
                 continue
-            missing = [k for k in ("charge", "mult") if n.config.get(k) is None]
+            missing = [k for k in self.COMBINE_REQUIRED_KEYS
+                       if not combine_field_set(n.config, k)]
             if missing:
                 out.append((n.id, missing))
         return out
+
+    # Back-compat alias (the check now covers the name too).
+    combine_needs_charge_mult = combine_needs_fields
 
     def has_calc_upstream(self, node_id):
         # type: (str) -> bool
@@ -576,19 +670,28 @@ class Workflow(object):
                                   "— place it BEFORE the calculation nodes (between "
                                   "Molecules and the first Optimize/Property step).")
             elif n.type == "combine":
-                if not self.edges_into(n.id, "geometry"):
+                n_wires = len(self.edges_into(n.id, "geometry"))
+                if not n_wires:
                     issues.append("Combine node has no inputs connected.")
+                try:
+                    from orca_workbench.core import transform as transform_mod
+                    for msg in transform_mod.validate_placements(
+                            n.config.get("placements") or [], n_fragments=n_wires or None):
+                        issues.append("Combine: " + msg)
+                except ImportError:
+                    pass
                 if self.has_calc_upstream(n.id):
                     issues.append("Combine reads geometries when the graph is expanded "
                                   "— place it before the calculation nodes.")
                 if self.has_calc_downstream(n.id):
-                    miss = [k for k in ("charge", "mult") if n.config.get(k) is None]
+                    miss = [k for k in self.COMBINE_REQUIRED_KEYS
+                            if not combine_field_set(n.config, k)]
                     if miss:
                         issues.append("Combine feeds a calculation: set its {} explicitly "
-                                      "(the auto guess is rarely right for a merged "
-                                      "molecule).".format(" and ".join(
-                                          {"charge": "charge", "mult": "multiplicity"}[k]
-                                          for k in miss)))
+                                      "(an auto-generated name / charge / spin guess is "
+                                      "rarely right for a merged molecule).".format(
+                                          " and ".join(COMBINE_FIELD_LABELS[k]
+                                                       for k in miss)))
         if self.topo_order() is None:
             issues.append("The graph contains a cycle.")
         return issues
@@ -633,10 +736,32 @@ class Workflow(object):
         elif t == "combine":
             if not self.edges_into(n.id, "geometry") or self.has_calc_upstream(n.id):
                 return False
+            try:
+                from orca_workbench.core import transform as _tmod
+                if _tmod.validate_placements(n.config.get("placements") or [],
+                                             n_fragments=len(self.edges_into(n.id, "geometry"))):
+                    return False
+            except ImportError:
+                pass
             if self.has_calc_downstream(n.id) and any(
-                    n.config.get(k) is None for k in ("charge", "mult")):
+                    not combine_field_set(n.config, k) for k in self.COMBINE_REQUIRED_KEYS):
                 return False
         return True
+
+    # ---- geometry-path walking (fan-in aware) ----
+
+    def geometry_feeders(self, node_id):
+        # type: (str) -> List[str]
+        """The node ids wired into `node_id`'s geometry input, in connection
+        order. One entry for a plain single input; several for a variadic
+        ("fan_in") one — every calc node's geometry input, Combine's, Filter's."""
+        node = self.node(node_id)
+        if node is None:
+            return []
+        port = _geometry_input_port(node)
+        if port is None:
+            return []
+        return [e.src_node for e in self.edges_into(node_id, port)]
 
 
 def compute_streams(workflow, source_mols, transform_apply=None):
@@ -652,6 +777,11 @@ def compute_streams(workflow, source_mols, transform_apply=None):
       * combine    -> `transform_apply(node, [stream per inbound wire])`
       * calc/condition -> pass the input stream through unchanged (an OPT
         changes coordinates but not molecule identity — parent links carry that)
+
+    Except for Combine (which keeps one stream per wire so it can merge/zip
+    them), a node's input stream is the UNION of every inbound geometry wire, in
+    connection order, de-duplicated: a calc node fed by three branches runs once
+    per distinct molecule, not once per wire.
 
     `transform_apply(node, streams)` is the injected geometry backend (the UI
     materialises derived molecules; tests fake it). It gets a LIST of streams —
@@ -670,7 +800,12 @@ def compute_streams(workflow, source_mols, transform_apply=None):
             continue
         port = _geometry_input_port(node)
         ein = workflow.edges_into(nid, port) if port else []
-        instream = list(streams.get(ein[0].src_node, [])) if ein else []
+        # Merge every inbound wire (fan-in), preserving order, dropping repeats.
+        instream = []
+        for e in ein:
+            for m in streams.get(e.src_node, []):
+                if m not in instream:
+                    instream.append(m)
         if t == "filter":
             n_tot = len(instream)
             streams[nid] = [m for i, m in enumerate(instream)
@@ -715,12 +850,16 @@ def compute_streams(workflow, source_mols, transform_apply=None):
 
 
 def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_ids=None,
-                    transform_apply=None):
+                    transform_apply=None, only_nodes=None):
     # type: (Workflow, List[str], callable, Optional[set], Optional[callable]) -> Tuple[list, List[str], Dict[str, list]]
     """Expand a workflow into PlannedCalcs, attaching conditional gates.
 
     If `source_ids` is given, only the networks rooted at those Molecules nodes
-    are expanded (used to run one pipeline of several on the canvas).
+    are expanded (used to run one pipeline of several on the canvas). If
+    `only_nodes` is given, only calculation nodes in that set produce calcs —
+    that's "run up to here": pass a node plus its ancestors (see
+    Workflow.ancestors) and everything downstream of it is left alone. Upstream
+    nodes still resolve normally, so parent/geometry links are unaffected.
 
     Each calc node runs once per molecule in the stream ARRIVING at it (see
     compute_streams — filters subset it, Transform/Combine nodes replace it
@@ -776,44 +915,50 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
     warnings.extend(s_warnings)
 
     def root_source(node):
-        """Walk the geometry path all the way back (through calc / condition /
-        transform nodes too) to a Molecules source feeding this node, or None.
-        (Through a Combine it follows the FIRST inbound wire — only reachability
-        matters here; molecule lists come from the streams.)"""
-        cur = node
-        guard = 0
-        while guard < 200:
-            guard += 1
-            port = _geometry_input_port(cur)
-            ein = workflow.edges_into(cur.id, port) if port else []
-            if not ein:
-                return None
-            src = workflow.node(ein[0].src_node)
-            if src is None:
-                return None
-            if src.type == "molecules":
-                return src.id
-            cur = src
+        """A Molecules source feeding `node` over the geometry path (through calc
+        / condition / transform nodes too), or None. Searches EVERY inbound wire
+        (fan-in), since only reachability matters here — molecule lists come from
+        the streams."""
+        seen = set()
+        stack = [node.id]
+        while stack:
+            nid = stack.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            cur = workflow.node(nid)
+            if cur is None:
+                continue
+            if cur.type == "molecules":
+                return cur.id
+            stack.extend(workflow.geometry_feeders(nid))
+        return None
 
     calc_for = {}  # (node_id, molecule) -> calc id
 
-    def resolve(node, mol):
-        """Walk back along the geometry path, passing through condition /
-        frequencies / property nodes (none of which produce a *new* optimized
-        geometry) to the nearest optimize node (parent), a Transform/Combine
-        (whose materialised .xyz IS the initial geometry), or the molecules
-        source (initial). If the path crosses a condition node, attach a gate
-        keyed on the calc feeding that condition."""
+    def upstream_carrying(node_id, mol):
+        """Walking back from `node_id`, the inbound geometry wire that carries
+        `mol` — so a fan-in node's history is followed along the branch this
+        molecule actually came from (falling back to the first wire)."""
+        feeders = workflow.geometry_feeders(node_id)
+        for f in feeders:
+            if mol in streams.get(f, ()):
+                return f
+        return feeders[0] if feeders else None
+
+    def resolve(feeder_id, mol):
+        """Given the node a calc's geometry ARRIVES FROM, walk back along the
+        geometry path — passing through condition / frequencies / property /
+        filter nodes (none of which produce a *new* optimized geometry) — to the
+        nearest optimize node (parent), a Transform/Combine (whose materialised
+        .xyz IS the initial geometry), or the molecules source (initial). If the
+        path crosses a condition node, attach a gate keyed on the calc feeding
+        that condition."""
         gate = None
-        cur = node
+        src = workflow.node(feeder_id) if feeder_id else None
         guard = 0
         while guard < 200:
             guard += 1
-            port = _geometry_input_port(cur)
-            ein = workflow.edges_into(cur.id, port) if port else []
-            if not ein:
-                return "initial", None, gate
-            src = workflow.node(ein[0].src_node)
             if src is None or src.type == "molecules":
                 return "initial", None, gate
             if src.type in GEOMETRY_NODE_TYPES:
@@ -824,17 +969,17 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
                     return "parent:" + pid, pid, gate
                 return "initial", None, gate
             if src.type == "condition":
-                if gate is None:
-                    cin = workflow.edges_into(src.id, "in")
-                    if cin:
-                        fid = calc_for.get((cin[0].src_node, mol))
-                        if fid:
-                            gate = {"source": fid,
-                                    "predicate": src.config.get("predicate", "terminated_ok")}
-                cur = src
+                cin = workflow.edges_into(src.id, "in")
+                if gate is None and cin:
+                    fid = calc_for.get((cin[0].src_node, mol))
+                    if fid:
+                        gate = {"source": fid,
+                                "predicate": src.config.get("predicate", "terminated_ok")}
+                src = workflow.node(cin[0].src_node) if cin else None
                 continue
             if src.type in ("frequencies", "property", "filter"):
-                cur = src
+                nxt = upstream_carrying(src.id, mol)
+                src = workflow.node(nxt) if nxt else None
                 continue
             return "initial", None, gate
 
@@ -844,6 +989,8 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
         node = workflow.node(nid)
         if node.type not in CALC_NODE_TYPES:
             continue
+        if only_nodes is not None and nid not in only_nodes:
+            continue
         ein = workflow.edges_into(node.id, "geometry")
         if not ein:
             continue  # validated elsewhere
@@ -851,15 +998,19 @@ def expand_to_calcs(workflow, molecule_filenames, planned_calc_factory, source_i
             warnings.append("{} isn't connected to a Molecules source — skipped."
                             .format(node.label))
             continue
-        feeder_id = ein[0].src_node
-        for mol in streams.get(feeder_id, []):
-            geometry_source, parent_id, gate = resolve(node, mol)
-            calc = planned_calc_factory(mol, node.config.get("recipe", ""),
-                                        workflow.category, geometry_source, parent_id,
-                                        gate, node.id)
-            calc_for[(node.id, mol)] = calc.id
-            node_map.setdefault(node.id, []).append(calc.id)
-            calcs.append(calc)
+        # Fan-in: one calc per DISTINCT molecule arriving on any of the wires,
+        # each resolved along the wire it actually came in on.
+        for e in ein:
+            for mol in streams.get(e.src_node, []):
+                if (node.id, mol) in calc_for:
+                    continue          # same molecule via another wire — one calc
+                geometry_source, parent_id, gate = resolve(e.src_node, mol)
+                calc = planned_calc_factory(mol, node.config.get("recipe", ""),
+                                            workflow.category, geometry_source, parent_id,
+                                            gate, node.id)
+                calc_for[(node.id, mol)] = calc.id
+                node_map.setdefault(node.id, []).append(calc.id)
+                calcs.append(calc)
     if not calcs and not warnings:
         warnings.append("No calculation nodes are connected to a Molecules source.")
     return calcs, warnings, node_map

@@ -14,8 +14,28 @@ caller schedules poll() via tk's after()).
 """
 
 import os
+import shutil
 import subprocess
 from typing import Dict, List, Optional
+
+
+def resolve_orca_exe(exe):
+    # type: (str) -> str
+    """Absolute path to the ORCA executable. ORCA MUST be launched by full pathname for
+    parallel (%pal nprocs>1) runs: it derives its own install directory from argv[0] to
+    find the MPI launcher and the orca_* helper binaries. A bare name ('orca') or a
+    relative path trips 'ERROR (ORCA_MAIN): For parallel runs ORCA has to be called with
+    full pathname'. Resolve a bare name via PATH; make anything else absolute."""
+    if not exe:
+        return exe
+    if os.path.isabs(exe):
+        return exe
+    # Bare command name with no directory -> look it up on PATH.
+    if os.path.dirname(exe) == "":
+        found = shutil.which(exe)
+        if found:
+            return os.path.abspath(found)
+    return os.path.abspath(exe)
 
 
 # Per-job lifecycle states this runner reports.
@@ -41,7 +61,8 @@ class _Job(object):
 class LocalRunner(object):
     def __init__(self, orca_exe, max_concurrent=1):
         # type: (str, int) -> None
-        self.orca_exe = orca_exe
+        self.orca_exe = orca_exe                 # as configured (for identity/compare)
+        self._orca_abs = resolve_orca_exe(orca_exe)   # what we actually invoke (full path)
         self.max_concurrent = max(1, int(max_concurrent))
         self._jobs = {}         # type: Dict[str, _Job]
         self._order = []        # type: List[str]  (queue order)
@@ -101,13 +122,14 @@ class LocalRunner(object):
         # type: (_Job) -> None
         try:
             env = dict(os.environ)
-            # ORCA needs its own directory on PATH to find its shared libraries.
-            orca_dir = os.path.dirname(os.path.abspath(self.orca_exe))
+            # ORCA needs its own directory on PATH to find its shared libraries, and
+            # must be invoked by FULL pathname for parallel runs (see _abs_exe).
+            orca_dir = os.path.dirname(self._orca_abs)
             if orca_dir:
                 env["PATH"] = orca_dir + os.pathsep + env.get("PATH", "")
             job._out_fh = open(job.out_abs, "w", encoding="utf-8", errors="replace")
             job.proc = subprocess.Popen(
-                [self.orca_exe, os.path.basename(job.inp_abs)],
+                [self._orca_abs, os.path.basename(job.inp_abs)],
                 cwd=job.rundir_abs,
                 stdout=job._out_fh,
                 stderr=subprocess.STDOUT,

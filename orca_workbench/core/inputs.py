@@ -254,6 +254,41 @@ def add_moread(inp_text, gbw_path):
     return "\n".join(out) if done else inp_text
 
 
+def add_keywords(inp_text, keywords):
+    # type: (str, object) -> str
+    """Append extra ORCA simple-input keyword(s) to the first `!` line — e.g.
+    `UseSym` (enforce point-group symmetry, so a molecule optimises within its Cs/C2v/…
+    group), `TightSCF`, `Grid5`, `RIJCOSX`. `keywords` may be a string
+    ('UseSym TightSCF') or a list. Keywords already on the line (case-insensitive) are
+    skipped, so it's idempotent and won't fight a recipe that already has them. If the
+    input has no `!` line at all, one is prepended. Empty/blank input returns unchanged."""
+    if isinstance(keywords, (list, tuple)):
+        toks = [str(t) for t in keywords]
+    else:
+        toks = str(keywords or "").split()
+    seen, uniq = set(), []
+    for t in (t.strip() for t in toks):
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            uniq.append(t)
+    if not uniq:
+        return inp_text
+    out, done = [], False
+    for ln in inp_text.split("\n"):
+        if not done and ln.lstrip().startswith("!"):
+            have = set(w.lower() for w in ln.split())
+            add = [t for t in uniq if t.lower() not in have]
+            if add:
+                ln = ln.rstrip() + " " + " ".join(add)
+            out.append(ln)
+            done = True
+            continue
+        out.append(ln)
+    if not done:
+        return "! " + " ".join(uniq) + "\n" + inp_text
+    return "\n".join(out)
+
+
 def parse_cores(inp_text):
     # type: (str) -> int
     """Return the nprocs declared in `%pal nprocs N`. Defaults to 1 if absent."""

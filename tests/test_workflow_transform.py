@@ -30,7 +30,7 @@ def test_node_types_registered():
     assert "transform" not in wf.CALC_NODE_TYPES
 
 
-def test_combine_input_fans_in_but_optimize_does_not():
+def test_combine_and_optimize_inputs_both_fan_in():
     w = wf.Workflow()
     m1, m2 = w.add_node("molecules"), w.add_node("molecules")
     comb = w.add_node("combine")
@@ -39,8 +39,14 @@ def test_combine_input_fans_in_but_optimize_does_not():
     e2, _ = w.add_edge(m2.id, "geometry", comb.id, "geometry")   # 2nd wire OK
     assert e1 is not None and e2 is not None
     w.add_edge(comb.id, "geometry", opt.id, "geometry")
-    e4, why = w.add_edge(m1.id, "geometry", opt.id, "geometry")  # opt stays single
-    assert e4 is None and "already connected" in why
+    # a calc node's geometry input is variadic too: the raw molecules can be
+    # optimised by the SAME node that optimises the merged one
+    e4, why = w.add_edge(m1.id, "geometry", opt.id, "geometry")
+    assert e4 is not None, why
+    assert len(w.edges_into(opt.id, "geometry")) == 2
+    # ... but a repeat of the exact same wire is still refused
+    e5, why5 = w.add_edge(m1.id, "geometry", opt.id, "geometry")
+    assert e5 is None and "already connected" in why5
 
 
 def test_transform_stream_renames_molecules():
@@ -176,7 +182,7 @@ def test_compute_streams_directly():
     assert warns == []
 
 
-def test_combine_needs_charge_mult_only_when_feeding_a_calc():
+def test_combine_needs_name_charge_mult_only_when_feeding_a_calc():
     w = wf.Workflow()
     m1 = w.add_node("molecules")
     m2 = w.add_node("molecules")
@@ -185,13 +191,19 @@ def test_combine_needs_charge_mult_only_when_feeding_a_calc():
     w.add_edge(m1.id, "geometry", comb.id, "geometry")
     w.add_edge(m2.id, "geometry", comb.id, "geometry")
     # no calc downstream yet -> not required
-    assert w.combine_needs_charge_mult() == []
+    assert w.combine_needs_fields() == []
     w.add_edge(comb.id, "geometry", opt.id, "geometry")
-    needs = w.combine_needs_charge_mult()
-    assert needs and needs[0][0] == comb.id and set(needs[0][1]) == {"charge", "mult"}
-    assert any("charge and multiplicity" in i for i in w.validate())
-    comb.config["charge"] = 0
-    assert w.combine_needs_charge_mult()[0][1] == ["mult"]
+    needs = w.combine_needs_fields()
+    assert needs and needs[0][0] == comb.id
+    assert set(needs[0][1]) == {"name", "charge", "mult"}
+    assert any("output molecule name" in i for i in w.validate())
+    comb.config["charge"] = 0          # charge 0 is an explicit answer, not "unset"
+    assert w.combine_needs_fields()[0][1] == ["name", "mult"]
     comb.config["mult"] = 1
+    comb.config["name"] = "  "         # whitespace doesn't count as a name
+    assert w.combine_needs_fields()[0][1] == ["name"]
+    comb.config["name"] = "dimer"
+    assert w.combine_needs_fields() == []
+    assert not any("Combine feeds" in i for i in w.validate())
+    # legacy alias still resolves to the same check
     assert w.combine_needs_charge_mult() == []
-    assert not any("charge" in i and "Combine feeds" in i for i in w.validate())

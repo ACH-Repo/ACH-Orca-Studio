@@ -605,6 +605,7 @@ class MoleculesTab(ttk.Frame):
         if field == "smiles" and (self._focus_filename is None
                                   or self._focus_filename == self._autofill_row):
             self._maybe_auto_charge_mult(target)
+            self._maybe_annotate_mass(target)
             if self._focus_filename is not None:
                 self._refresh_row(target)   # reflect the new charge/mult in the table
 
@@ -631,6 +632,33 @@ class MoleculesTab(ttk.Frame):
             if not self._user_touched_mult:
                 self.mult_var.set(str(mult))
                 target.multiplicity = mult
+        finally:
+            self._suppress_field_writes = False
+
+    # A managed "MW=<x> g/mol" token appended to the comment. Matched (with an
+    # optional leading separator) so a SMILES edit REPLACES it rather than stacking
+    # duplicates; the user's free-text comment is preserved around it.
+    _MW_TOKEN_RE = re.compile(r"\s*;?\s*MW\s*=\s*[0-9.]+\s*g/mol", re.IGNORECASE)
+
+    def _maybe_annotate_mass(self, target):
+        # type: (Molecule) -> None
+        """Record the SMILES molecular weight in the comment as a managed
+        'MW=<x> g/mol' token. No-op if RDKit is absent or the SMILES won't parse,
+        so a half-typed SMILES leaves the comment untouched."""
+        if not target.smiles:
+            return
+        mw = coords_mod.smiles_mol_weight(target.smiles)
+        if mw is None:
+            return
+        base = self._MW_TOKEN_RE.sub("", target.comment or "").strip().rstrip(";").strip()
+        token = "MW={:.2f} g/mol".format(mw)
+        new_comment = "{}; {}".format(base, token) if base else token
+        if new_comment == (target.comment or ""):
+            return
+        self._suppress_field_writes = True
+        try:
+            self.comment_var.set(new_comment)
+            target.comment = new_comment
         finally:
             self._suppress_field_writes = False
 
