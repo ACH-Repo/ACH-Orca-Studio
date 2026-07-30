@@ -875,6 +875,19 @@ off the core path and gracefully degradable.
   LEFT for the gateway: a ThinLinc pass on the maximised plot window and on clipboard image
   paste (which tool the session exposes — Pillow vs xclip vs wl-paste).
 
+- **EXPERIMENTAL (branch `optplot-click-geometry`, NOT merged): click a point on the
+  optimisation plot to see that geometry** — in the progress window, a left-click within 14 px
+  of a marker in the OPT-energy *or* gradient panel (both are indexed by geometry step) opens
+  that step's structure in the external 3D viewer, rings the picked point in red, and reports
+  "opened step 3 of 8 (E = …)" in the header. Frames come from the job's `_trj.xyz`, matched to
+  the plotted step by the **energy stamped in the frame's comment** (new pure
+  `orca_parser.trj_comment_energy`; ORCA writes `... E -74.9642…` per frame), falling back to
+  positional indexing — so a trajectory that doesn't line up 1:1 with the printed energies
+  still resolves. Clicks are ignored while a Z/P nav mode is active or when not near a marker,
+  and a missing trajectory explains itself (cluster jobs keep it on node scratch until
+  copyback). Verified against the real local ORCA 6.0.1 water TightOpt (click step 3 → frame 3
+  coordinates; ring survives an auto-refresh). Merge candidate once tested on ThinLinc.
+
 ## Open work / TODO
 - `--execute_project` now expands the Workflow graph AND materialises Transform/Combine
   geometries headlessly (see `core/workflow_expand.py`) — the old `--expand_and_execute` gap is
