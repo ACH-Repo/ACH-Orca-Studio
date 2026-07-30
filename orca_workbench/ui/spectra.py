@@ -248,6 +248,12 @@ class BaseSpectrumWindow(tk.Toplevel):
     # own legend, so it turns these off (no dead offset slider, no duplicate legend).
     SHOW_OFFSET = True
     AUTO_LEGEND = True
+    # Breathing room above and below the data, as a fraction of the y-span: a peak
+    # touching the frame reads as clipped. Applied after the subclass has drawn.
+    Y_MARGIN = 0.05
+    # One wheel notch scales the y-axis by this factor (Mestrenova-style intensity
+    # scaling); Ctrl+wheel zooms x by the same step about the cursor.
+    WHEEL_STEP = 1.2
 
     def __init__(self, parent, window_title):
         super().__init__(parent)
@@ -336,6 +342,7 @@ class BaseSpectrumWindow(tk.Toplevel):
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         self.canvas.mpl_connect("button_press_event", self._drag_press)
         self.canvas.mpl_connect("button_release_event", self._drag_release)
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self._bind_plot_keys()
 
         fit_to_content(self)     # non-modal: keep real WM decorations (maximize button)
@@ -374,8 +381,8 @@ class BaseSpectrumWindow(tk.Toplevel):
             e.bind("<Return>", lambda _e: self._redraw())
             self._lim_entries[k] = e
         ttk.Button(row, text="Apply", width=6, command=self._redraw).pack(side=tk.LEFT, padx=(3, 1))
-        ttk.Label(row, text="   keys over plot:  F reset · M limits · Z zoom · P pan · "
-                  "R redraw · Ctrl+S save · Ctrl+W close",
+        ttk.Label(row, text="   over the plot:  wheel = scale y · Ctrl+wheel = zoom x · "
+                  "F reset · M limits · Z zoom · P pan · R redraw · Ctrl+S save · Ctrl+W close",
                   foreground="#777").pack(side=tk.LEFT, padx=8)
         self._mode_label = ttk.Label(row, text="", foreground="#0055aa",
                                      font=("TkDefaultFont", 9, "bold"))
@@ -495,6 +502,67 @@ class BaseSpectrumWindow(tk.Toplevel):
             ax.set_ylim(self._home_ylim)
             self.canvas.draw_idle()
 
+    # ------------------------------------------------------- margins & wheel
+
+    def _pad_ylim(self, ax):
+        """Give the traces `Y_MARGIN` of headroom above and below.
+
+        Subclasses set explicit y-limits (an IR transmission axis runs 0-100, a
+        stacked NMR is sized from its offsets), which overrides matplotlib's own
+        default margin and leaves peaks touching the frame. This re-applies it on
+        whatever the subclass ended up with, respecting the axis direction."""
+        if not self.Y_MARGIN:
+            return
+        try:
+            lo, hi = ax.get_ylim()
+            reverse = lo > hi
+            lo, hi = (hi, lo) if reverse else (lo, hi)
+            pad = (hi - lo) * float(self.Y_MARGIN)
+            if pad <= 0:
+                return
+            ax.set_ylim((hi + pad, lo - pad) if reverse else (lo - pad, hi + pad))
+        except Exception:
+            pass
+
+    def y_anchor(self):
+        """The 'neutral horizontal' the wheel scales about — the spectrum's
+        baseline. 0 for anything drawn up from zero (absorbance, intensity, a
+        derivative); IR in transmission mode overrides it to 100 %, where the
+        baseline sits at the TOP and peaks hang downwards."""
+        return 0.0
+
+    def _on_scroll(self, event):
+        """Wheel = vertical intensity scaling, like Mestrenova: the y-axis is
+        squeezed towards (or stretched away from) the baseline, so peaks grow and
+        shrink while the baseline stays put. Ctrl+wheel zooms x about the cursor.
+
+        A trackpad's two-finger scroll arrives as the same events, so it works
+        there too."""
+        ax = self.ax
+        if ax is None or event.button not in ("up", "down"):
+            return
+        step = self.WHEEL_STEP if event.button == "up" else 1.0 / self.WHEEL_STEP
+        if event.key in ("control", "ctrl+control") or (event.key or "").startswith("control"):
+            if event.xdata is None:
+                return
+            x0, x1 = ax.get_xlim()
+            f = 1.0 / step
+            ax.set_xlim(event.xdata + (x0 - event.xdata) * f,
+                        event.xdata + (x1 - event.xdata) * f)
+        else:
+            a = self.y_anchor()
+            if a is None:                       # no meaningful baseline: use the centre
+                y0, y1 = ax.get_ylim()
+                a = 0.5 * (y0 + y1)
+            y0, y1 = ax.get_ylim()
+            f = 1.0 / step                      # wheel up -> tighter range -> taller peaks
+            ax.set_ylim(a + (y0 - a) * f, a + (y1 - a) * f)
+            # a manual y-limit box would fight the wheel on the next redraw
+            for k in ("y0", "y1"):
+                if k in self._lim:
+                    self._lim[k].set("")
+        self.canvas.draw_idle()
+
     # -------------------------------------------------- custom zoom / pan (no toolbar)
 
     def _cycle_nav(self, cycle):
@@ -548,9 +616,29 @@ class BaseSpectrumWindow(tk.Toplevel):
             except Exception:
                 self._drag["rect"] = None
 
+    def _drag_data_xy(self, d, event):
+        """Data coords of the cursor DURING a drag, from pixels through the
+        press-time transform, then clamped to the view.
+
+        Deliberately not event.xdata/ydata: those are None the moment the cursor
+        leaves the axes, which used to abort a box zoom mid-drag — so selecting a
+        region that reaches the edge of the plot meant carefully not overshooting.
+        Now the drag simply pins to the edge and keeps going."""
+        inv = d.get("inv")
+        if inv is None:
+            return None, None
+        try:
+            x, y = inv.transform((event.x, event.y))
+        except Exception:
+            return None, None
+        (xa, xb), (ya, yb) = d["xlim"], d["ylim"]
+        x = min(max(x, min(xa, xb)), max(xa, xb))
+        y = min(max(y, min(ya, yb)), max(ya, yb))
+        return float(x), float(y)
+
     def _drag_motion(self, event):
         d = self._drag
-        if d is None or event.xdata is None or event.ydata is None:
+        if d is None:
             return
         ax = self.ax
         mode = d["mode"]
@@ -572,14 +660,17 @@ class BaseSpectrumWindow(tk.Toplevel):
         rect = d.get("rect")
         if rect is None:
             return
+        cx, cy = self._drag_data_xy(d, event)
+        if cx is None:
+            return
         x0, y0 = d["x0"], d["y0"]
         (xa, xb), (ya, yb) = ax.get_xlim(), ax.get_ylim()
         if mode == "zoom_h":
-            rx0, rx1, ry0, ry1 = x0, event.xdata, min(ya, yb), max(ya, yb)
+            rx0, rx1, ry0, ry1 = x0, cx, min(ya, yb), max(ya, yb)
         elif mode == "zoom_v":
-            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, event.ydata
+            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, cy
         else:
-            rx0, rx1, ry0, ry1 = x0, event.xdata, y0, event.ydata
+            rx0, rx1, ry0, ry1 = x0, cx, y0, cy
         rect.set_bounds(min(rx0, rx1), min(ry0, ry1), abs(rx1 - rx0), abs(ry1 - ry0))
         try:
             self.canvas.restore_region(d["bg"])
@@ -604,8 +695,9 @@ class BaseSpectrumWindow(tk.Toplevel):
                 rect.remove()
             except Exception:
                 pass
-        xe = event.xdata if event.xdata is not None else d["x0"]
-        ye = event.ydata if event.ydata is not None else d["y0"]
+        xe, ye = self._drag_data_xy(d, event)
+        if xe is None:
+            xe, ye = d["x0"], d["y0"]
         x0, y0 = d["x0"], d["y0"]
         if mode in ("zoom_h", "zoom_box") and abs(xe - x0) > 1e-12:
             self._set_axis(ax.set_xlim, ax.get_xlim, x0, xe)
@@ -652,6 +744,7 @@ class BaseSpectrumWindow(tk.Toplevel):
             ax = self.fig.add_subplot(111)
             self.ax = ax
             self.plot(ax)
+            self._pad_ylim(ax)
             # Capture the data-driven view as 'home' (for the F reset) BEFORE any
             # manual limit-box overrides are applied on top.
             self._home_xlim = ax.get_xlim()
@@ -776,6 +869,15 @@ class IRSpectrumWindow(BaseSpectrumWindow):
         self.mode_btn.configure(text="Show: " + self.mode_var.get().capitalize())
         self._redraw()
 
+    def y_anchor(self):
+        """IR is the one spectrum whose baseline moves: in ABSORBANCE it's 0 and
+        bands grow upwards, in TRANSMITTANCE it's 100 % and they hang down from
+        the top. The wheel scales about whichever it currently is, so bands grow
+        out of the baseline either way instead of sliding off the axis."""
+        # Anchor on the FIRST trace's baseline in both modes, so the bottom trace
+        # stays put and a stack compresses/expands away from it.
+        return 100.0 if getattr(self, "_transmission", False) else 0.0
+
     def _imax_all(self):
         return max((m.get("_imax", 1.0) for m in self.mols), default=1.0) or 1.0
 
@@ -829,10 +931,10 @@ class IRSpectrumWindow(BaseSpectrumWindow):
                               zorder=m["_z"])
 
         if transmission:
-            ax.set_ylim(-2.0, 102.0 + self.stack_top(ref))
+            ax.set_ylim(0.0, 100.0 + self.stack_top(ref))
             ax.set_ylabel("transmittance (%)")
         else:
-            ax.set_ylim(0, (self._ymax + self.stack_top(ref)) * 1.12)
+            ax.set_ylim(0, self._ymax + self.stack_top(ref))
             ax.set_ylabel("IR absorbance (a.u.)")
 
         ax.set_xlim(hi, lo)   # IR convention: high wavenumber on the left
@@ -981,7 +1083,7 @@ class UVVisSpectrumWindow(BaseSpectrumWindow):
                               zorder=m.get("_z", 2))
 
         ax.set_xlim(lo, hi)
-        ax.set_ylim(0, (self._ymax + self.stack_top(ref)) * 1.12)
+        ax.set_ylim(0, self._ymax + self.stack_top(ref))
         ax.set_xlabel("wavelength (nm)" if nm_axis else "energy (eV)")
         ax.set_ylabel("oscillator strength / absorbance (a.u.)")
         ax.set_title("Simulated UV-Vis spectrum")
@@ -1250,7 +1352,7 @@ class NMRSpectrumWindow(BaseSpectrumWindow):
                   else "isotropic shielding σ (ppm)")
         # NMR convention: high shift / low shielding on the left (axis reversed).
         ax.set_xlim(view_hi, view_lo)
-        ax.set_ylim(0, (ref + self.stack_top(ref)) * 1.18)
+        ax.set_ylim(0, ref + self.stack_top(ref))
         ax.set_xlabel(xlabel)
         ax.set_ylabel("intensity (a.u.)")
         ax.set_title("Simulated {} NMR".format(self.nucleus_label))

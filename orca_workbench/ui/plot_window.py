@@ -161,6 +161,7 @@ class LivePlotWindow(tk.Toplevel):
         self._bind_plot_keys()
         self.canvas.mpl_connect("button_press_event", self._on_point_click)
         self.canvas.mpl_connect("button_press_event", self._drag_press)
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("motion_notify_event", self._drag_motion)
         self.canvas.mpl_connect("button_release_event", self._drag_release)
 
@@ -255,6 +256,43 @@ class LivePlotWindow(tk.Toplevel):
                           "Choose a plain-text editor for ORCA .out / .inp files "
                           "(Notepad++, VS Code, gedit, ...).")
 
+    # ------------------------------------------------------------- wheel zoom
+    WHEEL_STEP = 1.2
+
+    def _on_scroll(self, event):
+        """Wheel over a panel scales its y-axis about the cursor; Ctrl+wheel zooms
+        x instead. Unlike a spectrum there's no baseline to anchor on here (an
+        energy panel sits at -647 Eh), so the cursor is the fixed point — and the
+        gradient panel, being log-scaled, is scaled in LOG space so a decade stays
+        a decade."""
+        ax = event.inaxes
+        if ax is None or event.button not in ("up", "down"):
+            return
+        step = self.WHEEL_STEP if event.button == "up" else 1.0 / self.WHEEL_STEP
+        f = 1.0 / step
+        ctrl = (event.key or "").startswith("control")
+        if ctrl:
+            if event.xdata is None:
+                return
+            x0, x1 = ax.get_xlim()
+            ax.set_xlim(event.xdata + (x0 - event.xdata) * f,
+                        event.xdata + (x1 - event.xdata) * f)
+        elif event.ydata is None:
+            return
+        elif ax.get_yscale() == "log":
+            import math
+            y0, y1 = ax.get_ylim()
+            if y0 <= 0 or y1 <= 0 or event.ydata <= 0:
+                return
+            c = math.log10(event.ydata)
+            l0, l1 = math.log10(y0), math.log10(y1)
+            ax.set_ylim(10 ** (c + (l0 - c) * f), 10 ** (c + (l1 - c) * f))
+        else:
+            y0, y1 = ax.get_ylim()
+            ax.set_ylim(event.ydata + (y0 - event.ydata) * f,
+                        event.ydata + (y1 - event.ydata) * f)
+        self.canvas.draw_idle()
+
     # ------------------------------------------------- zoom/pan (multi-panel)
     def _drag_press(self, event):
         if (not self._nav_mode or event.button != 1 or event.inaxes is None
@@ -278,11 +316,25 @@ class LivePlotWindow(tk.Toplevel):
             except Exception:
                 self._drag["rect"] = None
 
+    def _drag_data_xy(self, d, event):
+        """Data coords during a drag, from PIXELS through the press-time transform
+        and clamped to the view — so a box zoom survives the cursor leaving the
+        panel instead of aborting (see the same helper in ui/spectra.py)."""
+        inv = d.get("inv")
+        if inv is None:
+            return None, None
+        try:
+            x, y = inv.transform((event.x, event.y))
+        except Exception:
+            return None, None
+        (xa, xb), (ya, yb) = d["xlim"], d["ylim"]
+        x = min(max(x, min(xa, xb)), max(xa, xb))
+        y = min(max(y, min(ya, yb)), max(ya, yb))
+        return float(x), float(y)
+
     def _drag_motion(self, event):
         d = self._drag
-        if d is None or event.xdata is None or event.ydata is None:
-            return
-        if event.inaxes is not d["ax"]:
+        if d is None:
             return
         ax = d["ax"]
         mode = d["mode"]
@@ -302,14 +354,17 @@ class LivePlotWindow(tk.Toplevel):
         rect = d.get("rect")
         if rect is None:
             return
+        cx, cy = self._drag_data_xy(d, event)
+        if cx is None:
+            return
         x0, y0 = d["x0"], d["y0"]
         (xa, xb), (ya, yb) = ax.get_xlim(), ax.get_ylim()
         if mode == "zoom_h":
-            rx0, rx1, ry0, ry1 = x0, event.xdata, min(ya, yb), max(ya, yb)
+            rx0, rx1, ry0, ry1 = x0, cx, min(ya, yb), max(ya, yb)
         elif mode == "zoom_v":
-            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, event.ydata
+            rx0, rx1, ry0, ry1 = min(xa, xb), max(xa, xb), y0, cy
         else:
-            rx0, rx1, ry0, ry1 = x0, event.xdata, y0, event.ydata
+            rx0, rx1, ry0, ry1 = x0, cx, y0, cy
         rect.set_bounds(min(rx0, rx1), min(ry0, ry1), abs(rx1 - rx0), abs(ry1 - ry0))
         try:
             self.canvas.restore_region(d["bg"])
@@ -334,8 +389,9 @@ class LivePlotWindow(tk.Toplevel):
                 rect.remove()
             except Exception:
                 pass
-        xe = event.xdata if event.xdata is not None else d["x0"]
-        ye = event.ydata if event.ydata is not None else d["y0"]
+        xe, ye = self._drag_data_xy(d, event)
+        if xe is None:
+            xe, ye = d["x0"], d["y0"]
         x0, y0 = d["x0"], d["y0"]
 
         def set_lim(setter, getter, a, b):
