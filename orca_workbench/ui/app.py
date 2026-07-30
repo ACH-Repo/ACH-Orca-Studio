@@ -836,7 +836,11 @@ class App(object):
         bullet("Palette buttons / F3: add a node (F3 searches every type; try "
                "typing what you want to DO, e.g. 'align').")
         bullet("Drag output pin -> input pin: wire them. Dropping on an occupied "
-               "input REPLACES its old wire.")
+               "SINGLE input REPLACES its old wire.")
+        bullet("Geometry inputs on calculation nodes (and on Combine / Filter) take "
+               "SEVERAL wires: everything arriving is merged into one molecule list, "
+               "so one Optimize can serve three branches. Each molecule still gets "
+               "its own calculation, resolved along the branch it came in on.")
         bullet("Drag a CONNECTED input pin: pick the wire up — re-plug it "
                "elsewhere, or drop it on empty space to delete it.")
         bullet("Drop an unconnected node onto a wire: splice it in between.")
@@ -859,6 +863,11 @@ class App(object):
         bullet("Right after Q / Shift+WASD: the ARROW keys tune the spacing "
                "(Left/Right = horizontal gap, Up/Down = vertical) until you click.")
         bullet('"C": frame the selection.   "T": add a comment note.')
+        bullet("Ctrl+V with an image on the clipboard (or right-click > Paste image): "
+               "drop a picture on the canvas — a sketch, a spectrum, a screenshot. "
+               "The file is copied into the project's WORKFLOW_IMG folder, so the "
+               "graph stays portable; drag its corner to resize, double-click to open "
+               "it full size.")
         section("Running")
         bullet("Generate only (grey): expand to calcs, don't launch.")
         bullet("Run pipeline (amber): launch automatically; keep app open.")
@@ -869,6 +878,13 @@ class App(object):
         bullet("Ctrl+Z / Ctrl+Y: undo / redo graph edits.")
         bullet("A node that has run locks its recipe and can't be deleted "
                "(delete its calcs first). Report nodes stay editable.")
+        bullet("A Combine that feeds a calculation must have a NAME, a charge and a "
+               "multiplicity: the merged molecule is named after it, so a name you "
+               "chose keeps re-runs pointing at the same results instead of making "
+               "new molecules. The editor walks you to the empty box.")
+        bullet("Only geometries a calculation actually runs on appear in the Molecules "
+               "tab. Intermediate Transform steps are written to TRANSFORM/ as files "
+               "you can inspect, but aren't added as molecules.")
         section("Feel familiar?")
         ttk.Label(inner, wraplength=580, justify=tk.LEFT, foreground="#555",
                   text="This editor is largely inspired by Unreal Engine 5's Blueprint system and "

@@ -392,6 +392,8 @@ class WorkflowTab(ttk.Frame):
             self._build_combine_panel(node)
         elif node.type == "write":
             self._build_write_panel(node)
+        elif node.type == "image":
+            self._build_image_panel(node)
         elif self._is_annotation(node):
             what = "title" if node.type == "frame" else "text"
             ttk.Label(self.cfg_frame, text="A {} annotation (not part of the run).".format(
@@ -699,8 +701,8 @@ class WorkflowTab(ttk.Frame):
                 b.pack(side=tk.LEFT, padx=1)
                 tip(b, "Open the live SCF / geometry-convergence plot.")
             if done:
-                lbl3d = "Modes" if ctype == "FREQ" else "Struct"
-                b = ttk.Button(btns, text=lbl3d, width=7,
+                lbl3d = {"FREQ": "Modes", "OPT": "Geometry"}.get(ctype, "Struct")
+                b = ttk.Button(btns, text=lbl3d, width=max(7, len(lbl3d) + 1),
                                command=lambda c=calc: self._open_structure(c))
                 b.pack(side=tk.LEFT, padx=1)
                 tip(b, "Open in your external 3D viewer (Avogadro/molden). For a FREQ job this "
@@ -866,8 +868,47 @@ class WorkflowTab(ttk.Frame):
         self._sel_nodes = [nid for nid in self._sel_nodes if self.wf.node(nid) is not None]
         if self._sel_edge is not None and self.wf.edge(self._sel_edge) is None:
             self._sel_edge = None
+        self._migrate_combine_names()
+        # Rebuild node -> calcs from the project so a graph whose calcs were run
+        # elsewhere (a reopened project, or `--execute_project` on the cluster)
+        # shows its node status + per-node result buttons without a manual refresh.
+        self._remap_node_calcs()
         self._redraw()
         self._build_config_panel()
+
+    def _migrate_combine_names(self):
+        """Give a legacy Combine node (blank name, but molecules already derived
+        from it) the name it effectively used, so the now-required name doesn't
+        orphan an already-run pipeline.
+
+        The derived molecule is `<base>_cb<node id[:4]>`, so the base is
+        recoverable from the project's molecules. Adopting it keeps re-expansion
+        pointing at the SAME molecule (and run directory) as the finished calcs;
+        typing a different name would create fresh molecules and duplicate work."""
+        changed = []
+        for n in self.wf.nodes:
+            if n.type != "combine" or str(n.config.get("name") or "").strip():
+                continue
+            base = self._derived_combine_base(n)
+            if base:
+                n.config["name"] = base
+                changed.append(base)
+        if changed:
+            self._commit()
+            self.app.set_status("Combine node name(s) recovered from the previous run: "
+                                + ", ".join(sorted(set(changed))))
+
+    def _derived_combine_base(self, node):
+        """The base name a Combine node's already-materialised molecules used, or
+        '' if it hasn't produced any. Strips the `_cb<id>` node suffix and a
+        `_NN` pairwise row index."""
+        import re
+        suffix = "_cb{}".format(node.id[:4])
+        for m in self.app.project.molecules:
+            fn = m.filename or ""
+            if fn.endswith(suffix):
+                return re.sub(r"_\d{2}$", "", fn[:-len(suffix)])
+        return ""
 
     def _commit(self):
         cur = self.wf.to_dict()
@@ -915,6 +956,16 @@ class WorkflowTab(ttk.Frame):
         self._restore_graph(self._redo_stack.pop())
         self.app.set_status("Redo (node graph).")
         return "break"
+
+    def _undo_op_list(self, event=None):
+        """Ctrl+Z from inside a node's list widget (e.g. the Transform ops list).
+        Same whole-graph undo as on the canvas — the panel is rebuilt by
+        _restore_graph, so the list shows the reverted state — but bound on the
+        widget, because canvas-scoped keys don't reach a focused Listbox."""
+        return self._undo_graph(event)
+
+    def _redo_op_list(self, event=None):
+        return self._redo_graph(event)
 
     # --------------------------------------------------------------- geometry
 
@@ -994,11 +1045,17 @@ class WorkflowTab(ttk.Frame):
     def _redraw(self):
         self.canvas.delete("all")
         self._hover_node = None   # the glow ring was cleared with "all"; next Motion re-adds
+        # References to the PhotoImages currently ON the canvas: Tk doesn't own
+        # them, so without this an image vanishes the moment Python GCs it.
+        self._img_live = []
         # Frames sit behind everything; comments behind the real nodes; then edges;
         # then the real (computational) nodes on top.
         for n in self.wf.nodes:
             if n.type == "frame":
                 self._draw_frame(n)
+        for n in self.wf.nodes:
+            if n.type == "image":
+                self._draw_image(n)
         for n in self.wf.nodes:
             if n.type == "comment":
                 self._draw_comment(n)
@@ -1102,11 +1159,23 @@ class WorkflowTab(ttk.Frame):
         if node.type == "report":
             return node.config.get("name", "report") + ".json"
         if node.type == "transform":
-            n = len(node.config.get("ops") or [])
-            return "{} op{}".format(n, "" if n == 1 else "s") if n else "(no ops yet)"
+            from orca_workbench.core import transform as transform_mod
+            all_ops = node.config.get("ops") or []
+            n = len(all_ops)
+            if not n:
+                return "(no ops yet)"
+            off = n - len(transform_mod.enabled_ops(all_ops))
+            base = "{} op{}".format(n, "" if n == 1 else "s")
+            return base + (" ({} off)".format(off) if off else "")
         if node.type == "combine":
-            mode = node.config.get("mode", "merge")
-            return "pairwise" if mode == "pairwise" else "merge all inputs"
+            nm = str(node.config.get("name") or "").strip()
+            pairwise = node.config.get("mode", "merge") == "pairwise"
+            if not nm:
+                return "(name required)" if self.wf.has_calc_downstream(node.id) \
+                    else ("pairwise" if pairwise else "merge all inputs")
+            return nm + (" (pairwise)" if pairwise else "")
+        if node.type == "image":
+            return os.path.basename(node.config.get("path", "")) or "(paste an image)"
         return ""
 
     def _draw_port(self, node_id, name, is_input, x, y, ptype):
@@ -1143,6 +1212,95 @@ class WorkflowTab(ttk.Frame):
                                 text=node.config.get("text", ""),
                                 font=("TkDefaultFont", self._fs(9)), fill=np["comment_fg"],
                                 tags=(ntag,))
+        self._draw_resize_handle(x, y, w, h, ntag, outline)
+
+    # ------------------------------------------------------------ image nodes
+
+    def _image_abs(self, node):
+        """Absolute path of an image node's picture ('' if it has none)."""
+        rel = str(node.config.get("path") or "")
+        if not rel:
+            return ""
+        if os.path.isabs(rel):
+            return rel
+        return os.path.join(self.app.project.root(), rel)
+
+    def _image_photo(self, path, w_px, h_px):
+        """A PhotoImage of `path` scaled to w_px × h_px, cached.
+
+        Pillow gives smooth scaling; without it we fall back to PhotoImage's
+        integer subsample/zoom (chunky, but it keeps images working on a bare
+        install — the same reason the depiction code sticks to Tk's native PNG
+        support). The cache is keyed by target size and cleared when it grows,
+        because zooming the canvas asks for a new size every step."""
+        w_px, h_px = max(1, int(w_px)), max(1, int(h_px))
+        cache = getattr(self, "_img_cache", None)
+        if cache is None:
+            cache = self._img_cache = {}
+        key = (path, w_px, h_px)
+        if key in cache:
+            return cache[key]
+        if len(cache) > 48:
+            cache.clear()
+        photo = None
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path)
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            photo = ImageTk.PhotoImage(img.resize((w_px, h_px), resample), master=self.canvas)
+        except Exception:
+            try:
+                base = tk.PhotoImage(file=path, master=self.canvas)
+                bw, bh = base.width(), base.height()
+                if bw and bh:
+                    if w_px < bw or h_px < bh:
+                        k = max(1, int(round(max(bw / float(w_px), bh / float(h_px)))))
+                        base = base.subsample(k, k)
+                    elif w_px > bw * 2 and h_px > bh * 2:
+                        k = max(1, int(min(w_px / float(bw), h_px / float(bh))))
+                        base = base.zoom(k, k)
+                photo = base
+            except Exception:
+                photo = None
+        cache[key] = photo          # cache misses too, so a broken file isn't retried
+        return photo
+
+    def _draw_image(self, node):
+        """An image annotation: the picture, letterboxed inside the node's box
+        (aspect preserved), with a selection border and a resize handle."""
+        z = self._zoom
+        x, y = self._w2s(node.x, node.y)
+        _x, _y, ww, hh = self._node_rect(node)
+        w, h = ww * z, hh * z
+        sel = node.id in self._sel_nodes
+        ntag = "N:" + node.id
+        np = self._np
+        outline = np["sel"] if sel else np["comment_outline"]
+        path = self._image_abs(node)
+        photo = self._image_photo(path, w, h) if path and os.path.isfile(path) else None
+        if photo is not None:
+            # a real image: draw it, then the frame on top so selection reads clearly
+            self.canvas.create_image(x + w / 2.0, y + h / 2.0, image=photo, anchor=tk.CENTER,
+                                     tags=(ntag, "nodebody"))
+            self._img_live.append(photo)     # keep a reference while it's on screen
+            self.canvas.create_rectangle(x, y, x + w, y + h, fill="", outline=outline,
+                                         width=2 if sel else 1, tags=(ntag,))
+        else:
+            self.canvas.create_rectangle(x, y, x + w, y + h, fill=np["comment_bg"],
+                                         outline=outline, width=2 if sel else 1,
+                                         tags=(ntag, "nodebody"))
+            msg = ("(image missing:\n{})".format(os.path.basename(path)) if path
+                   else "(no image — Ctrl+V to paste)")
+            self.canvas.create_text(x + w / 2.0, y + h / 2.0, anchor=tk.CENTER, text=msg,
+                                    width=max(20.0, w - 12 * z), justify=tk.CENTER,
+                                    font=("TkDefaultFont", self._fs(8)), fill=np["comment_fg"],
+                                    tags=(ntag,))
+        cap = str(node.config.get("caption") or "")
+        if cap:
+            self.canvas.create_text(x + w / 2.0, y + h + 8 * z, anchor=tk.CENTER, text=cap,
+                                    width=max(20.0, w), justify=tk.CENTER,
+                                    font=("TkDefaultFont", self._fs(8)), fill=np["comment_fg"],
+                                    tags=(ntag,))
         self._draw_resize_handle(x, y, w, h, ntag, outline)
 
     def _draw_frame(self, node):
@@ -1885,9 +2043,15 @@ class WorkflowTab(ttk.Frame):
 
     def _paste_clipboard(self, _event=None):
         import copy
+        # An IMAGE on the system clipboard wins over copied nodes: Ctrl+V right
+        # after a screenshot / "copy image" obviously means "put that picture
+        # here", and node copy/paste has the internal clipboard to fall back on.
+        if self._paste_image_from_clipboard(quiet=True):
+            return "break"
         clip = getattr(self, "_node_clipboard", None)
         if not clip:
-            self.app.set_status("Nothing copied yet (Ctrl+C on selected nodes first).")
+            self.app.set_status("Nothing copied yet — Ctrl+C on selected nodes, or copy an "
+                                "image to paste it onto the canvas.")
             return "break"
         self._paste_count = getattr(self, "_paste_count", 0) + 1
         off = 40.0 * self._paste_count
@@ -1908,6 +2072,129 @@ class WorkflowTab(ttk.Frame):
         self._build_config_panel()
         self.app.set_status("Pasted {} node(s).".format(len(new_ids)))
         return "break"
+
+    # ---- images on the canvas ----
+
+    def _pointer_world(self, fallback=(60.0, 60.0)):
+        """World coords under the mouse pointer, or `fallback` when it's outside
+        the canvas (e.g. the action came from a menu)."""
+        rx = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+        ry = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+        if not (0 <= rx <= self.canvas.winfo_width() and 0 <= ry <= self.canvas.winfo_height()):
+            return fallback
+        return self._s2w(rx, ry)
+
+    def _paste_image_from_clipboard(self, quiet=False, node=None):
+        """Paste a clipboard image onto the canvas (or into `node`).
+
+        The bytes are stored INSIDE the project (WORKFLOW_IMG/, content-addressed)
+        so the graph stays self-contained and portable — the graph only ever holds
+        a project-relative path. Returns True if an image was pasted; when `quiet`
+        it stays silent on "no image found" so Ctrl+V can fall through to node
+        paste."""
+        from orca_workbench.core import canvas_images as ci
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            text = ""
+        data, why = ci.clipboard_image_bytes(clipboard_text=text)
+        if not data:
+            if not quiet:
+                messagebox.showinfo("Paste image", "Couldn't get an image from the "
+                                                   "clipboard:\n\n{}".format(why))
+            return False
+        try:
+            rel = ci.store_image(self.app.project.root(), data)
+        except Exception as e:
+            messagebox.showwarning("Paste image", "Could not save the image into the "
+                                                  "project:\n{}".format(e))
+            return False
+        self._place_image(rel, ci.image_size(data), node=node)
+        self.app.set_status("Pasted image from {} ({}).".format(why, rel))
+        return True
+
+    def _add_image_from_file(self, node=None):
+        """Load an image file onto the canvas (copied into the project)."""
+        from tkinter import filedialog
+        from orca_workbench.core import canvas_images as ci
+        path = filedialog.askopenfilename(
+            title="Add image to the canvas",
+            filetypes=[("Images", "*.png *.gif *.jpg *.jpeg *.bmp *.tif *.tiff"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        data = ci.read_image_file(path)
+        if not data:
+            messagebox.showwarning("Add image", "Not an image file this app can read:\n"
+                                                "{}".format(path))
+            return
+        try:
+            rel = ci.store_image(self.app.project.root(), ci.to_png(data))
+        except Exception as e:
+            messagebox.showwarning("Add image", str(e))
+            return
+        self._place_image(rel, ci.image_size(data), node=node,
+                          caption=os.path.basename(path))
+        self.app.set_status("Added image {}.".format(rel))
+
+    def _place_image(self, rel, native, node=None, caption=None):
+        """Create (or re-point) an image node at the pointer, sized to the
+        picture's aspect ratio."""
+        from orca_workbench.core import canvas_images as ci
+        w, h = ci.fit_box(native)
+        if node is None:
+            cx, cy = self._pointer_world()
+            cfg = {"path": rel, "w": w, "h": h, "caption": caption or ""}
+            node = self.wf.add_node("image", cx, cy, cfg)
+        else:
+            node.config["path"] = rel
+            node.config["w"], node.config["h"] = w, h
+            if caption is not None:
+                node.config["caption"] = caption
+        self._commit()
+        self._select_only(node.id)
+        self._redraw()
+
+    def _build_image_panel(self, node):
+        f = self.cfg_frame
+        rel = str(node.config.get("path") or "")
+        ttk.Label(f, text="A picture on the canvas (not part of the run). The file is copied "
+                  "into the project's WORKFLOW_IMG folder, so the graph stays portable.",
+                  foreground="#555", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
+        ttk.Label(f, text=(rel or "(no image yet)"), foreground="#777", wraplength=220,
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=8, pady=(4, 2))
+        ttk.Button(f, text="Paste from clipboard  (Ctrl+V)",
+                   command=lambda n=node: self._paste_image_from_clipboard(node=n)).pack(
+                       anchor=tk.W, padx=8, pady=1)
+        ttk.Button(f, text="Load from file...",
+                   command=lambda n=node: self._add_image_from_file(node=n)).pack(
+                       anchor=tk.W, padx=8, pady=1)
+        ttk.Button(f, text="Fit to native size",
+                   command=lambda n=node: self._image_fit_native(n)).pack(
+                       anchor=tk.W, padx=8, pady=1)
+        if rel:
+            ttk.Button(f, text="Open in image viewer",
+                       command=lambda n=node: self._os_open(self._image_abs(n))).pack(
+                           anchor=tk.W, padx=8, pady=1)
+        ttk.Label(f, text="Caption (shown under the image):").pack(anchor=tk.W, padx=8,
+                                                                  pady=(6, 0))
+        var = tk.StringVar(value=str(node.config.get("caption") or ""))
+        ent = ttk.Entry(f, textvariable=var, width=26)
+        ent.pack(anchor=tk.W, padx=8, pady=2)
+        var.trace_add("write", lambda *_a, n=node, v=var: self._set_cfg(n, "caption", v.get()))
+        ttk.Label(f, text="Drag the bottom-right corner to resize; double-click it to open the "
+                  "image.", foreground="#999", wraplength=220, justify=tk.LEFT).pack(
+                      anchor=tk.W, padx=8, pady=(2, 0))
+
+    def _image_fit_native(self, node):
+        """Reset the node box to the image's own proportions (scaled to fit)."""
+        from orca_workbench.core import canvas_images as ci
+        path = self._image_abs(node)
+        data = ci.read_image_file(path)
+        w, h = ci.fit_box(ci.image_size(data) if data else (0, 0))
+        node.config["w"], node.config["h"] = w, h
+        self._commit()
+        self._redraw()
 
     def _clear_selection(self):
         self._sel_nodes = []
@@ -2023,6 +2310,11 @@ class WorkflowTab(ttk.Frame):
             menu.add_command(label="Delete connection", command=self._delete_selected)
         else:
             menu.add_command(label="Add node here…", command=lambda: self._context_add(wx, wy))
+            menu.add_separator()
+            menu.add_command(label="Paste image  (Ctrl+V)",
+                             command=lambda: self._paste_image_from_clipboard())
+            menu.add_command(label="Add image from file...",
+                             command=lambda: self._add_image_from_file())
             menu.add_separator()
             menu.add_command(label="Select all  (Ctrl+A)", command=self._on_select_all)
             menu.add_command(label="Clear selection", command=self._clear_selection)
@@ -2341,6 +2633,13 @@ class WorkflowTab(ttk.Frame):
 
     def _on_double_click(self, event):
         n = self.wf.node(self._node_at(*self._cxy(event)))
+        if n is not None and n.type == "image":
+            path = self._image_abs(n)
+            if path and os.path.isfile(path):
+                self._os_open(path)      # full size in the system image viewer
+            else:
+                self._paste_image_from_clipboard(node=n)
+            return "break"
         if self._is_annotation(n):
             self._edit_annotation_text(n)
             return "break"
@@ -2448,10 +2747,20 @@ class WorkflowTab(ttk.Frame):
         def ops():
             return list(node.config.get("ops") or [])
 
+        # Each row is prefixed with a [x] / [ ] tick box — the same ASCII convention
+        # as the Molecules tab's Lock column (ThinLinc's fonts have no checkbox
+        # glyph, and a Listbox can't hold real Checkbuttons anyway without giving up
+        # the multi-select + drag-reorder behaviour). Disabled rows are also greyed.
+        _OFF_FG = "#9a9a9a"
+
         def refill(select_indices):
             lb.delete(0, tk.END)
-            for op in ops():
-                lb.insert(tk.END, transform_mod.describe_op(op))
+            for i, op in enumerate(ops()):
+                on = transform_mod.op_enabled(op)
+                lb.insert(tk.END, "{} {}".format("[x]" if on else "[ ]",
+                                                 transform_mod.describe_op(op)))
+                if not on:
+                    lb.itemconfigure(i, foreground=_OFF_FG)
             for i in select_indices:
                 if 0 <= i < lb.size():
                     lb.selection_set(i)
@@ -2490,12 +2799,49 @@ class WorkflowTab(ttk.Frame):
                 lst[i] = op
                 commit(lst, [i])
 
-        def on_remove():
+        def on_remove(_e=None):
             idx = set(sel_indices())
             if not idx:
-                return
+                return "break"
             lst = [op for k, op in enumerate(ops()) if k not in idx]
             commit(lst, [min(idx)] if lst else [])
+            return "break"
+
+        def toggle_enabled(indices=None, _e=None):
+            """Tick / untick the given rows (default: the selection). A mixed
+            selection is switched ON as a whole, which is what "toggle" means when
+            some are already off."""
+            lst = ops()
+            idx = [i for i in (indices if indices is not None else sel_indices())
+                   if 0 <= i < len(lst)]
+            if not idx:
+                return "break"
+            target = not all(transform_mod.op_enabled(lst[i]) for i in idx)
+            for i in idx:
+                op = dict(lst[i])
+                if target:
+                    op.pop("enabled", None)      # enabled is the default: keep dicts clean
+                else:
+                    op["enabled"] = False
+                lst[i] = op
+            commit(lst, idx)
+            n_off = sum(1 for o in lst if not transform_mod.op_enabled(o))
+            self.app.set_status("{} op(s) {} — {} disabled in this Transform. Preview to see "
+                                "the effect.".format(len(idx), "enabled" if target else "disabled",
+                                                     n_off))
+            return "break"
+
+        def on_click(e):
+            """A click on the [x] box toggles that row instead of just selecting it."""
+            idx = lb.nearest(e.y)
+            bbox = lb.bbox(idx)
+            if bbox is None or not (0 <= idx < len(ops())):
+                return None
+            bx, by, _bw, bh = bbox
+            if e.x <= bx + 22 and by <= e.y <= by + bh:
+                toggle_enabled([idx])
+                return "break"
+            return None
 
         def move_block(delta):
             """Move the selected (possibly non-contiguous) rows by delta, as a
@@ -2585,9 +2931,22 @@ class WorkflowTab(ttk.Frame):
 
         refill([])
         lb.bind("<Double-1>", on_edit)
+        # The tick-box click must run BEFORE the press-drag handler claims the event.
+        lb.bind("<ButtonPress-1>", on_click, add="+")
         lb.bind("<ButtonPress-1>", on_press, add="+")
         lb.bind("<B1-Motion>", on_drag_motion, add="+")
         lb.bind("<ButtonRelease-1>", on_drop, add="+")
+        lb.bind("<space>", lambda e: toggle_enabled())
+        lb.bind("<Delete>", on_remove)
+        lb.bind("<BackSpace>", on_remove)
+        # Undo/redo while the pointer is IN the list: op edits are graph edits, so
+        # they ride the node editor's whole-graph undo stack (each commit = one step).
+        # The canvas-scoped bindings don't reach a focused Listbox, hence these.
+        for seq in ("<Control-z>", "<Control-Z>"):
+            lb.bind(seq, self._undo_op_list)
+        for seq in ("<Control-y>", "<Control-Y>", "<Control-Shift-z>", "<Control-Shift-Z>"):
+            lb.bind(seq, self._redo_op_list)
+        lb.bind("<Enter>", lambda e: lb.focus_set(), add="+")
 
         row1 = ttk.Frame(f)
         row1.pack(fill=tk.X, padx=8)
@@ -2598,6 +2957,12 @@ class WorkflowTab(ttk.Frame):
         row2.pack(fill=tk.X, padx=8, pady=(2, 0))
         ttk.Button(row2, text="Up", width=5, command=lambda: move_block(-1)).pack(side=tk.LEFT, padx=1)
         ttk.Button(row2, text="Down", width=6, command=lambda: move_block(1)).pack(side=tk.LEFT, padx=1)
+        tbtn = ttk.Button(row2, text="On/Off", width=8, command=lambda: toggle_enabled())
+        tbtn.pack(side=tk.LEFT, padx=1)
+        tip(tbtn, "Enable / disable the selected op(s) without deleting them (Space, or "
+                  "click the [x] box). A disabled op is skipped when the geometry is "
+                  "built — untick one, hit Preview, and you see exactly what it "
+                  "contributes.")
 
         def cycle_moiety():
             """Step the ring-orientation of a moiety op through its N symmetry-
@@ -2642,10 +3007,12 @@ class WorkflowTab(ttk.Frame):
                       "fits and open the 3D preview. Click repeatedly to step through them "
                       "and keep the orientation that looks right (it's saved on the op). "
                       "Cycles the selected moiety op, or the last one.")
-        ttk.Label(f, text="Tip: multi-select ops (Shift/Ctrl-click) and move them as a block, "
-                  "or drag a row to reorder. To align two molecules to EACH OTHER, give each "
-                  "its own Transform aligning the chosen axis/plane to the same lab axis — then "
-                  "Combine.", foreground="#777", wraplength=220, justify=tk.LEFT).pack(
+        ttk.Label(f, text="Tip: click the [x] box (or Space) to switch an op off without losing "
+                  "it; Delete removes the selection; Ctrl+Z / Ctrl+Y undo/redo. Multi-select ops "
+                  "(Shift/Ctrl-click) and move them as a block, or drag a row to reorder. To "
+                  "align two molecules to EACH OTHER, give each its own Transform aligning the "
+                  "chosen axis/plane to the same lab axis — then Combine.",
+                  foreground="#777", wraplength=220, justify=tk.LEFT).pack(
                       anchor=tk.W, padx=8, pady=(4, 0))
         # Preview / Write the transformed geometry — the same 'run until here' debug
         # view the Combine panel offers (computed in memory; project untouched).
@@ -2683,11 +3050,36 @@ class WorkflowTab(ttk.Frame):
                   "nodes FIRST — Combine is a pure append.", foreground="#555",
                   wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
 
+        # Charge / multiplicity / name — classic tk.Entry so we can flash their bg
+        # red (missing but required) / green (a valid value just entered). References
+        # are stashed in self._combine_fields so the guided-fix flow can highlight
+        # + focus them (see _guide_combine_fix).
+        self._combine_fields = {}
+        _RED, _GREEN = "#e57373", "#66bb6a"
+
         ttk.Label(f, text="Output molecule name:").pack(anchor=tk.W, padx=8, pady=(6, 0))
         nm = tk.StringVar(value=node.config.get("name", ""))
-        ent = ttk.Entry(f, textvariable=nm, width=24)
+        ent = tk.Entry(f, textvariable=nm, width=24)
         ent.pack(anchor=tk.W, padx=8, pady=2)
-        nm.trace_add("write", lambda *_a: self._set_cfg(node, "name", nm.get().strip()))
+        self._combine_fields["name"] = (ent, nm)
+        _nbg, _nfg = ent.cget("bg"), ent.cget("fg")
+
+        def commit_name(*_a):
+            txt = nm.get().strip()
+            self._set_cfg(node, "name", txt)
+            required = "name" in getattr(self, "_combine_required", set())
+            if not txt:
+                ent.configure(bg=(_RED if required else _nbg),
+                              fg=("#000000" if required else _nfg))
+                return
+            getattr(self, "_combine_required", set()).discard("name")
+            ent.configure(bg=_GREEN, fg="#000000")
+            ent.after(800, lambda: ent.winfo_exists() and ent.configure(bg=_nbg, fg=_nfg))
+        nm.trace_add("write", commit_name)
+        ttk.Label(f, text="Required once this Combine feeds a calculation: the merged "
+                  "molecule (and its run directory) is named after it, so a name you "
+                  "chose keeps re-runs pointing at the same results.",
+                  foreground="#777", wraplength=220, justify=tk.LEFT).pack(anchor=tk.W, padx=8)
 
         mode = tk.StringVar(value=node.config.get("mode", "merge"))
         ttk.Label(f, text="Mode:").pack(anchor=tk.W, padx=8, pady=(6, 0))
@@ -2701,13 +3093,6 @@ class WorkflowTab(ttk.Frame):
                   "(a single-molecule wire repeats for every row — e.g. add the same water "
                   "to each of n solutes).", foreground="#777", wraplength=220,
                   justify=tk.LEFT).pack(anchor=tk.W, padx=8)
-
-        # Charge / multiplicity — classic tk.Entry so we can flash their bg red
-        # (missing but required) / green (a valid integer just entered). References
-        # are stashed in self._combine_fields so the guided-fix flow can highlight
-        # + focus them (see _guide_combine_fix).
-        self._combine_fields = {}
-        _RED, _GREEN = "#e57373", "#66bb6a"
 
         def int_or_none_entry(label, key, hint):
             ttk.Label(f, text=label).pack(anchor=tk.W, padx=8, pady=(6, 0))
@@ -2751,10 +3136,10 @@ class WorkflowTab(ttk.Frame):
         self._add_preview_button(node)
 
     def _guide_combine_fix(self, node_id, missing):
-        """Select the offending Combine, red-highlight the empty charge/mult
+        """Select the offending Combine, red-highlight the empty name/charge/mult
         box(es), and focus the FIRST one — then hand control back to the user
-        (we don't chase focus to the second box). Each box greens + clears when a
-        valid integer is typed (see the commit closure)."""
+        (we don't chase focus to the later boxes). Each box greens + clears when a
+        valid value is typed (see the commit closures)."""
         node = self.wf.node(node_id)
         if node is None:
             return
@@ -2887,11 +3272,13 @@ class WorkflowTab(ttk.Frame):
         gb = workflow_expand.GeometryBackend(self.app.project)
         return gb, gb.cache, gb.pending, gb.notes
 
-    def _flush_geom_materialisations(self, pending):
-        """Write the pending derived geometries into the project (TRANSFORM/*.xyz
-        + locked Molecule rows). Delegates to the shared core materialiser; see
-        core.workflow_expand.flush_materialisations. Returns warnings."""
-        return workflow_expand.flush_materialisations(self.app.project, pending)
+    def _flush_geom_materialisations(self, pending, needed=None):
+        """Write the pending derived geometries into the project (TRANSFORM/*.xyz,
+        plus a locked Molecule row for the ones `needed` — i.e. that a calculation
+        runs on; intermediate Transform steps stay files only). Delegates to the
+        shared core materialiser; see core.workflow_expand.flush_materialisations.
+        Returns warnings."""
+        return workflow_expand.flush_materialisations(self.app.project, pending, needed=needed)
 
     def _node_input_geoms(self, node, limit=1):
         """The first geometries ARRIVING at a node — for the op editor's atom
@@ -3372,20 +3759,24 @@ class WorkflowTab(ttk.Frame):
         confirm. Reuses existing calcs for the same (graph node, molecule) so a
         re-run continues rather than duplicating. If `source_ids` is given, only
         those networks are expanded. Returns (calcs, node_map) or None."""
-        # A Combine that feeds a calc but lacks explicit charge/mult gets a
-        # dedicated guided fix (popup -> select node -> highlight + focus the
+        # A Combine that feeds a calc but lacks an explicit name / charge / mult gets
+        # a dedicated guided fix (popup -> select node -> highlight + focus the
         # missing box), which takes priority over the generic blocker list.
-        needs = self.wf.combine_needs_charge_mult()
+        needs = self.wf.combine_needs_fields()
         if needs:
             nid, missing = needs[0]
-            labels = {"charge": "charge", "mult": "multiplicity"}
+            labels = wf_mod.COMBINE_FIELD_LABELS
+            why = {"name": "the merged molecule is named after it (so re-runs find the "
+                           "same results instead of creating new molecules)",
+                   "charge": "auto-summing the fragment charges is rarely right",
+                   "mult": "coupling every unpaired spin ferromagnetically is rarely right"}
             messagebox.showwarning(
-                "Combine: set charge & multiplicity",
-                "A Combine node feeds a calculation, so its total {} must be set "
-                "explicitly — auto-summing charges and coupling every unpaired spin is "
-                "rarely right for a merged molecule.\n\nClick OK and I'll take you to the "
-                "node; fill the highlighted box(es).".format(
-                    " and ".join(labels[k] for k in missing)))
+                "Combine: fill in the required fields",
+                "A Combine node feeds a calculation, so its {} must be set "
+                "explicitly:\n\n  • {}\n\nClick OK and I'll take you to the node; fill "
+                "the highlighted box(es).".format(
+                    " and ".join(labels[k] for k in missing),
+                    "\n  • ".join("{} — {}".format(labels[k], why[k]) for k in missing)))
             self._guide_combine_fix(nid, missing)
             return None
         issues = self.wf.validate()
@@ -3461,9 +3852,12 @@ class WorkflowTab(ttk.Frame):
         if not messagebox.askyesno(verb + " calculations", msg):
             return None
         # NOW write any Transform/Combine-derived molecules into the project
-        # (before the calcs that reference them are built).
+        # (before the calcs that reference them are built). Only geometries a calc
+        # actually runs on become Molecules-tab rows; intermediate Transform steps
+        # are written to TRANSFORM/ as files only.
         if geom_pending:
-            gwarns = self._flush_geom_materialisations(geom_pending)
+            gwarns = self._flush_geom_materialisations(
+                geom_pending, needed={c.molecule_filename for c in calcs})
             if gwarns:
                 messagebox.showwarning("Derived geometries", "\n".join(gwarns))
         # Append only the genuinely-new calcs (reused ones are already in place).

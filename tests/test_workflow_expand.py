@@ -130,6 +130,73 @@ def test_combine_without_charge_mult_is_a_blocker(tmp_path):
     assert any("charge" in b for b in res["blockers"])
 
 
+def test_intermediate_transform_is_a_file_but_not_a_molecule_row(tmp_path):
+    """Molecules -> Transform -> Combine -> Optimize: only the COMBINED molecule
+    becomes a Molecules-tab row. The intermediate transformed fragments are
+    written to TRANSFORM/ (inspectable) but aren't molecules of the project."""
+    proj = _project(tmp_path, n_mols=2)
+    w = wf_mod.Workflow()
+    m1 = w.add_node("molecules", config={"mode": "selection", "filenames": ["000"]})
+    m2 = w.add_node("molecules", config={"mode": "selection", "filenames": ["001"]})
+    t1 = w.add_node("transform", config={"ops": [{"op": "translate", "vec": [3.0, 0, 0]}]})
+    t2 = w.add_node("transform", config={"ops": [{"op": "translate", "vec": [0, 3.0, 0]}]})
+    comb = w.add_node("combine", config={"name": "dimer", "charge": 0, "mult": 1})
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    w.add_edge(m1.id, "geometry", t1.id, "geometry")
+    w.add_edge(m2.id, "geometry", t2.id, "geometry")
+    w.add_edge(t1.id, "geometry", comb.id, "geometry")
+    w.add_edge(t2.id, "geometry", comb.id, "geometry")
+    w.add_edge(comb.id, "geometry", opt.id, "geometry")
+    proj.workflow = w.to_dict()
+
+    res = wexp.expand_project_workflow(proj)
+    assert res["expanded"] and res["new"] == 1
+    rows = {mol.filename for mol in proj.molecules}
+    assert rows == {"000", "001", "dimer_cb" + comb.id[:4]}       # no *_tf* rows
+    # the intermediate geometries still landed on disk
+    tf = sorted(os.listdir(os.path.join(proj.root(), "TRANSFORM")))
+    assert any(n.startswith("000_tf") for n in tf)
+    assert any(n.startswith("001_tf") for n in tf)
+
+
+def test_fan_in_optimises_raw_and_combined_molecules_from_one_node(tmp_path):
+    """One Optimize node fed by BOTH the raw molecules and a Combine output — the
+    fan-in the node editor now allows — yields one calc per distinct molecule."""
+    proj = _project(tmp_path, n_mols=2)
+    w = wf_mod.Workflow()
+    m = w.add_node("molecules")
+    comb = w.add_node("combine", config={"name": "dimer", "charge": 0, "mult": 1})
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    w.add_edge(m.id, "geometry", comb.id, "geometry")
+    w.add_edge(m.id, "geometry", opt.id, "geometry")
+    w.add_edge(comb.id, "geometry", opt.id, "geometry")
+    proj.workflow = w.to_dict()
+
+    res = wexp.expand_project_workflow(proj)
+    assert res["expanded"] and res["new"] == 3        # 000, 001, dimer
+    mols = {c.molecule_filename for c in proj.planned_calcs}
+    assert mols == {"000", "001", "dimer_cb" + comb.id[:4]}
+    assert all(c.origin_node == opt.id for c in proj.planned_calcs)
+
+
+def test_combine_without_a_name_is_a_blocker(tmp_path):
+    proj = _project(tmp_path, n_mols=2)
+    w = wf_mod.Workflow()
+    m1 = w.add_node("molecules", config={"mode": "selection", "filenames": ["000"]})
+    m2 = w.add_node("molecules", config={"mode": "selection", "filenames": ["001"]})
+    comb = w.add_node("combine", config={"charge": 0, "mult": 1})     # no name
+    opt = w.add_node("optimize", config={"recipe": "OPT"})
+    w.add_edge(m1.id, "geometry", comb.id, "geometry")
+    w.add_edge(m2.id, "geometry", comb.id, "geometry")
+    w.add_edge(comb.id, "geometry", opt.id, "geometry")
+    proj.workflow = w.to_dict()
+
+    res = wexp.expand_project_workflow(proj)
+    assert res["expanded"] is False
+    assert any("output molecule name" in b for b in res["blockers"])
+    assert proj.planned_calcs == []
+
+
 def test_combine_with_charge_mult_materialises_dimer(tmp_path):
     proj = _project(tmp_path, n_mols=2)
     w = wf_mod.Workflow()

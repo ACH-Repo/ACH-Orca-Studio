@@ -155,6 +155,37 @@ def test_apply_ops_reports_bad_op_position():
     assert "op 2" in str(e.value)
 
 
+def test_disabled_op_is_skipped_but_keeps_its_place():
+    """Unticking one op of a chain must change only that step's contribution —
+    the rest still run, in order, and the op stays in the list."""
+    base = [{"op": "translate", "vec": [1.0, 0.0, 0.0]},
+            {"op": "translate", "vec": [0.0, 2.0, 0.0]},
+            {"op": "translate", "vec": [0.0, 0.0, 3.0]}]
+    all_on = T.apply_ops(CHAIN_SYMS, CHAIN, base)
+    assert np.allclose(all_on - CHAIN, [1.0, 2.0, 3.0])
+    middle_off = [dict(base[0]), dict(base[1], enabled=False), dict(base[2])]
+    got = T.apply_ops(CHAIN_SYMS, CHAIN, middle_off)
+    assert np.allclose(got - CHAIN, [1.0, 0.0, 3.0])
+    assert len(middle_off) == 3                       # nothing was deleted
+    # explicit enabled=True behaves like a missing key (the default)
+    assert np.allclose(T.apply_ops(CHAIN_SYMS, CHAIN,
+                                   [dict(o, enabled=True) for o in base]), all_on)
+
+
+def test_op_enabled_defaults_to_true_for_legacy_ops():
+    assert T.op_enabled({"op": "translate"}) is True   # written before the flag existed
+    assert T.op_enabled({"op": "translate", "enabled": False}) is False
+    ops = [{"op": "a"}, {"op": "b", "enabled": False}, {"op": "c", "enabled": True}]
+    assert [o["op"] for o in T.enabled_ops(ops)] == ["a", "c"]
+
+
+def test_disabled_ops_are_not_validated():
+    # a broken op parked (unticked) in the list must not block the graph
+    bad = {"op": "align_axis", "i": 0, "j": 99}
+    assert T.validate_ops([bad], n_atoms=4)
+    assert T.validate_ops([dict(bad, enabled=False)], n_atoms=4) == []
+
+
 def test_validate_ops():
     assert T.validate_ops([]) == []
     assert T.validate_ops([{"op": "translate", "vec": [1, 2, 3]}], 4) == []

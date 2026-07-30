@@ -41,6 +41,45 @@ def fit_to_content(window, min_w=0, min_h=0):
         pass
 
 
+def maximize(window, inset_w=0, inset_h=64):
+    """Open `window` as large as the screen allows, right now.
+
+    Window managers disagree about how to be told: Windows/some Linux WMs take
+    `state("zoomed")`, others only `wm attributes -zoomed`, and ThinLinc's WM
+    honours NEITHER (the same reason the old custom "Maximize" button did
+    nothing). So we try both, check whether the window actually grew, and fall
+    back to sizing it to the screen ourselves.
+
+    The manual fallback leaves `inset_h` pixels of height (default 64) for the
+    desktop panel/taskbar that would otherwise cover the window's bottom edge —
+    exactly the "ThinLinc cuts off the lower half" problem. Returns True if the WM
+    maximised it, False if we sized it by hand.
+    """
+    try:
+        window.update_idletasks()
+        sw, sh = window.winfo_screenwidth(), window.winfo_screenheight()
+        before = window.winfo_width() * window.winfo_height()
+    except tk.TclError:
+        return False
+    for attempt in (lambda: window.state("zoomed"),
+                    lambda: window.attributes("-zoomed", True)):
+        try:
+            attempt()
+            window.update_idletasks()
+            if window.winfo_width() * window.winfo_height() > before * 1.2:
+                return True
+        except tk.TclError:
+            continue
+    try:
+        w = max(640, sw - int(inset_w))
+        h = max(480, sh - int(inset_h))
+        # minsize may have been pinned by fit_to_content; never fight it
+        window.geometry("{}x{}+0+0".format(w, h))
+    except tk.TclError:
+        pass
+    return False
+
+
 def make_modal(window, parent):
     # type: (tk.Toplevel, tk.Misc) -> None
     """Make `window` a modal dialog over `parent`, robustly across platforms

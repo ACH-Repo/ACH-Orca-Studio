@@ -53,7 +53,8 @@ class LivePlotWindow(tk.Toplevel):
     _ZOOM_CYCLE = ["zoom_h", "zoom_v", "zoom_box", None]
     _PAN_CYCLE = ["pan_h", "pan_v", "pan_free", None]
 
-    def __init__(self, parent, title, out_path, poll_ms=2000, app=None, trj_path=None):
+    def __init__(self, parent, title, out_path, poll_ms=2000, app=None, trj_path=None,
+                 geom_path=None):
         super().__init__(parent)
         self.title("Progress — {}".format(title))
         self.geometry("900x760")
@@ -61,6 +62,7 @@ class LivePlotWindow(tk.Toplevel):
         self.poll_ms = poll_ms
         self.app = app
         self.trj_path = trj_path       # expected _trj.xyz of an OPT (may not exist yet)
+        self.geom_path = geom_path     # expected optimised <mol>.xyz of an OPT
         self._after_id = None
         self._closed = False
         self._resize_after = None
@@ -87,15 +89,39 @@ class LivePlotWindow(tk.Toplevel):
             ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 12))
             return
 
+        # Header band: job status / timing / output path on the left, the geometry
+        # launchers on the right. The optimised geometry lives HERE (not buried in
+        # a right-click menu three tabs away) because this window is what you open
+        # to see whether the optimisation is done.
+        hdr = ttk.Frame(self)
+        hdr.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(6, 2))
+        right = ttk.Frame(hdr)
+        right.pack(side=tk.RIGHT, anchor=tk.NE, padx=(8, 0))
+        left = ttk.Frame(hdr)
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         self.status_var = tk.StringVar(value="reading...")
-        ttk.Label(self, textvariable=self.status_var, anchor=tk.W).pack(
-            side=tk.TOP, fill=tk.X, padx=8, pady=(6, 0))
+        ttk.Label(left, textvariable=self.status_var, anchor=tk.W).pack(side=tk.TOP, fill=tk.X)
         # Iteration timing — measured from data arriving while this window is open.
         self.rate_var = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self.rate_var, foreground="#446", anchor=tk.W).pack(
-            side=tk.TOP, fill=tk.X, padx=8)
-        ttk.Label(self, text=out_path, foreground="#666", anchor=tk.W).pack(
-            side=tk.TOP, fill=tk.X, padx=8)
+        ttk.Label(left, textvariable=self.rate_var, foreground="#446", anchor=tk.W).pack(
+            side=tk.TOP, fill=tk.X)
+        ttk.Label(left, text=out_path, foreground="#666", anchor=tk.W).pack(
+            side=tk.TOP, fill=tk.X)
+        if self.geom_path:
+            b = ttk.Button(right, text="Optimized geometry (3D)...",
+                           command=self._view_optimized_geometry)
+            b.pack(side=tk.TOP, anchor=tk.E)
+            from orca_workbench.ui.tooltip import tip
+            tip(b, "Open the converged geometry (<mol>.xyz) in your external 3D viewer. "
+                   "Appears for optimisation jobs; it exists once the job has finished.")
+        if self.trj_path:
+            b = ttk.Button(right, text="Trajectory (movie)...",
+                           command=self._view_trajectory)
+            b.pack(side=tk.TOP, anchor=tk.E, pady=(2, 0))
+            from orca_workbench.ui.tooltip import tip
+            tip(b, "Open the whole optimisation as a multi-frame .xyz movie in the "
+                   "trajectory viewer (PyMOL / molden / Avogadro).")
 
         self.fig = Figure(figsize=(7.2, 5.4), dpi=100)
         try:
@@ -128,8 +154,12 @@ class LivePlotWindow(tk.Toplevel):
         self.canvas.mpl_connect("button_release_event", self._drag_release)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        from orca_workbench.ui.modal import fit_to_content
+        from orca_workbench.ui.modal import fit_to_content, maximize
         fit_to_content(self)   # don't let the controls clip at high UI scaling
+        # Open maximised: three stacked panels plus the control row need the room,
+        # and on a remote desktop a window taller than the screen loses its bottom
+        # half behind the desktop panel (see modal.maximize).
+        maximize(self)
         # Populate once realised; matplotlib's own resize keeps the figure
         # fitted to the window (device ratio pinned above).
         self.after(0, self._first_draw)
@@ -378,6 +408,16 @@ class LivePlotWindow(tk.Toplevel):
                           if parts and not done else "")
 
     # ------------------------------------------------------------- drawing
+    @staticmethod
+    def _corner_title(ax, text):
+        """A panel caption INSIDE the axes, upper right, in a small font — instead
+        of a big set_title() band above every subplot. Three stacked panels spend
+        the reclaimed height on actual data."""
+        ax.text(0.995, 0.94, text, transform=ax.transAxes, ha="right", va="top",
+                fontsize=8, color="#333333",
+                bbox={"facecolor": "white", "alpha": 0.65, "edgecolor": "none",
+                      "pad": 1.5})
+
     def _redraw(self, parsed):
         fe = parsed["final_energies"]
         rms = parsed["rms_grads"]
@@ -393,35 +433,59 @@ class LivePlotWindow(tk.Toplevel):
                          or not self._lims_close(ax.get_ylim(), home[1])):
                 keep[name] = (ax.get_xlim(), ax.get_ylim())
 
-        # Panels, top to bottom: opt energy (when there are energies to show),
-        # the full SCF history (whenever any SCF data exists — a running SP job
-        # gets it full-height), gradients (OPT only).
+        # Panels, top to bottom: opt energy, gradients, SCF history. Energy and
+        # gradients are both per GEOMETRY STEP, so they're adjacent and SHARE the
+        # x-axis: one set of tick labels and one xlabel for the pair, which buys
+        # back a chunk of vertical space (the SCF panel has its own iteration
+        # axis, so it sits below). A running SP job with SCF data only gets that
+        # panel full height.
         panels = []
         if fe or not blocks:
             panels.append("energy")
-        if blocks:
-            panels.append("scf")
         if rms or mx:
             panels.append("conv")
+        if blocks:
+            panels.append("scf")
 
         self.fig.clear()
         self._axes = {}
         n = len(panels)
         for i, name in enumerate(panels):
-            self._axes[name] = self.fig.add_subplot(n, 1, i + 1)
+            share = self._axes.get("energy") if name == "conv" else None
+            self._axes[name] = self.fig.add_subplot(n, 1, i + 1, sharex=share)
+        shared = "energy" in self._axes and "conv" in self._axes
 
         ax = self._axes.get("energy")
         if ax is not None:
             if len(fe) > 1:
                 ax.plot(range(1, len(fe) + 1), fe, marker="o", color="#1f77b4")
-                ax.set_xlabel("geometry step")
+                if not shared:
+                    ax.set_xlabel("geometry step")
                 ax.set_ylabel("energy (Eh)")
-                ax.set_title("Optimization energy ({} steps)".format(len(fe)))
+                self._corner_title(ax, "OPT energy - {} steps".format(len(fe)))
             elif len(fe) == 1:
                 ax.axhline(fe[-1], color="#1f77b4")
-                ax.set_title("Single-point energy: {:.8f} Eh".format(fe[-1]))
+                self._corner_title(ax, "single point: {:.8f} Eh".format(fe[-1]))
             else:
-                ax.set_title("(no energies parsed yet)")
+                self._corner_title(ax, "(no energies parsed yet)")
+            if shared:
+                # the gradient panel right below carries the tick labels
+                ax.tick_params(labelbottom=False)
+
+        ax = self._axes.get("conv")
+        if ax is not None:
+            if rms:
+                ax.semilogy(range(1, len(rms) + 1), rms, marker="o",
+                            label="RMS gradient", color="#d62728")
+            if mx:
+                ax.semilogy(range(1, len(mx) + 1), mx, marker="s",
+                            label="MAX gradient", color="#ff7f0e")
+            ax.set_xlabel("geometry step")
+            ax.set_ylabel("gradient (log)")
+            # lower left: out of the way of both the corner title and the curves,
+            # which decay towards the bottom RIGHT as the optimisation converges
+            ax.legend(loc="lower left", fontsize=7, framealpha=0.7)
+            self._corner_title(ax, "gradient convergence")
 
         ax = self._axes.get("scf")
         if ax is not None:
@@ -439,20 +503,8 @@ class LivePlotWindow(tk.Toplevel):
             ax.set_xlabel("SCF iteration (cumulative over {} cycle{})".format(
                 len(blocks), "" if len(blocks) == 1 else "s"))
             ax.set_ylabel("energy (Eh)")
-            ax.set_title("SCF history — every cycle ({} iterations total)".format(k))
-
-        ax = self._axes.get("conv")
-        if ax is not None:
-            if rms:
-                ax.semilogy(range(1, len(rms) + 1), rms, marker="o",
-                            label="RMS gradient", color="#d62728")
-            if mx:
-                ax.semilogy(range(1, len(mx) + 1), mx, marker="s",
-                            label="MAX gradient", color="#ff7f0e")
-            ax.set_xlabel("geometry step")
-            ax.set_ylabel("gradient (log)")
-            ax.legend(loc="best", fontsize=8)
-            ax.set_title("Gradient convergence")
+            self._corner_title(ax, "SCF - {} iters / {} cycle{}".format(
+                k, len(blocks), "" if len(blocks) == 1 else "s"))
 
         for name, a in self._axes.items():
             self._home[name] = (a.get_xlim(), a.get_ylim())
@@ -464,7 +516,38 @@ class LivePlotWindow(tk.Toplevel):
 
         self.canvas.draw_idle()
 
-    # ------------------------------------------------- current geometry (OPT)
+    # ------------------------------------------------- geometry (OPT) launchers
+    def _view_optimized_geometry(self):
+        """Open the CONVERGED geometry (<mol>.xyz beside the .out) in the external
+        3D viewer — the thing you actually want when an optimisation finishes."""
+        from tkinter import messagebox
+        p = self.geom_path
+        if not p or not os.path.isfile(p):
+            messagebox.showinfo(
+                "No optimised geometry yet",
+                "ORCA writes the converged geometry here when the optimisation "
+                "finishes:\n{}\n\nIt isn't there yet. While the job runs, use "
+                "'View current geometry' (the last trajectory frame) instead; on the "
+                "cluster the trajectory only appears after the job ends and copies "
+                "back from the node's scratch.".format(p or "(unknown)"), parent=self)
+            return
+        from orca_workbench.ui.molecules_tab import open_xyz_3d
+        open_xyz_3d(self, self.app, p)
+
+    def _view_trajectory(self):
+        """Open the full optimisation trajectory (multi-frame .xyz) as a movie."""
+        from tkinter import messagebox
+        p = self.trj_path
+        if not p or not os.path.isfile(p):
+            messagebox.showinfo(
+                "No trajectory yet",
+                "The trajectory file isn't here:\n{}\n\nA local run writes it after the "
+                "first optimisation step; a cluster job copies it back when it "
+                "ends.".format(p or "(unknown)"), parent=self)
+            return
+        from orca_workbench.ui.molecules_tab import open_xyz_3d
+        open_xyz_3d(self, self.app, p, slot="traj_viewer_path")
+
     def _view_current_geometry(self):
         """Open the LAST frame of the job's _trj.xyz — the current geometry of a
         still-running optimisation — in the external 3D viewer."""

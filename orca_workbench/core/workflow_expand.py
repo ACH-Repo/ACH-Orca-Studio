@@ -83,7 +83,12 @@ class GeometryBackend(object):
         if node.type == "transform":
             ops = node.config.get("ops") or []
             out = []
-            note_ops = "; ".join(transform_mod.describe_op(o) for o in ops)
+            # The provenance comment records what actually RAN — disabled ops are
+            # noted as skipped rather than silently claimed.
+            live = transform_mod.enabled_ops(ops)
+            note_ops = "; ".join(transform_mod.describe_op(o) for o in live)
+            if len(live) != len(ops):
+                note_ops += " [{} op(s) disabled]".format(len(ops) - len(live))
             for nm in streams[0]:
                 # Per-molecule: one molecule the ops don't fit (atom index out of
                 # range, ring bond, ...) is SKIPPED with a note — the rest of the
@@ -126,15 +131,26 @@ class GeometryBackend(object):
         return out
 
 
-def flush_materialisations(project, pending):
+def flush_materialisations(project, pending, needed=None):
     """Write the pending derived geometries into `project`: a TRANSFORM/<name>.xyz
-    plus a locked Molecule row (updated in place on a re-expand). A molecule whose
-    calcs already left the planning stage (exported / submitted) is left
-    untouched, so a finished result can't silently sit on different coordinates.
-    Returns a list of warning strings."""
+    plus — for the ones a calculation actually uses — a locked Molecule row
+    (updated in place on a re-expand). A molecule whose calcs already left the
+    planning stage (exported / submitted) is left untouched, so a finished result
+    can't silently sit on different coordinates. Returns a list of warning strings.
+
+    `needed` is the set of molecule filenames the expansion's calcs reference
+    (None = all of them, the old behaviour). Intermediate geometries — a Transform
+    whose output only feeds another Transform / a Combine / a Write — get their
+    .xyz written (so you can inspect them) but NO Molecule row: they aren't
+    molecules of the project, they're steps on the way to one, and listing every
+    one of them buried the real inputs in the Molecules tab. A row that exists
+    from an older expansion but is no longer needed (and has no calculations
+    pointing at it) is removed as part of the same clean-up.
+    """
     from orca_workbench.core import coords as coords_mod
     root = project.root()
     warns = []
+    used_by_calc = {c.molecule_filename for c in project.planned_calcs}
     for it in pending:
         fname = it["fname"]
         busy = any(c.molecule_filename == fname and (c.exported or c.job_id)
@@ -151,6 +167,12 @@ def flush_materialisations(project, pending):
                  for k in range(len(it["symbols"]))]
         coords_mod.write_xyz(os.path.join(root, xyz_rel), atoms,
                              {"name": fname, "comment": it["note"]})
+        wanted = needed is None or fname in needed or fname in used_by_calc
+        if not wanted:
+            # An intermediate: keep the file, drop any stale row for it.
+            if existing is not None:
+                project.molecules = [m for m in project.molecules if m.filename != fname]
+            continue
         if existing is None:
             project.molecules.append(Molecule(
                 name=fname, filename=fname, smiles=None, charge=it["charge"],
@@ -246,7 +268,10 @@ def expand_project_workflow(project, calc_done=None, log=None):
     if not calcs:
         return {"expanded": False, "new": 0, "reused": 0, "warnings": warnings, "blockers": []}
     if backend.pending:
-        warnings.extend(flush_materialisations(project, backend.pending))
+        # Only derived geometries a calc actually runs on become project molecules;
+        # intermediate Transform steps stay files on disk (see flush_materialisations).
+        warnings.extend(flush_materialisations(
+            project, backend.pending, needed={c.molecule_filename for c in calcs}))
     new_calcs = [c for c in calcs if id(c) not in existing_before]
     for c in new_calcs:
         project.planned_calcs.append(c)

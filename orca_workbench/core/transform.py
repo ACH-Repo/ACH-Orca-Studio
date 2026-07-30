@@ -584,11 +584,32 @@ OP_TYPES = ("translate", "rotate", "center", "mirror", "flatten", "align_axis",
             "set_dihedral")
 
 
+def op_enabled(op):
+    # type: (dict) -> bool
+    """Whether an op takes part. An op dict without an `enabled` key is ENABLED —
+    so every op list written before this existed keeps working, and only a
+    deliberately unticked op carries `enabled: False`.
+
+    Disabling instead of deleting is how you see what one step of a long chain
+    actually contributes: untick it, preview, tick it back."""
+    return bool((op or {}).get("enabled", True))
+
+
+def enabled_ops(ops):
+    # type: (list) -> list
+    """Just the ops that are switched on, in order."""
+    return [o for o in (ops or []) if op_enabled(o)]
+
+
 def apply_ops(symbols, coords, ops):
     """Apply an ordered list of op dicts to one geometry; returns new coords.
-    Raises ValueError with a readable message on a bad op."""
+    Ops marked `enabled: False` are SKIPPED (see op_enabled). Raises ValueError
+    with a readable message on a bad op — numbered by its position in the full
+    list, so the message matches what the editor shows."""
     c = _coords(coords)
     for k, op in enumerate(ops or []):
+        if not op_enabled(op):
+            continue
         try:
             c = _apply_one(symbols, c, op or {})
         except (ValueError, KeyError, TypeError) as e:
@@ -639,7 +660,10 @@ def _apply_one(symbols, c, op):
 
 def validate_ops(ops, n_atoms=None):
     """Static checks on an ops list; returns a list of issue strings (empty = OK).
-    `n_atoms` (when known) also range-checks atom indices."""
+    `n_atoms` (when known) also range-checks atom indices.
+
+    A DISABLED op is not checked: an unticked op doesn't run, so a half-finished
+    one parked in the list must not block the graph."""
     issues = []
 
     def chk_idx(op, keys, k):
@@ -654,6 +678,8 @@ def validate_ops(ops, n_atoms=None):
                               .format(k + 1, v, n_atoms))
 
     for k, op in enumerate(ops or []):
+        if not op_enabled(op):
+            continue
         kind = (op or {}).get("op")
         if kind not in OP_TYPES:
             issues.append("op {}: unknown type {!r}".format(k + 1, kind))

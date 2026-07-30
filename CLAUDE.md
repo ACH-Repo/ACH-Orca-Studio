@@ -799,6 +799,82 @@ off the core path and gracefully degradable.
   stacked exports. **Design note**: Python's stdlib already writes tar.gz/zip everywhere, so the
   external-archiver path is only for 7z/rar (corrected the "Windows has no zipper" assumption).
 
+- **Node-graph fan-in, Combine names, canvas images, progress-plot rework** (v1.4.4, from
+  Christian's gateway run of `Hbc_Carbonyl` via `--execute_project`) —
+  (a) **Geometry inputs FAN IN** on every calc node (Optimize/Frequencies/Property) and on
+  Filter (Combine already did): several geometry wires land on one input and their molecule
+  streams merge (order preserved, de-duplicated), so one Optimize serves three branches
+  instead of three copies. It was never a safeguard, just an unimplemented case:
+  `compute_streams` gathers ALL inbound wires; `expand_to_calcs` iterates per WIRE and
+  resolves each molecule along the branch it actually arrived on (new `resolve(feeder_id,
+  mol)` + `upstream_carrying`), so a FREQ fed by two OPT branches parents each molecule to
+  its own OPT; a molecule arriving twice still yields ONE calc. `traces_to_type`/`root_source`
+  became BFS over `Workflow.geometry_feeders`. Ports WITHOUT `fan_in` (Condition's `in`,
+  Transform, ZPVA) still take one wire, and the UI's replace-on-drop only fires for those.
+  (b) **Combine now REQUIRES a name** when it feeds a calc (`combine_needs_fields`, was
+  `combine_needs_charge_mult` — kept as an alias — plus `combine_field_set` so charge 0
+  counts as set): the merged molecule and its run dir are named after it, so a blank name
+  meant auto-named `combined_cbXXXX` molecules and duplicate calcs on re-expansion. Same
+  guided fix as charge/mult (popup → select node → red box → focus → green on valid input);
+  the name box is a classic `tk.Entry` for bg control. Legacy projects are migrated on load:
+  `_migrate_combine_names` recovers the base from an existing `<base>_cb<node4>` molecule, so
+  an already-run graph keeps pointing at its results.
+  (c) **Transform intermediates are no longer Molecules-tab rows** —
+  `flush_materialisations(..., needed=...)` writes every derived `.xyz` to `TRANSFORM/` (still
+  inspectable) but only creates a `Molecule` row for geometries a calc actually runs on;
+  stale rows from older expansions are dropped. So a Mol→Transform→Combine→OPT graph adds
+  ONE molecule (the combined one), not 1+n.
+  (d) **Node result buttons appear without a manual Refresh** — `WorkflowTab.refresh()` now
+  calls `_remap_node_calcs()` (node→calcs from each calc's `origin_node`). That was the whole
+  reason a project run with `--execute_project` showed no Geometry/Traj/Out buttons: only
+  `on_refresh_status` (F5 / the button) remapped, and on project open the lazy tab didn't
+  exist yet. The OPT 3D button is now labelled **Geometry** (was "Struct").
+  (e) **Progress plot (double-click a calc) reworked**: opens **maximised** (new
+  `modal.maximize` — tries `state("zoomed")`, then `-zoomed`, then sizes to the screen minus
+  a panel inset, because ThinLinc's WM honours neither and cut the window's bottom half off);
+  panels are **energy, gradient (sharing the x-axis), SCF**, so the two per-geometry-step
+  panels carry one set of tick labels; `set_title` bands replaced by small in-axes corner
+  captions (`_corner_title`); the gradient legend moved to lower left; and the header band
+  gained **Optimized geometry (3D)** + **Trajectory (movie)** buttons (new `geom_path` arg,
+  `calculations_tab._expected_geom`) — the discoverable home for "show me the converged
+  structure". The Calc-tab right-click also leads with the optimised-geometry/trajectory/scan
+  items and renames the constraints entry "Geometry constraints / scan (job input)...".
+  (f) **Images on the canvas** (the long-standing "can't paste a picture" gap): new pure
+  `core/canvas_images.py` (clipboard bytes via Pillow ImageGrab → `xclip`/`wl-paste`
+  `image/png` → a path in the text clipboard; PNG/GIF/JPEG header size parsing with no
+  Pillow; content-addressed `store_image` into `WORKFLOW_IMG/`; `fit_box`) plus an `image`
+  annotation node type. **Ctrl+V** on the canvas pastes an image (falling back to node
+  paste), right-click offers Paste image / Add image from file, the node draws the picture
+  letterboxed with a caption + resize handle (`_draw_image`, Pillow scaling with a
+  PhotoImage subsample fallback, size-keyed cache + a live-reference list so Tk can't GC
+  it), and double-click opens it full size. Images are COPIED into the project, so the graph
+  stays portable — the two reasons this never existed (Tk can't read clipboard images;
+  external files would break projects) are both handled.
+  (g) **Transform ops: per-op enable/disable** — `transform.op_enabled/enabled_ops`
+  (a missing `enabled` key = ON, so old op lists are untouched); `apply_ops` skips disabled
+  ops and `validate_ops` ignores them (an unticked half-finished op can't block the graph).
+  The op list shows `[x]`/`[ ]` prefixes (ASCII, like the Molecules Lock column) and greys
+  disabled rows; toggle by clicking the box, **Space**, or the **On/Off** button; **Delete**
+  removes the selection; the node summary reads "3 ops (1 off)"; provenance records
+  "[n op(s) disabled]". Untick → Preview is now the way to see what one step contributes.
+  (h) **Undo/redo actually covers node CONFIG edits** — `WorkflowNode.to_dict()` handed out
+  the LIVE config dict, so every undo snapshot aliased the node it was meant to preserve and
+  config-only edits (recipe pick, ops, charge/mult, report columns) compared equal to their
+  own "before" state and vanished from the history. `to_dict` now deep-copies, and
+  `WorkflowNode.__init__` deep-copies both the type default (which was sharing NODE_TYPES'
+  own list objects across nodes!) and the incoming config. Ctrl+Z/Ctrl+Y are also bound on
+  the ops Listbox, since canvas-scoped keys don't reach a focused list widget.
+  Tests: `tests/test_canvas_images.py` (12), plus new cases in `test_workflow_topology.py`
+  (fan-in expansion + parent-per-branch, non-fan-in ports, snapshot independence),
+  `test_workflow_expand.py` (intermediate-vs-combined rows, fan-in through the real backend,
+  nameless-Combine blocker), `test_workflow_transform.py`, `test_transform.py` (disabled-op
+  semantics) — **432 total**. Verified locally against a real ORCA 6.0.1 water TightOpt (the
+  plot layout, shared axis, corner captions, geometry buttons) and headless GUI smoke tests
+  of the fan-in wiring, image node (draw/zoom/missing file), guided Combine fix, results
+  section from `origin_node` alone, legacy name migration, and the whole op-list interaction.
+  LEFT for the gateway: a ThinLinc pass on the maximised plot window and on clipboard image
+  paste (which tool the session exposes — Pillow vs xclip vs wl-paste).
+
 ## Open work / TODO
 - `--execute_project` now expands the Workflow graph AND materialises Transform/Combine
   geometries headlessly (see `core/workflow_expand.py`) — the old `--expand_and_execute` gap is

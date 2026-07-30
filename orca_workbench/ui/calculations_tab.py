@@ -2232,18 +2232,28 @@ class CalculationsTab(ttk.Frame):
                                 "submission and try again.")
             return
         LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), out_path,
-                       app=self.app, trj_path=self._expected_trj(calc))
+                       app=self.app, trj_path=self._expected_trj(calc),
+                       geom_path=self._expected_geom(calc))
 
     def _expected_trj(self, calc):
         """The path where an OPT job's _trj.xyz will appear (whether or not it
         exists yet) — for mid-run current-geometry viewing. None for non-OPT."""
+        return self._expected_opt_file(calc, "_trj.xyz")
+
+    def _expected_geom(self, calc):
+        """The path where an OPT job's converged <mol>.xyz will appear (whether or
+        not it exists yet) — for the progress window's optimised-geometry button.
+        None for non-OPT."""
+        return self._expected_opt_file(calc, ".xyz")
+
+    def _expected_opt_file(self, calc, suffix):
         recipe = self.app.get_recipe(calc.recipe_name)
         if recipe is None or "OPT" not in (recipe.calctype or "").upper():
             return None
         if not calc.rundir:
             return None
         return os.path.join(self.app.project.root(), calc.rundir,
-                            calc.molecule_filename + "_trj.xyz")
+                            calc.molecule_filename + suffix)
 
     # --------------------------------------------------- right-click: spectra
 
@@ -2258,15 +2268,44 @@ class CalculationsTab(ttk.Frame):
         calcs = [c for c in calcs if c is not None]
         menu = tk.Menu(self, tearoff=0)
 
+        finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
+        finished_opt = [c for c in calcs if self._is_finished_type(c, "OPT")]
+
+        # Finished OPT: the optimised geometry FIRST — it's what you come here for
+        # after a job converges, so it leads the menu rather than hiding below the
+        # spectra ("Geometry constraints / scan…" reads like an input setting, and
+        # it is one). molden on the gateway, local Avogadro/PyMOL otherwise.
+        if len(finished_opt) == 1:
+            geom = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + ".xyz")
+            trj = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + "_trj.xyz")
+            if geom:
+                menu.add_command(label="Open optimized geometry (3D)",
+                                 command=lambda p=geom: self._open_3d(p))
+            if trj:
+                menu.add_command(label="Open trajectory as movie",
+                                 command=lambda p=trj: self._open_3d(p, slot="traj_viewer_path"))
+            # A relaxed surface scan (OPT + %geom Scan) leaves an energy surface in the
+            # .out — offer to plot it as an energy profile.
+            oc = finished_opt[0]
+            op = self._out_path(oc)
+            if op and os.path.isfile(op):
+                try:
+                    if orca_parser.parse_relaxed_scan(orca_parser.read_tail(op) or ""):
+                        menu.add_command(label="Plot scan energy profile",
+                                         command=lambda c=oc: self._plot_scan(c))
+                except Exception:
+                    pass
+            if geom or trj:
+                menu.add_separator()
+
         # Geometry constraints / relaxed scan (OPT jobs): a per-calc %geom spec.
         if len(calcs) == 1:
             c0 = calcs[0]
             cur = geomspec_mod.describe(getattr(c0, "geom_spec", None))
-            menu.add_command(label="Geometry constraints / scan...  [{}]".format(cur),
+            menu.add_command(label="Geometry constraints / scan (job input)...  [{}]".format(cur),
                              command=lambda cc=c0: self._edit_geom_spec(cc))
             menu.add_separator()
 
-        finished_freq = [c for c in calcs if self._is_finished_type(c, "FREQ")]
         finished_nmr = [c for c in calcs if self._is_finished_type(c, "NMR")]
         finished_uvvis = [c for c in calcs if self._is_finished_type(c, "TDDFT")]
         finished_epr = [c for c in calcs if self._is_finished_type(c, "EPR")]
@@ -2320,32 +2359,6 @@ class CalculationsTab(ttk.Frame):
             else:
                 menu.add_command(label="Open output (.out)  (no output yet)",
                                  state=tk.DISABLED)
-
-        # Finished OPT: open the optimised geometry / trajectory in 3D (molden on
-        # the gateway, local Avogadro otherwise) — same path as the Molecules tab.
-        finished_opt = [c for c in calcs if self._is_finished_type(c, "OPT")]
-        if len(finished_opt) == 1:
-            geom = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + ".xyz")
-            trj = self._calc_file(finished_opt[0], finished_opt[0].molecule_filename + "_trj.xyz")
-            if geom or trj:
-                menu.add_separator()
-            if geom:
-                menu.add_command(label="Open optimized geometry (3D)",
-                                 command=lambda p=geom: self._open_3d(p))
-            if trj:
-                menu.add_command(label="Open trajectory as movie",
-                                 command=lambda p=trj: self._open_3d(p, slot="traj_viewer_path"))
-            # A relaxed surface scan (OPT + %geom Scan) leaves an energy surface in the
-            # .out — offer to plot it as an energy profile.
-            oc = finished_opt[0]
-            op = self._out_path(oc)
-            if op and os.path.isfile(op):
-                try:
-                    if orca_parser.parse_relaxed_scan(orca_parser.read_tail(op) or ""):
-                        menu.add_command(label="Plot scan energy profile",
-                                         command=lambda c=oc: self._plot_scan(c))
-                except Exception:
-                    pass
 
         # A still-RUNNING (or interrupted) OPT whose trajectory is already on
         # disk (local runs; cluster jobs stage on node /scratch until copyback):
@@ -2833,7 +2846,8 @@ class CalculationsTab(ttk.Frame):
         op = self._out_path(calc)
         if op:
             LivePlotWindow(self, "{} (job {})".format(self._short(calc), calc.job_id), op,
-                           app=self.app, trj_path=self._expected_trj(calc))
+                           app=self.app, trj_path=self._expected_trj(calc),
+                           geom_path=self._expected_geom(calc))
 
     def _plot_scf_energies(self, calcs):
         # Grouped bar chart of final SCF energies for the finished calcs in the
