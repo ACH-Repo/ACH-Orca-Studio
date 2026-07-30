@@ -1913,7 +1913,11 @@ class WorkflowTab(ttk.Frame):
         # A/D leave a vertical stack, W/S a horizontal row — arrows now tune
         # the gaps (see _arrow_key).
         self._set_align_ctx()
-        self.app.mark_dirty()
+        # COMMIT, not just mark_dirty: the moves live in self.wf until _commit
+        # writes them into project.workflow, and refresh() (a tab switch, a
+        # status refresh) rebuilds self.wf from there — so an uncommitted
+        # alignment silently reverted. It also puts the align in the undo stack.
+        self._commit()
         self._redraw()
         return "break"
 
@@ -1944,8 +1948,8 @@ class WorkflowTab(ttk.Frame):
         # ...and distribute horizontally with even gaps so nothing overlaps;
         # arrow keys then fine-tune the spacing (see _arrow_key).
         self._set_align_ctx()
-        self._distribute("x")
-        self.app.mark_dirty()
+        self._distribute("x")     # commits the straighten + distribute together
+        self._commit()
         self._redraw()
         return "break"
 
@@ -1978,7 +1982,7 @@ class WorkflowTab(ttk.Frame):
             for n in nodes:
                 n.y = y
                 y += self._node_height(n) + gap
-        self.app.mark_dirty()
+        self._commit()
         self._redraw()
 
     def _arrow_key(self, direction):

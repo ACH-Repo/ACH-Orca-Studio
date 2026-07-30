@@ -526,9 +526,13 @@ class RecipesTab(ttk.Frame):
         self._materialise(copy)
 
     def _materialise(self, recipe):
-        """Save a brand-new recipe to disk immediately, reload, and select it."""
+        """Save a brand-new recipe to disk immediately, reload, and select it.
+        Asks WHERE the first time (see _choose_new_recipe_dir)."""
+        target = self._choose_new_recipe_dir()
+        if target is None:
+            return                                   # cancelled
         try:
-            inputs_mod.save_recipe(recipe, self.app.recipe_dir)  # source_path None → new file
+            inputs_mod.save_recipe(recipe, target)   # source_path None → new file
         except Exception as e:
             messagebox.showerror("Could not create recipe", str(e))
             return
@@ -540,6 +544,50 @@ class RecipesTab(ttk.Frame):
         if r is not None:
             self._load_into_editor(r)
         self._set_status("created", "#1a7a1a")
+
+    def _choose_new_recipe_dir(self):
+        """Where should a NEW recipe be written? Returns a directory, or None if
+        the user cancelled.
+
+        The built-in library lives INSIDE the installed package, so a recipe saved
+        there is lost (or silently left behind as an orphan) the next time the app
+        is reinstalled or updated — which is exactly what happens on the cluster
+        with `pip install --force-reinstall`. So the first time you create a
+        recipe, pick a folder of your own; the choice is remembered in the user
+        config (Settings-level, never in a project file) and never asked again
+        unless that folder disappears."""
+        from orca_workbench.core import config as config_mod
+        remembered = config_mod.get("new_recipe_dir", "") or ""
+        if remembered and os.path.isdir(remembered):
+            # Register it in THIS project too — the preference is per user, so a
+            # different project would otherwise save the recipe into a folder it
+            # doesn't load, and the new recipe would never appear in the list.
+            self._ensure_recipe_dir_registered(remembered)
+            return remembered
+        dlg = _NewRecipeLocationDialog(self, self.app)
+        if dlg.result is None:
+            return None
+        path, remember = dlg.result
+        if remember:
+            config_mod.set_value("new_recipe_dir", path)
+        # A folder outside the project's recipe list would save the file where the
+        # tab can't see it — register it so the new recipe actually shows up.
+        self._ensure_recipe_dir_registered(path)
+        return path
+
+    def _ensure_recipe_dir_registered(self, path):
+        from orca_workbench.ui.app import DEFAULT_RECIPE_SENTINEL
+        try:
+            dirs = list(self.app.project.recipe_dirs) or [DEFAULT_RECIPE_SENTINEL]
+            if any(self.app._resolve_recipe_dir(d) == path for d in dirs):
+                return
+            dirs.append(path)
+            self.app.project.recipe_dirs = dirs
+            self.app.mark_dirty()
+            self.app.reload_recipes()
+            self.app.set_status("Recipe folder added to this project: {}".format(path))
+        except Exception:
+            pass
 
     def _unique_name(self, base):
         existing = {r.name for r in self.app.recipes}
@@ -593,6 +641,74 @@ class RecipesTab(ttk.Frame):
         extprog.open_with(self, "text_editor_path", r.source_path,
                           "text editor", _EDITOR_DESC)
         self._set_status("opened in editor — Reload library to pick up external edits", "#666")
+
+
+class _NewRecipeLocationDialog(tk.Toplevel):
+    """Asked once: where do new recipes go — the built-in library, an existing
+    recipe folder of this project, or a new folder of your own?
+
+    Recipes are JSON, and the app is the thing that gets the JSON right, so
+    creating them here (rather than hand-editing files) is the intended path. What
+    the app must NOT do is put them somewhere a reinstall wipes."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent.winfo_toplevel())
+        from orca_workbench.ui.app import DEFAULT_RECIPE_SENTINEL
+        self.result = None
+        self.app = app
+        self.title("Where should new recipes be saved?")
+
+        ttk.Label(self, text="Where should new recipes be saved?",
+                  font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=14, pady=(12, 2))
+        ttk.Label(self, wraplength=520, justify=tk.LEFT, foreground="#444",
+                  text="The built-in library lives inside the installed package. A recipe "
+                       "saved there is lost when the app is updated or reinstalled — on the "
+                       "cluster, 'pip install --force-reinstall' does exactly that. A folder "
+                       "of your own keeps your recipes safe and lets you carry them between "
+                       "machines.").pack(anchor=tk.W, padx=14, pady=(0, 8))
+
+        builtin = app._resolve_recipe_dir(DEFAULT_RECIPE_SENTINEL)
+        options = []          # (label, path)
+        for d in (list(app.project.recipe_dirs) or [DEFAULT_RECIPE_SENTINEL]):
+            p = app._resolve_recipe_dir(d)
+            if not p:
+                continue
+            if p == builtin:
+                options.append(("Built-in library (not update-safe)\n    " + p, p))
+            else:
+                options.append(("This project's recipe folder\n    " + p, p))
+        self._choice = tk.StringVar(value=options[-1][1] if options else builtin)
+        for label, path in options:
+            ttk.Radiobutton(self, text=label, value=path, variable=self._choice,
+                            takefocus=True).pack(anchor=tk.W, padx=22, pady=1)
+        ttk.Radiobutton(self, text="A folder I choose...", value="__browse__",
+                        variable=self._choice).pack(anchor=tk.W, padx=22, pady=1)
+        if len(options) == 1 and options[0][1] == builtin:
+            self._choice.set("__browse__")     # only the unsafe one exists: nudge
+
+        self._remember = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self, variable=self._remember,
+                        text="Remember this for new recipes (change it any time in "
+                             "Recipes > Add folder)").pack(anchor=tk.W, padx=18, pady=(8, 2))
+
+        bar = ttk.Frame(self)
+        bar.pack(fill=tk.X, padx=14, pady=10)
+        ttk.Button(bar, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=3)
+        ttk.Button(bar, text="Save here", command=self._ok).pack(side=tk.RIGHT, padx=3)
+        self.bind("<Escape>", lambda e: self.destroy())
+        from orca_workbench.ui.modal import make_modal
+        make_modal(self, parent)
+        self.wait_window()
+
+    def _ok(self):
+        from tkinter import filedialog
+        path = self._choice.get()
+        if path == "__browse__":
+            path = filedialog.askdirectory(title="Folder for your recipes", parent=self)
+            if not path:
+                return
+        self.result = (path, bool(self._remember.get()))
+        self.destroy()
 
 
 def _fmt_created(iso):
