@@ -906,6 +906,118 @@ off the core path and gracefully degradable.
   also got wheel y-zoom about the cursor (log-aware on the gradient panel).
 
 ## Open work / TODO
+- **Let MoloM hand a `%geom` spec BACK - the return channel for the geometry
+  round trip.** Christian's design, 2026-09-06, worked out with the MoloM
+  side (see that repo's `docs/OPEN_ITEMS.md` Q14). His framing: "it only
+  makes sense that you click on something in OWB, molom opens and then you
+  get a GUI with which you can do the thing you wish to do."
+  **MOST OF THIS REPO'S HALF ALREADY EXISTS**, which is the useful finding.
+  `calc.geom_spec` is per-calculation state; `calculations_tab
+  ._edit_geom_spec` is already a right-click entry ("Geometry constraints /
+  scan (job input)... [describe]"); `GeomSpecDialog` is already the text
+  editor for people who do not use MoloM; `inputs.add_geom_block` already
+  injects it at build time, which is his "general recipes need to be
+  overwritten for particular mols"; it already refuses non-OPT recipes and
+  already tells the user to generate the XYZ first so the atom indices
+  exist. **And `GeomSpecDialog` already takes a `view_xyz` callback that
+  opens the reference geometry in the external 3D program** - so the
+  launch-MoloM button exists in skeleton form and merely opens MoloM
+  read-only.
+  **What is missing is one channel.** MoloM (round 106) can build the same
+  `%geom` text from a selection - byte for byte, pinned by a test that
+  imports `geomspec` and compares - and can only put it on the clipboard.
+  Nothing asks it for an answer.
+  The shape to copy is the geometry round trip's: **an environment variable
+  naming a file**. OWB sets e.g. `MOLOM_GEOMSPEC_FILE=<abs path>` when the
+  dialog's 3D button launches MoloM; MoloM writes the spec there as JSON in
+  THIS repo's own spec shape (not `%geom` text, so nothing has to be parsed
+  back); OWB reads it when the child exits and offers it as the calc's
+  `geom_spec`. A program that does not read the variable cannot be affected
+  by it, which is what makes it safe to set on every external-editor launch
+  - the same argument as `MOLOM_ROUNDTRIP_FILE`.
+  Note the button then wants a different label from the plain 3D view, since
+  it means "go and define this" rather than "go and look".
+
+- **DECIDE WHETHER `geomspec` SHOULD CARRY MORE THAN ONE SCAN.** Today it
+  carries exactly one (`"scan": {...} or None`, and the module docstring
+  says "ONE relaxed surface scan"). ORCA itself, as far as I know, runs a
+  MULTI-DIMENSIONAL relaxed surface scan as a nested loop over the grid of
+  two or three coordinates - which would make the current shape a
+  restriction rather than a reflection of the program. **Worth confirming
+  against the ORCA manual before changing anything**, because MoloM
+  reproduces this repo's text byte for byte and a list here means a list
+  there. Christian raised it from the MoloM side: "If two scans, say bond
+  elongation and dihedral rotation, are on the same mol in orca, orca will
+  generate an NxM matrix of starting geometries that will be optimised under
+  the given constraints from both scans, right?"
+  If the answer is yes, this repo decides the shape FIRST and MoloM follows.
+  Note MoloM will still only ANIMATE one at a time, deliberately: a
+  two-coordinate scan is a surface rather than a path, so previewing it
+  would mean choosing an arbitrary route through the grid.
+
+- **Let a molecule be opened in the 3D editor with NO geometry yet.** Christian,
+  2026-09-03, testing the MoloM round trip: "Cannot launch molom on an empty new
+  mol. Asks to generate geometry first. I think OWB should allow to create mols
+  from scratch on an empty mol entry." Right, and it is a small change: MoloM
+  opens on an empty scene perfectly well and has a full drawing mode (Tab, the
+  periodic table, the draw tool), so the geometry can be BUILT there and come
+  back on the round trip. Today the editor slot is gated behind having
+  coordinates, which is exactly backwards for the case where you have none.
+  The launch is the same `[program, file.xyz]`; what changes is writing a valid
+  EMPTY xyz ("0
+
+", or a single placeholder atom) and not refusing the click.
+  Note `coords_locked` should NOT be set for such a launch - the whole point is
+  that the geometry that comes back is new.
+- **Ask for the MoloM round trip through the ENVIRONMENT, not the argv.**
+  Raised 2026-09-03 with the MoloM side, where the behaviour has already
+  changed. MoloM no longer treats "opened with a file argument" as a round
+  trip: `molom some.xyz` just imports it, Ctrl+S saves a `.molom` project, and
+  writing the geometry back out is a separate export. That was Christian's
+  design decision ("round trips that automatically overwrite geometry should
+  only activate if molom is used as an external editor launched from OWB").
+  So OWB has to say so explicitly, and the safe channel is an environment
+  variable rather than a flag:
+
+      MOLOM_ROUNDTRIP_FILE=<absolute path of the file being handed over>
+
+  set in the child process's environment when launching the editor slot. A
+  FLAG cannot be used here: OWB launches whatever program the user put in the
+  slot as `[program, file]`, and whether Avogadro or molden tolerates an
+  unknown argument, exits non-zero, or treats it as a filename is not
+  consistent and is not something OWB can know. **A program that does not read
+  an environment variable cannot be affected by one**, so this can be set on
+  EVERY editor launch and only MoloM will notice - including after the user
+  repoints the slot at something else. It carries the PATH rather than a bare
+  "1" so that a variable left in a shell cannot arm a write-back for some
+  unrelated file opened later. (`molom --roundtrip <file>` exists too, for
+  driving it by hand.)
+- **Show that MoloM is STARTING after "Open in 3D".** Christian, 2026-08-27:
+  "on first launch MoloM is kinda slow and there is no indication after double
+  click that something is even happening. I think there should be a visual
+  indicator that the mol entry is being opened. Maybe an indeterminate loading
+  bar in the lower left or something?" MEASURED on his machine: MoloM's cold
+  start is ~2.35 s, and almost all of it is Qt building its first window
+  (926 ms) plus the first paint (595 ms) - i.e. it is not something MoloM can
+  shrink much, so the fix belongs HERE, in the launcher. An indeterminate
+  progress line in the status area from `QProcess.started` until the window
+  appears (or simply for a couple of seconds) is enough; the point is that a
+  double-click currently looks like nothing happened.
+- **Table headers should auto-fit on a double-click of the border between two
+  column headers**, the way Excel does - Christian, 2026-08-27, about the
+  calculation tables specifically but wanted for any table in the app. Qt gives
+  this almost for free: `QHeaderView.setSectionResizeMode(Interactive)` plus
+  `sectionHandleDoubleClicked` -> `resizeColumnToContents(index)`. Worth doing
+  once in a shared helper and applying to every table rather than per tab.
+- **Take the SMILES back from MoloM on a round trip** (raised 2026-08-27 with
+  the MoloM side). MoloM can derive a SMILES from the drawn graph
+  (`io.structure_to_smiles`), so after "adjust the geometry, then Save" it can
+  write the updated SMILES alongside the coordinates - which is what would let
+  OWB refresh its skeletal depiction instead of keeping the one from before
+  the edit. MoloM writes it on the .xyz COMMENT line (plain text, round 76);
+  OWB's `core/coords.py` reader currently ignores that line, so the work here
+  is to read it and, when it parses, update the molecule's stored SMILES
+  WITHOUT clobbering `coords_locked`.
 - `--execute_project` now expands the Workflow graph AND materialises Transform/Combine
   geometries headlessly (see `core/workflow_expand.py`) — the old `--expand_and_execute` gap is
   closed. Remaining headless gaps: (1) no live monitoring (reopen in the GUI to watch/harvest);
