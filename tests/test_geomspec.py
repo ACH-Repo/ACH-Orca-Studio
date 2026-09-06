@@ -193,3 +193,69 @@ def test_validate_expressions_with_geometry():
     bad = {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
            "start": "B(0,9)", "end": "2.0", "steps": 10}}
     assert G.validate(bad, n_atoms=3, atoms=_WATER)
+
+
+# ---------------------------------------------------------------- multi-scan
+def test_SEVERAL_scans_are_allowed_because_ORCA_ALLOWS_THEM():
+    """Measured against ORCA 6.0.1: two `Scan` lines gave a 3 x 3 = 9-point
+    relaxed surface scan, with the FIRST line the outer loop and one column
+    per coordinate in the surface table. Christian: "can you just make OWB
+    allow multiple scans because the entire point of it is being a GUI for
+    orca?\""""
+    spec = {"constraints": [{"type": "A", "atoms": [0, 1, 2]}],
+            "scans": [{"type": "B", "atoms": [0, 1], "start": 1.5,
+                       "end": 1.6, "steps": 3},
+                      {"type": "D", "atoms": [0, 1, 2, 3], "start": -180,
+                       "end": -120, "steps": 3}]}
+    inner = G.build_geom_inner(spec)
+    assert inner.count("  Scan") == 1, "one Scan block holding both"
+    lines = [ln.strip() for ln in inner.splitlines()]
+    assert lines.index("B 0 1 = 1.5, 1.6, 3") < \
+        lines.index("D 0 1 2 3 = -180, -120, 3"), "declaration order is kept"
+    assert G.validate(spec, n_atoms=14) == []
+    assert "9 grid points" in G.describe(spec)
+
+
+def test_a_spec_saved_BEFORE_multi_scan_still_reads():
+    """`scans_of` is the one place that knows about the two shapes."""
+    old = {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
+                                       "start": 1.5, "end": 3.0, "steps": 10}}
+    assert len(G.scans_of(old)) == 1
+    assert not G.is_empty(old)
+    assert "B 0 1 = 1.5, 3, 10" in G.build_geom_inner(old)
+    assert G.validate(old, n_atoms=5) == []
+    # ...and `with_scans` writes only the canonical key
+    fresh = G.with_scans(old, G.scans_of(old))
+    assert "scan" not in fresh and len(fresh["scans"]) == 1
+
+
+def test_one_coordinate_cannot_be_scanned_twice_or_frozen_and_scanned():
+    """Neither is a richer request. Scanning a coordinate twice would ask the
+    inner loop to hold the value the outer loop just set, and freezing what
+    is scanned is a flat contradiction."""
+    twice = {"constraints": [],
+             "scans": [{"type": "B", "atoms": [0, 1], "start": 1, "end": 2,
+                        "steps": 3},
+                       {"type": "B", "atoms": [0, 1], "start": 1, "end": 3,
+                        "steps": 4}]}
+    assert any("already being scanned" in e
+               for e in G.validate(twice, n_atoms=5))
+    clash = {"constraints": [{"type": "B", "atoms": [0, 1]}],
+             "scans": [{"type": "B", "atoms": [0, 1], "start": 1, "end": 2,
+                        "steps": 3}]}
+    assert any("also constrained" in e for e in G.validate(clash, n_atoms=5))
+
+
+def test_an_expression_resolves_per_scan():
+    """`current` means THIS scan's own coordinate, so two scans resolve it
+    to two different numbers."""
+    atoms = [("C", 0.0, 0.0, 0.0), ("C", 1.5, 0.0, 0.0),
+             ("C", 1.5, 1.2, 0.0), ("C", 3.0, 1.2, 0.0)]
+    spec = {"constraints": [],
+            "scans": [{"type": "B", "atoms": [0, 1], "start": "current",
+                       "end": "current + 0.5", "steps": 3},
+                      {"type": "B", "atoms": [1, 2], "start": "current",
+                       "end": "current + 0.5", "steps": 3}]}
+    inner = G.build_geom_inner(spec, atoms)
+    assert "B 0 1 = 1.5, 2, 3" in inner
+    assert "B 1 2 = 1.2, 1.7, 3" in inner

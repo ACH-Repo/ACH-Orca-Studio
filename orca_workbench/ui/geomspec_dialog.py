@@ -42,17 +42,22 @@ def _parse_atoms(text):
 
 class GeomSpecDialog(tk.Toplevel):
     def __init__(self, parent, atoms, spec, on_save,
-                 title="Geometry constraints / scan", view_xyz=None):
-        # type: (tk.Misc, list, dict, callable, str, callable) -> None
+                 title="Geometry constraints / scan", view_xyz=None,
+                 define_in_molom=None):
+        # type: (tk.Misc, list, dict, callable, str, callable, callable) -> None
         super().__init__(parent)
         self.title(title)
         self._atoms = atoms or []
         self._on_save = on_save
         self._view_xyz = view_xyz   # optional: opens the reference geometry in 3D
+        # Optional: `f(on_spec)` launches MoloM with a request and calls back
+        # with the spec it sends. Offered only when the configured 3D editor
+        # IS MoloM - see core.molom_link.looks_like_molom.
+        self._define_in_molom = define_in_molom
         self._rows = []   # [{frame, type_var, atoms_var, value_var}]
 
         ttk.Label(self, text=(
-            "Freeze coordinates and/or run ONE relaxed surface scan for this optimisation. "
+            "Freeze coordinates and/or run relaxed surface scans for this optimisation. "
             "Atom indices are 0-based (see the list). A blank constraint value freezes the "
             "current value. Needs an OPT recipe (`! Opt`).\n"
             "Values may be a number OR an expression measured from the input geometry: "
@@ -76,6 +81,25 @@ class GeomSpecDialog(tk.Toplevel):
         fit_to_content(self)
         make_modal(self, parent)
 
+    def _launch_molom(self):
+        """Hand the question to MoloM and load whatever it sends back.
+
+        The reply REPLACES what is in the dialog rather than merging with it:
+        MoloM was shown this same spec and the user has been editing it
+        there, so its answer is the newer one - and merging two lists of
+        constraints on the same coordinates would produce a contradiction
+        neither program asked for.
+        """
+        if self._define_in_molom is None:
+            return
+
+        def _loaded(spec):
+            if not self.winfo_exists():
+                return
+            self._load(spec)
+
+        self._define_in_molom(_loaded)
+
     # ---- atom reference -------------------------------------------------
 
     def _build_atom_reference(self):
@@ -88,6 +112,14 @@ class GeomSpecDialog(tk.Toplevel):
                        command=self._view_xyz).pack(side=tk.LEFT)
             ttk.Label(bar, text="opens the reference molecule so you can read off atom "
                       "indices", foreground="#888").pack(side=tk.LEFT, padx=6)
+        if self._define_in_molom is not None:
+            bar2 = ttk.Frame(frame)
+            bar2.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 0))
+            ttk.Button(bar2, text="Define in MoloM...",
+                       command=self._launch_molom).pack(side=tk.LEFT)
+            ttk.Label(bar2, text="pick the atoms there and press 'Send to ORCA "
+                      "Workbench' - this dialog fills in",
+                      foreground="#888").pack(side=tk.LEFT, padx=6)
         cols = ("idx", "el", "x", "y", "z")
         tv = ttk.Treeview(frame, columns=cols, show="headings", height=min(7, max(3, len(self._atoms))))
         for c, w in (("idx", 50), ("el", 50), ("x", 90), ("y", 90), ("z", 90)):
@@ -152,55 +184,115 @@ class GeomSpecDialog(tk.Toplevel):
         except (AttributeError, tk.TclError):
             pass
 
-    # ---- scan -----------------------------------------------------------
+    # ---- scans ----------------------------------------------------------
 
     def _build_scan(self):
-        outer = ttk.LabelFrame(self, text="Relaxed surface scan (optional)")
+        """A LIST of scans, mirroring the constraints above.
+
+        ORCA runs several: two `Scan` lines were measured as a 3 x 3 grid on
+        ORCA 6.0.1, with the FIRST line the outer loop. A single-scan editor
+        would have been a GUI more restrictive than the program it drives -
+        Christian: "the entire point of it is being a GUI for orca".
+        """
+        outer = ttk.LabelFrame(self, text="Relaxed surface scans (optional)")
         outer.pack(side=tk.TOP, fill=tk.X, padx=12, pady=4)
-        self._scan_on = tk.BooleanVar(value=False)
-        ttk.Checkbutton(outer, text="Scan one coordinate", variable=self._scan_on,
-                        command=self._sync_scan).pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(2, 0))
-        row = ttk.Frame(outer)
-        row.pack(side=tk.TOP, fill=tk.X, padx=4, pady=4)
-        self._scan_type = tk.StringVar(value=_SCAN_CHOICES[0])
-        self._scan_type_cb = ttk.Combobox(row, textvariable=self._scan_type, values=_SCAN_CHOICES,
-                                          state="readonly", width=12)
-        self._scan_type_cb.pack(side=tk.LEFT)
-        self._scan_atoms = tk.StringVar()
-        ttk.Label(row, text="atoms:").pack(side=tk.LEFT, padx=(8, 2))
-        self._scan_atoms_e = ttk.Entry(row, textvariable=self._scan_atoms, width=12)
-        self._scan_atoms_e.pack(side=tk.LEFT)
-        ttk.Label(row, text="from").pack(side=tk.LEFT, padx=(8, 2))
-        self._scan_start = tk.StringVar()
-        self._scan_start_e = ttk.Entry(row, textvariable=self._scan_start, width=7)
-        self._scan_start_e.pack(side=tk.LEFT)
-        ttk.Label(row, text="to").pack(side=tk.LEFT, padx=2)
-        self._scan_end = tk.StringVar()
-        self._scan_end_e = ttk.Entry(row, textvariable=self._scan_end, width=7)
-        self._scan_end_e.pack(side=tk.LEFT)
-        ttk.Label(row, text="steps").pack(side=tk.LEFT, padx=(8, 2))
-        self._scan_steps = tk.StringVar(value="10")
-        self._scan_steps_e = ttk.Entry(row, textvariable=self._scan_steps, width=5)
-        self._scan_steps_e.pack(side=tk.LEFT)
-        ttk.Label(outer, text="Distances in Å, angles/dihedrals in degrees. from/to accept "
-                  "expressions, e.g. from=current, to=current+1.5 (elongate the bond by 1.5 Å).",
+        self._scan_frame = ttk.Frame(outer)
+        self._scan_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
+        self._scan_rows = []
+        self._scan_empty = ttk.Label(
+            outer, text="No scan \u2014 click + Add scan to walk a coordinate "
+            "while everything else relaxes.", foreground="#888")
+        self._scan_empty.pack(side=tk.TOP, anchor=tk.W, padx=6, pady=(0, 2))
+        ttk.Button(outer, text="+ Add scan", command=self._add_scan).pack(
+            side=tk.TOP, anchor=tk.W, padx=4, pady=(2, 4))
+        self._scan_note = ttk.Label(
+            outer, text="", foreground="#666", wraplength=560,
+            justify=tk.LEFT)
+        self._scan_note.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 2))
+        ttk.Label(outer, text="Distances in \u00c5, angles/dihedrals in degrees. "
+                  "'points' is how many GEOMETRIES ORCA runs, not how many "
+                  "intervals - `-180, -60, 4` gives -180, -140, -100, -60. "
+                  "from/to accept expressions, e.g. from=current, "
+                  "to=current+1.5 (elongate the bond by 1.5 \u00c5).",
                   foreground="#666", wraplength=560, justify=tk.LEFT).pack(
                       side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 4))
-        self._scan_widgets = [self._scan_type_cb, self._scan_atoms_e, self._scan_start_e,
-                              self._scan_end_e, self._scan_steps_e]
+
+    def _add_scan(self, ctype="B", atoms="", start="", end="", steps=10):
+        row = ttk.Frame(self._scan_frame)
+        row.pack(side=tk.TOP, fill=tk.X, pady=1)
+        type_var = tk.StringVar(value=_scan_choice_for(ctype))
+        cb = ttk.Combobox(row, textvariable=type_var, values=_SCAN_CHOICES,
+                          state="readonly", width=12)
+        cb.pack(side=tk.LEFT)
+        atoms_var = tk.StringVar(value=atoms)
+        ttk.Label(row, text="atoms:").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Entry(row, textvariable=atoms_var, width=12).pack(side=tk.LEFT)
+        start_var = tk.StringVar(value=str(start))
+        ttk.Label(row, text="from").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Entry(row, textvariable=start_var, width=7).pack(side=tk.LEFT)
+        end_var = tk.StringVar(value=str(end))
+        ttk.Label(row, text="to").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=end_var, width=7).pack(side=tk.LEFT)
+        steps_var = tk.StringVar(value=str(steps))
+        ttk.Label(row, text="points").pack(side=tk.LEFT, padx=(8, 2))
+        e = ttk.Entry(row, textvariable=steps_var, width=5)
+        e.pack(side=tk.LEFT)
+        steps_var.trace_add("write", lambda *_a: self._sync_scan_note())
+        rec = {"frame": row, "type_var": type_var, "atoms_var": atoms_var,
+               "start_var": start_var, "end_var": end_var,
+               "steps_var": steps_var}
+        ttk.Button(row, text="X", width=3,
+                   command=lambda r=rec: self._del_scan(r)).pack(side=tk.LEFT,
+                                                                 padx=4)
+        self._scan_rows.append(rec)
+        self._sync_scan()
+
+    def _del_scan(self, rec):
+        rec["frame"].destroy()
+        self._scan_rows = [r for r in self._scan_rows if r is not rec]
+        self._sync_scan()
 
     def _sync_scan(self):
-        state = tk.NORMAL if self._scan_on.get() else tk.DISABLED
-        for w in self._scan_widgets:
+        try:
+            if self._scan_rows:
+                self._scan_empty.pack_forget()
+            else:
+                self._scan_empty.pack(side=tk.TOP, anchor=tk.W, padx=6,
+                                      pady=(0, 2))
+        except (AttributeError, tk.TclError):
+            pass
+        self._sync_scan_note()
+
+    def _sync_scan_note(self):
+        """Say what the GRID costs, because it multiplies.
+
+        ORCA runs every combination, so two 10-point scans is a hundred
+        optimisations and not twenty - which is the one thing about a
+        multi-dimensional scan that surprises people.
+        """
+        if len(self._scan_rows) < 2:
             try:
-                w.configure(state="readonly" if (state == tk.NORMAL and w is self._scan_type_cb)
-                            else state)
-            except tk.TclError:
+                self._scan_note.configure(text="")
+            except (AttributeError, tk.TclError):
                 pass
+            return
+        total = 1
+        for r in self._scan_rows:
+            total *= max(1, _int(r["steps_var"].get()) or 1)
+        try:
+            self._scan_note.configure(
+                text="ORCA runs the full grid: {} optimisations. The FIRST "
+                     "scan is the outer loop.".format(total))
+        except (AttributeError, tk.TclError):
+            pass
 
     # ---- load / collect / save -----------------------------------------
 
     def _load(self, spec):
+        # CLEARED FIRST. `_load` is not only the constructor's - MoloM's
+        # reply comes back through it - and appending to what is on screen
+        # would double every row the second time.
+        self._clear_all()
         spec = spec or {}
         for c in (spec.get("constraints") or []):
             self._add_row(c.get("type", "B"),
@@ -209,23 +301,18 @@ class GeomSpecDialog(tk.Toplevel):
         # No auto-blank row: an empty spec shows the "No constraints" hint instead
         # of an inert default bond constraint.
         self._sync_cons_empty()
-        s = spec.get("scan")
-        if s:
-            self._scan_on.set(True)
-            self._scan_type.set(_scan_choice_for(s.get("type", "B")))
-            self._scan_atoms.set(" ".join(str(a) for a in (s.get("atoms") or [])))
-            self._scan_start.set(str(s.get("start", "")))
-            self._scan_end.set(str(s.get("end", "")))
-            self._scan_steps.set(str(s.get("steps", 10)))
+        for s in G.scans_of(spec):
+            self._add_scan(s.get("type", "B"),
+                           " ".join(str(a) for a in (s.get("atoms") or [])),
+                           s.get("start", ""), s.get("end", ""),
+                           s.get("steps", 10))
         self._sync_scan()
 
     def _clear_all(self):
         for r in list(self._rows):
             self._del_row(r)
-        self._scan_on.set(False)
-        for v in (self._scan_atoms, self._scan_start, self._scan_end):
-            v.set("")
-        self._scan_steps.set("10")
+        for r in list(self._scan_rows):
+            self._del_scan(r)
         self._sync_scan()
 
     def _collect(self):
@@ -240,14 +327,17 @@ class GeomSpecDialog(tk.Toplevel):
             if ctype != "C" and v != "":
                 c["value"] = float(v) if _isnum(v) else v
             cons.append(c)
-        scan = None
-        if self._scan_on.get():
-            scan = {"type": _letter(self._scan_type.get()),
-                    "atoms": _parse_atoms(self._scan_atoms.get()),
-                    "start": _num(self._scan_start.get()),
-                    "end": _num(self._scan_end.get()),
-                    "steps": _int(self._scan_steps.get())}
-        return {"constraints": cons, "scan": scan}
+        scans = []
+        for r in self._scan_rows:
+            atoms = _parse_atoms(r["atoms_var"].get())
+            if not atoms:
+                continue                      # skip blank rows, as above
+            scans.append({"type": _letter(r["type_var"].get()),
+                          "atoms": atoms,
+                          "start": _num(r["start_var"].get()),
+                          "end": _num(r["end_var"].get()),
+                          "steps": _int(r["steps_var"].get())})
+        return {"constraints": cons, "scans": scans}
 
     def _save(self):
         spec = self._collect()

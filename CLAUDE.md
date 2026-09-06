@@ -906,8 +906,29 @@ off the core path and gracefully degradable.
   also got wheel y-zoom about the cursor (log-aware on the gradient panel).
 
 ## Open work / TODO
-- **Let MoloM hand a `%geom` spec BACK - the return channel for the geometry
-  round trip.** Christian's design, 2026-09-06, worked out with the MoloM
+- ~~**Let MoloM hand a `%geom` spec BACK.**~~ **DONE** (2026-09-06, with the
+  MoloM side). `core/molom_link.py` is the channel: `MOLOM_GEOMSPEC_FILE`
+  names a file, `launch_env` puts it in a COPY of the environment (never the
+  live one - the variable is a question asked of ONE launch),
+  `molecules_tab.define_geom_in_molom` launches and POLLS with `after()`
+  rather than blocking Tk's one loop, and `GeomSpecDialog` grows a "Define in
+  MoloM..." button that is offered only when the configured 3D editor IS
+  MoloM (`looks_like_molom`, by executable name - wrong in the harmless
+  direction either way). The reply REPLACES the dialog's contents rather than
+  merging, because MoloM was shown the same spec and its answer is the newer
+  one. Verified end to end with real processes, and then by running the
+  result: ORCA 6.0.1 accepted the injected block and ran the scan to
+  convergence.
+  **AND IT SETTLED A NUMBER**: a scan's third argument is a POINT COUNT, not
+  a number of intervals. `D 0 1 2 3 = -180, -60, 4` gave four geometries at
+  -180, -140, -100 and -60, and `= -180, -60, 6` gave six at 24 degrees. This
+  repo's `scan_line` is unaffected - it writes what it is given - but
+  anything that DESCRIBES or plots a scan's sampling should use
+  `(end - start) / (N - 1)`. MoloM's own preview had it wrong and now does
+  not.
+  The original entry, kept for the reasoning:
+- **~~Let MoloM hand a `%geom` spec BACK~~ - the return channel for the
+  geometry round trip.** Christian's design, 2026-09-06, worked out with the MoloM
   side (see that repo's `docs/OPEN_ITEMS.md` Q14). His framing: "it only
   makes sense that you click on something in OWB, molom opens and then you
   get a GUI with which you can do the thing you wish to do."
@@ -938,7 +959,30 @@ off the core path and gracefully degradable.
   Note the button then wants a different label from the plain 3D view, since
   it means "go and define this" rather than "go and look".
 
-- **DECIDE WHETHER `geomspec` SHOULD CARRY MORE THAN ONE SCAN.** Today it
+- ~~**DECIDE WHETHER `geomspec` SHOULD CARRY MORE THAN ONE SCAN.**~~ **DONE**
+  (2026-09-06). Christian settled it in one line - "can you just make OWB
+  allow multiple scans because the entire point of it is being a GUI for
+  orca?" - and the restriction was ours, not ORCA's. **Checked before the
+  data model was touched**: two `Scan` lines on ORCA 6.0.1 ran as a
+  **3 x 3 = 9-point grid**, and the surface table carries one column per
+  coordinate in declaration order, so the FIRST line is the outer loop and
+  the order of the list is meaningful rather than cosmetic.
+  `spec["scans"]` is a list; `scans_of` is the ONE place that knows about the
+  old `spec["scan"]`, so every existing project reads unchanged - and the
+  whole existing test suite, written in the old shape, passes untouched,
+  which is the compatibility proof. Only `scans` is written, so a project
+  saved here and opened in an older build loses the scan: a one-way version
+  step, noted rather than worked around.
+  `GeomSpecDialog`'s scan section is a ROW LIST now, mirroring the
+  constraints, and says what the grid costs - two 10-point scans is a hundred
+  optimisations, not twenty. **Two new refusals** come with it, both
+  contradictions rather than limits: one coordinate scanned twice (the inner
+  loop would hold what the outer loop just set), and a coordinate both frozen
+  and scanned. Neither was reachable while there could be only one.
+  MoloM follows byte for byte and still ANIMATES only the first - a grid is a
+  surface, not a path.
+  The original entry, kept for the reasoning:
+- **~~DECIDE WHETHER `geomspec` SHOULD CARRY MORE THAN ONE SCAN.~~** Today it
   carries exactly one (`"scan": {...} or None`, and the module docstring
   says "ONE relaxed surface scan"). ORCA itself, as far as I know, runs a
   MULTI-DIMENSIONAL relaxed surface scan as a nested loop over the grid of
