@@ -959,6 +959,27 @@ off the core path and gracefully degradable.
   Note the button then wants a different label from the plain 3D view, since
   it means "go and define this" rather than "go and look".
 
+- ~~**`geomspec.measure` HAS AN INVERTED DIHEDRAL SIGN.**~~ **FIXED
+  2026-09-07.** MoloM's round-106 cross-check found it and correctly left it
+  alone as another repository's code; it is fixed here now that the round
+  trip is being built in both at once. One cross product had its operands the
+  wrong way round, so every dihedral came back as its own negative - i.e.
+  describing the MIRROR IMAGE of the geometry in front of the user.
+  **Nothing failed**: a literal number typed into a value box passes through
+  `measure` untouched, so only `current` and `D(i,j,k,l)` EXPRESSIONS were
+  affected, and a scan starting from the enantiomeric conformation produces
+  an input file that reads perfectly plausibly.
+  Settled against a THIRD implementation rather than by argument - RDKit's
+  `GetDihedralDeg`, the IUPAC convention ORCA itself uses. Over 400 random
+  geometries RDKit and MoloM agreed every time and this line disagreed with
+  both by an exact sign; bonds and angles were exact throughout, which is
+  what scoped the fix to the `D` branch alone.
+  **All 463 tests passed BEFORE the fix as well**, which is the useful part:
+  the sign was never tested, because every existing case measured a value
+  typed by hand. The new test carries no number from anywhere - atoms 1 and 2
+  lie on +z so +z IS the axis, atom 0 sticks out along +x, atom 3 is atom 0
+  turned by phi about that axis, and the dihedral is phi by construction.
+
 - ~~**DECIDE WHETHER `geomspec` SHOULD CARRY MORE THAN ONE SCAN.**~~ **DONE**
   (2026-09-06). Christian settled it in one line - "can you just make OWB
   allow multiple scans because the entire point of it is being a GUI for

@@ -280,7 +280,17 @@ def measure(ctype, idxs, atoms):
     if ctype == "D":
         b1, b2, b3 = _vsub(pts[1], pts[0]), _vsub(pts[2], pts[1]), _vsub(pts[3], pts[2])
         n1, n2 = _vcross(b1, b2), _vcross(b2, b3)
-        m1 = _vcross(n1, _vunit(b2))
+        # The order of THIS cross product is the sign of the dihedral, and it
+        # was the wrong way round until 2026-09-06: every value came back as
+        # its own negative, i.e. describing the MIRROR IMAGE of the geometry
+        # in front of the user. Nothing failed - a `current` or `D(0,1,2,3)`
+        # in a scan simply started from the enantiomeric conformation and the
+        # input file read perfectly plausibly. Settled against a THIRD
+        # implementation rather than by argument: over 400 random geometries
+        # RDKit's `GetDihedralDeg` (the IUPAC convention ORCA itself uses)
+        # and MoloM's `measure.dihedral` agree with each other every time,
+        # and this line disagreed with both by an exact sign.
+        m1 = _vcross(_vunit(b2), n1)
         return math.degrees(math.atan2(_vdot(m1, n2), _vdot(n1, n2)))
     raise ValueError("cannot measure coordinate type {!r}".format(ctype))
 

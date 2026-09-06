@@ -7,6 +7,8 @@ coordinate->energy surface).
 Run:  python -m pytest tests/test_geomspec.py -q
 """
 
+import math
+
 from orca_workbench.core import geomspec as G
 from orca_workbench.core import inputs as I
 from orca_workbench.core import orca_parser as P
@@ -259,3 +261,53 @@ def test_an_expression_resolves_per_scan():
     inner = G.build_geom_inner(spec, atoms)
     assert "B 0 1 = 1.5, 2, 3" in inner
     assert "B 1 2 = 1.2, 1.7, 3" in inner
+
+
+def test_the_dihedral_SIGN_is_the_IUPAC_one():
+    """A dihedral of the wrong sign describes the MIRROR IMAGE.
+
+    This was wrong until 2026-09-06 and nothing caught it, because nothing
+    here measured a dihedral whose sign was KNOWN - every test used a value
+    typed by hand, which passes through unchanged. A `current` or a
+    `D(0,1,2,3)` in a scan therefore started from the enantiomeric
+    conformation, and the generated input file read perfectly plausibly.
+
+    The geometry states its own answer rather than carrying a number from
+    somewhere: atoms 1 and 2 lie on +z, so +z IS the b2 axis; atom 0 sticks
+    out along +x; atom 3 is atom 0's direction turned by phi about that axis.
+    The dihedral is then phi by construction, for a right-handed convention.
+    Cross-checked against RDKit's `GetDihedralDeg` (which is what ORCA uses)
+    over 400 random geometries at the time of the fix - RDKit is not a
+    dependency here, which is exactly why the fixture has to be self-evident.
+    """
+    def geometry(phi):
+        r = math.radians(phi)
+        return [("C", 1.0, 0.0, 0.0), ("C", 0.0, 0.0, 0.0),
+                ("C", 0.0, 0.0, 1.5),
+                ("C", math.cos(r), math.sin(r), 1.5)]
+
+    for phi in (60.0, 90.0, 120.0, 180.0, -60.0, -90.0, -150.0):
+        got = G.measure("D", [0, 1, 2, 3], geometry(phi))
+        assert abs((got - phi + 180.0) % 360.0 - 180.0) < 1e-9, \
+            "turning by {:+} came back as {:+}".format(phi, got)
+
+    # ...and it reaches the two places a user meets it
+    atoms = geometry(75.0)
+    spec = {"constraints": [],
+            "scans": [{"type": "D", "atoms": [0, 1, 2, 3],
+                       "start": "current", "end": "current + 30", "steps": 3}]}
+    inner = G.build_geom_inner(spec, atoms=atoms)
+    assert "= 75, 105, 3" in inner, inner
+    assert abs(G.eval_value("D(0,1,2,3)", atoms, None) - 75.0) < 1e-9
+    assert abs(G.eval_value("current", atoms,
+                            ("D", [0, 1, 2, 3])) - 75.0) < 1e-9
+
+
+def test_bonds_and_angles_were_never_in_doubt():
+    """Scoped deliberately: the sign fix touched the D branch alone, and a
+    length and an unsigned angle cannot have a sign to get wrong."""
+    atoms = [("C", 0.0, 0.0, 0.0), ("C", 1.5, 0.0, 0.0), ("C", 1.5, 2.0, 0.0)]
+    assert abs(G.measure("B", [0, 1], atoms) - 1.5) < 1e-12
+    assert abs(G.measure("B", [1, 0], atoms) - 1.5) < 1e-12
+    assert abs(G.measure("A", [0, 1, 2], atoms) - 90.0) < 1e-12
+    assert abs(G.measure("A", [2, 1, 0], atoms) - 90.0) < 1e-12
