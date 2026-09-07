@@ -959,6 +959,21 @@ off the core path and gracefully degradable.
   Note the button then wants a different label from the plain 3D view, since
   it means "go and define this" rather than "go and look".
 
+- ~~**A CARTESIAN FREEZE OVER SEVERAL ATOMS WROTE SYNTAX ORCA REJECTS.**~~
+  **FIXED 2026-09-07.** `{ C 0 1 2 3 6 C }` is what `constraint_line`
+  produced for a multi-atom freeze, and ORCA 6.0.1 answers "Error - Expecting
+  C(onstraint) in ScanConstraints" - as it does for the comma form. What it
+  DOES take is one atom or a **contiguous range**, `{ C 0:3 C }`, which holds
+  every atom in it to 0.000000 A and mixes freely with single-atom lines
+  (measured, both ways). So a set of atoms is written as several lines with
+  consecutive runs collapsed (`cartesian_runs`), which is also what makes
+  freezing a phenyl ring read as one line rather than six.
+  `validate` no longer demands exactly one atom for `C` either - it is a
+  freeze of POSITIONS, so any number is meaningful; only an empty selection
+  is refused. Latent rather than reported, because nothing here could produce
+  a multi-atom freeze until MoloM grew one; the two are pinned to identical
+  text, so it had to be fixed in both.
+
 - ~~**`geomspec.measure` HAS AN INVERTED DIHEDRAL SIGN.**~~ **FIXED
   2026-09-07.** MoloM's round-106 cross-check found it and correctly left it
   alone as another repository's code; it is fixed here now that the round

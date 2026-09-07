@@ -191,7 +191,13 @@ def _check_coord(where, c, n_atoms):
         return errs
     need = n_atoms_for(ctype)
     atoms = _atoms(c)
-    if len(atoms) != need:
+    # `C` is the exception: it freezes POSITIONS, so any number of them is
+    # meaningful and several become several lines. Every other type names an
+    # internal coordinate with a fixed arity.
+    if ctype == "C":
+        if not atoms:
+            errs.append("{}: nothing selected to freeze.".format(where))
+    elif len(atoms) != need:
         errs.append("{}: {} needs {} atom(s), got {}.".format(
             where, COORD_TYPES[ctype][0], need, len(atoms)))
     if len(set(atoms)) != len(atoms):
@@ -412,11 +418,50 @@ def _resolve(spec, atoms):
     return {"constraints": cons, "scans": out}
 
 
+def cartesian_runs(indices):
+    # type: (list) -> list
+    """Sorted indices as ORCA range tokens: [0,1,2,5] -> ['0:2', '5'].
+
+    ORCA freezes ONE atom or a CONTIGUOUS RANGE and nothing else - measured
+    on 6.0.1, where `{ C 0 2 5 C }` and `{ C 0,2,5 C }` are both a syntax
+    error ("Expecting C(onstraint) in ScanConstraints") while `{ C 0:3 C }`
+    holds all four exactly. So a set of atoms becomes several lines, and
+    consecutive runs are collapsed so that freezing a phenyl ring reads as
+    one line rather than six.
+
+    A run of two is written out in full, because `3:4` is longer than the
+    thing it abbreviates and reads as a range when it is a pair.
+    """
+    idxs = sorted({int(i) for i in indices})
+    out, start = [], None
+    for k, i in enumerate(idxs):
+        if start is None:
+            start = i
+        nxt = idxs[k + 1] if k + 1 < len(idxs) else None
+        if nxt is None or nxt != i + 1:
+            if i - start >= 2:
+                out.append("{}:{}".format(start, i))
+            else:
+                out.extend(str(v) for v in range(start, i + 1))
+            start = None
+    return out
+
+
 def constraint_line(c):
     # type: (dict) -> str
-    """One ORCA constraint, e.g. '{ B 0 1 1.5 C }' or '{ B 0 1 C }' or '{ C 5 C }'."""
+    """One ORCA constraint, e.g. '{ B 0 1 1.5 C }' or '{ B 0 1 C }' or '{ C 5 C }'.
+
+    A Cartesian freeze over several atoms becomes several lines - see
+    `cartesian_runs`, and note MoloM's `core/orca.py` does exactly the same,
+    pinned against this by a cross-check test.
+    """
     ctype = c["type"]
-    atoms = " ".join(str(a) for a in _atoms(c))
+    idxs = _atoms(c)
+    if ctype == "C" and len(idxs) > 1:
+        joiner = "\n    "
+        return joiner.join("{{ C {} C }}".format(r)
+                           for r in cartesian_runs(idxs))
+    atoms = " ".join(str(a) for a in idxs)
     val = c.get("value")
     if ctype == "C" or val is None or val == "":
         return "{{ {} {} C }}".format(ctype, atoms)
