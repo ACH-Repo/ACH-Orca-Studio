@@ -959,6 +959,20 @@ off the core path and gracefully degradable.
   Note the button then wants a different label from the plain 3D view, since
   it means "go and define this" rather than "go and look".
 
+- ~~**FREEZING EVERY ATOM OF A SCANNED COORDINATE WAS NOT REFUSED.**~~
+  **FIXED 2026-09-07.** `validate` compares a scan against the constraints by
+  TYPE AND ATOMS, so a `C` over eighteen atoms and a `B` over two are
+  different coordinates and nothing objected - while ORCA is handed a
+  coordinate nothing can walk. Christian found it in MoloM by freezing a
+  whole terephthalic acid and then scanning a C-C bond inside it; the
+  elongation animated happily.
+  `cartesian_frozen` plus the containment test, and deliberately only the
+  unambiguous case - EVERY atom of the coordinate frozen. Not "any atom": a
+  scan with one end pinned is an ordinary way to walk a bond, and refusing it
+  would refuse the useful case to catch the useless one. MoloM refuses the
+  same pair at the point of adding, so it can never store a spec this
+  rejects.
+
 - ~~**A CARTESIAN FREEZE OVER SEVERAL ATOMS WROTE SYNTAX ORCA REJECTS.**~~
   **FIXED 2026-09-07.** `{ C 0 1 2 3 6 C }` is what `constraint_line`
   produced for a multi-atom freeze, and ORCA 6.0.1 answers "Error - Expecting

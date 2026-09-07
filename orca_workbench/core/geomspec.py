@@ -165,7 +165,32 @@ def validate(spec, n_atoms=None, atoms=None):
                 errs.append(
                     "{}: this coordinate is also constrained - it cannot be "
                     "both held and scanned.".format(where))
+        # The same contradiction wearing different clothes: EVERY atom of the
+        # scanned coordinate pinned by Cartesian freezes. Christian found it
+        # by freezing a whole molecule and then scanning a bond inside it -
+        # the types differ, so the check above says nothing, and ORCA is
+        # handed a coordinate nothing can walk. Deliberately not "any atom
+        # frozen": a scan with one end pinned is an ordinary thing to want.
+        if _atoms(s) and set(_atoms(s)) <= cartesian_frozen(
+                spec.get("constraints") or []):
+            errs.append(
+                "{}: every atom of this coordinate is frozen in place, so "
+                "nothing can walk it.".format(where))
     return errs
+
+
+def cartesian_frozen(constraints):
+    # type: (list) -> set
+    """Every atom held in place by a Cartesian freeze.
+
+    Named to match MoloM's `orca.cartesian_frozen`, which had to avoid an
+    existing `frozen_atoms` there meaning something else entirely.
+    """
+    out = set()
+    for c in constraints or []:
+        if c.get("type") == "C":
+            out.update(_atoms(c))
+    return out
 
 
 def _check_value(where, v, atoms, scanned):
