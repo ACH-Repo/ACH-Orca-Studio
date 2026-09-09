@@ -23,7 +23,7 @@
 
 ## 1. Background and theory
 
-A molecule is a collection of positively charged **nuclei** and negatively charged **electrons** that attract and repel each other through the Coulomb force. For a given distribution of nuclei, that we get to specify, we want a software like ORCA to calculate the distribution the electrons adapt around those nuclei. Once a converged electron distribution is found, the software has a normalized **wavefunction** whose square describes the **electron density distribution** in three dimensions. This means that the **electronic structure** of the entire system is known and can be used to calculate physical properties, that require knowledge of that electronic structure.
+A molecule is a collection of positively charged **nuclei** and negatively charged **electrons** that attract and repel each other through the Coulomb force. For a given distribution of nuclei, that we get to specify, we want a software like ORCA to calculate the distribution the electrons adapt around those nuclei. Once a converged electron distribution is found, the software has a normalized **wavefunction** $\Psi(\mathbf {r})$ whose square describes the **electron density distribution** $\rho = \lvert\Psi(\mathbf{r})\rvert^2$ in three dimensions, where $\mathbf{r}$ is the positional vector in space. This means that the **electronic structure** of the entire system is known and can be used to calculate physical properties, that require knowledge of that electronic structure.
 
 ### 1.1 Basics: A molecule is nuclei and electrons
 
@@ -34,10 +34,10 @@ equation**:
 $\hat{H}\,\Psi = E\,\Psi .$ 
 
 - $\hat{H}$: **Hamiltonian operator**. Calculates total energy (kinetic + potential).
-- $\Psi$:  **Wavefunction**. Unit: "Probability Amplitude". Not an observable. Contains all information of the quantum system being probed.
+- $\Psi$:  **Wavefunction**. Unit: "Probability Amplitude". Not an observable quantity. Contains all information of the quantum system being probed.
 - $E$: **Total electronic energy**: Sum of kinetic and potential energy for a given state of the quantum system.
 
-This is an **Eigenvalue equation**: *"The energy operator $\hat H$ (Hamilton-Operator) acts on the wavefunction $\Psi$. The operator $\hat H$ contains all the mathematical operations necessary that must be applied to the wavefunction $\Psi$, to get the energy eigenvalue $E_i$ for a given state of the molecule $\Psi_i$."* 
+This is an **Eigenvalue equation**: *"The energy operator $\hat H$ (Hamilton-Operator) acts on the wavefunction $\Psi$. The operator $\hat H$ contains all the mathematical operations necessary that must be applied to the wavefunction $\Psi$, to get the energy eigenvalue $E$ for a given state of the molecule $\Psi$."* 
 
 All of quantum mechanics is founded on this calculation scheme. If $\Psi$ contains all information about the molecule, then all we need is the right operator to apply to $\Psi$ in order to get any information we'd ever want about our system. Any observable quantity (energy, momentum, location, dipolar moment etc.) a "system" (usually a single molecule in vacuum at 0 K) can exhibit, also has a corresponding operator with which it can be calculated. Typically, an operator in quantum mechanics is written by using the symbol for the desired, observable property (like momentum $p$) and adding a "hat" on top. For example: The momentum operator is written as $\hat p$.
 
@@ -45,9 +45,11 @@ Everything a program like ORCA does is an attempt to find an <u>approximate</u> 
 
 ### 1.2 The molecular Hamiltonian, written out
 
-In section 1.1 we said the operator $\hat H$ "contains all the mathematical operations necessary" to get the energy. It is time to actually write those operations down — and reassuringly, there are only a handful. A molecule feels nothing more exotic than the **kinetic energy** of its moving particles and the **Coulomb attraction and repulsion** between their charges. The Hamiltonian is simply the bookkeeping that adds all of these up.
+Section 1.1 states that the operator $\hat H$ "contains all the mathematical operations necessary" to get the total energy $E$ of a state $\Psi$. Since we are looking at a system in which nuclei and electrons are interacting with each other via Coulomb forces, $\hat H$ needs to contain terms for every kinetic and potential energy contribution those particles experience. A system possesses **kinetic energy** $T$ due to its moving particles plus the **potential energy** $V$ between those charge carriers in the form of Coulomb attraction and repulsion. As long as we do not have to consider external magnetic fields being applied, or the influence of time dilation at relativistic speeds, **potential and kinetic energy can be fully separated into additive terms.** Ergo, the total energy operator $\hat H$ can be written as:
 
-For a molecule with electrons labelled $i,j$ and nuclei labelled $A,B$, we write it in **atomic units** — a unit system chosen so that the fundamental constants $\hbar=m_e=e=4\pi\varepsilon_0=1$ vanish from the formulae and stop cluttering them. In these units energy comes out in **hartree** ($E_\text{h}$), where $1\,E_\text{h}\approx 2625.5$ kJ/mol. The operator is a sum of **five terms**:
+$\hat H = \hat T + \hat V$
+
+The question now becomes how exactly the individual parts of this operator can be written for a collection of electrons and nuclei interacting with one another. For a molecule with electrons labelled $i,j$ and nuclei labelled $A,B$, we can model the system as sums of individual contributions per partice (kinetic energies) and pairwise interactions per particle pairs (potential energies). To keep things legible, we write everything in **atomic units** — a unit system chosen so that the fundamental constants $\hbar=m_e=e=4\pi\varepsilon_0=1$ vanish from the formulae and stop cluttering them. In these units energy comes out in **hartree** ($E_\text{h}$), where $1\,E_\text{h}\approx 2625.5$ kJ/mol. The operator beomes a summation of **five terms** which themselves are sums over the aforementioned individual and pairwise contributions to the total energy:
 
 $$
 \hat{H}
@@ -165,7 +167,7 @@ but because each electron only sees the *average* of the others it misses their
 **instantaneous** avoidance — the **electron correlation**. We name the missing piece
 the **correlation energy**:
 
-$$E_\text{corr} = E_\text{exact} - E_\text{HF}\quad(\text{same basis}).$$
+$E_\text{corr} = E_\text{exact} - E_\text{HF}\quad(\text{same basis}).$
 
 It is only ~1 % of the total energy — but that 1 % is tens to hundreds of kJ/mol, which
 is *precisely* the energy scale of bonds, barriers and reactions. Recovering it is the
@@ -175,7 +177,7 @@ whole game, and two families of methods do so in very different ways.
 wavefunction, DFT works with the **electron density** $\rho(\mathbf r)$ — just "how many
 electrons per unit volume, everywhere" — and writes the energy as
 
-$$E[\rho] = T_s[\rho] + V_\text{ne}[\rho] + J[\rho] + E_\text{xc}[\rho],$$
+$E[\rho] = T_s[\rho] + V_\text{ne}[\rho] + J[\rho] + E_\text{xc}[\rho],$
 
 - $T_s[\rho]$: kinetic energy of the electrons.
 - $V_\text{ne}[\rho]$: electron–nucleus attraction.
@@ -201,7 +203,7 @@ is a *better model*, not a guaranteed step nearer the exact answer — higher is
 correlation *explicitly* on top of HF, and — unlike DFT — form a **systematic
 hierarchy** that provably marches toward the exact answer:
 
-$$\text{HF} \;\to\; \text{MP2} \;\to\; \text{CCSD} \;\to\; \text{CCSD(T)} .$$
+$\text{HF} \;\to\; \text{MP2} \;\to\; \text{CCSD} \;\to\; \text{CCSD(T)} .$
 
 - **MP2**: second-order Møller–Plesset perturbation theory — the cheapest correlation
   correction.
@@ -220,7 +222,7 @@ $\chi_\mu$ centred on the atoms. This is the **LCAO** (Linear Combination of Ato
 Orbitals) approximation, and it turns "find an unknown function" into the far easier
 "find the best set of numbers":
 
-$$\psi_i(\mathbf r) = \sum_{\mu=1}^{K} c_{\mu i}\,\chi_\mu(\mathbf r).$$
+$\psi_i(\mathbf r) = \sum_{\mu=1}^{K} c_{\mu i}\,\chi_\mu(\mathbf r).$
 
 - $\chi_\mu$: the **basis functions** — in practice **Gaussian**-shaped, chosen because
   the integrals they demand are fast to evaluate.
@@ -247,7 +249,7 @@ The functions come in families of increasing richness:
 As $K$ grows, the energy of a *given method* settles toward its **complete-basis-set
 (CBS) limit** — the very best that method can do:
 
-$$E(\text{basis}) \xrightarrow{\;K\to\infty\;} E_\text{CBS}.$$
+$E(\text{basis}) \xrightarrow{\;K\to\infty\;} E_\text{CBS}.$
 
 *In words:* bigger is better, but the improvement never truly stops — so in practice you
 stop when **the property you actually care about** stops changing.
@@ -275,7 +277,7 @@ Because we almost never actually want a total energy — we want a **difference*
 reaction energy, a rotation barrier, a preference between two conformers. Write the
 target as
 
-$$\Delta E = E_\text{product} - E_\text{reactant}.$$
+$\Delta E = E_\text{product} - E_\text{reactant}.$
 
 The large method- and basis-set errors are *similar* in the two similar species, so they
 **cancel** in the subtraction. Relative energies therefore converge **far faster** —
@@ -285,33 +287,31 @@ exercise, and it is exactly why the assignment is built around a **relative** en
 
 ### 1.9 Symbol glossary
 
-| Symbol                      | Name                            | What it is / does                                                 |
-| --------------------------- | ------------------------------- | ----------------------------------------------------------------- |
-| $\hat H,\ \hat H_\text{el}$ | (electronic) Hamiltonian        | Operator giving the total (electronic) energy                     |
+| Symbol                      | Name                            | What it is / does                                                  |
+| --------------------------- | ------------------------------- | ------------------------------------------------------------------ |
+| $\hat H,\ \hat H_\text{el}$ | (electronic) Hamiltonian        | Operator giving the total (electronic) energy                      |
 | $\Psi,\ \Psi_\text{el}$     | wavefunction                    | Full quantum state; its square is the electron probability density |
-| $E,\ E_0$                   | energy; ground-state energy     | Eigenvalue of $\hat H$; $E_0$ is the exact lowest one             |
-| $\psi_i$                    | (molecular) orbital             | One-electron function the many-electron $\Psi$ is built from      |
-| $\rho(\mathbf r)$           | electron density                | Electrons per unit volume; the variable in DFT                    |
-| $\nabla_i^2$                | Laplacian                       | Curvature of $\Psi$ → kinetic energy of electron $i$              |
-| $Z_A,\ M_A$                 | nuclear charge, mass            | Properties of nucleus $A$                                         |
-| $r_{iA},\ r_{ij},\ R_{AB}$  | distances                       | electron–nucleus, electron–electron, nucleus–nucleus              |
-| $\chi_\mu$                  | basis function                  | Fixed known (Gaussian) function; building block of orbitals       |
-| $c_{\mu i}$                 | MO coefficient                  | Weight of $\chi_\mu$ in orbital $\psi_i$; the unknowns solved for |
-| $K$                         | basis-set size                  | Number of basis functions; more = more accurate, more costly      |
-| $E_\text{xc}[\rho]$         | exchange–correlation functional | The unknown DFT term each functional approximates                 |
-| $E_\text{corr}$             | correlation energy              | $E_\text{exact}-E_\text{HF}$; the piece HF misses                 |
-| $E_\text{CBS}$              | complete-basis-set limit        | A method's best possible energy ($K\to\infty$)                    |
-| $\Delta E$                  | relative energy                 | A difference of total energies; converges fast                    |
-| $E_\text{h}$                | hartree                         | Atomic unit of energy; $1\,E_\text{h}=2625.5$ kJ/mol              |
+| $E,\ E_0$                   | energy; ground-state energy     | Eigenvalue of $\hat H$; $E_0$ is the exact lowest one              |
+| $\psi_i$                    | (molecular) orbital             | One-electron function the many-electron $\Psi$ is built from       |
+| $\rho(\mathbf r)$           | electron density                | Electrons per unit volume; the variable in DFT                     |
+| $\nabla_i^2$                | Laplacian                       | Curvature of $\Psi$ → kinetic energy of electron $i$               |
+| $Z_A,\ M_A$                 | nuclear charge, mass            | Properties of nucleus $A$                                          |
+| $r_{iA},\ r_{ij},\ R_{AB}$  | distances                       | electron–nucleus, electron–electron, nucleus–nucleus               |
+| $\chi_\mu$                  | basis function                  | Fixed known (Gaussian) function; building block of orbitals        |
+| $c_{\mu i}$                 | MO coefficient                  | Weight of $\chi_\mu$ in orbital $\psi_i$; the unknowns solved for  |
+| $K$                         | basis-set size                  | Number of basis functions; more = more accurate, more costly       |
+| $E_\text{xc}[\rho]$         | exchange–correlation functional | The unknown DFT term each functional approximates                  |
+| $E_\text{corr}$             | correlation energy              | $E_\text{exact}-E_\text{HF}$; the piece HF misses                  |
+| $E_\text{CBS}$              | complete-basis-set limit        | A method's best possible energy ($K\to\infty$)                     |
+| $\Delta E$                  | relative energy                 | A difference of total energies; converges fast                     |
+| $E_\text{h}$                | hartree                         | Atomic unit of energy; $1\,E_\text{h}=2625.5$ kJ/mol               |
 
 ---
 
 ## 2. The assignment (curated)
 
 Now we put the theory to work. You will watch how a **total energy** and a **relative
-energy** converge along the two axes — method and basis — using a **fixed molecule and a
-fixed grid of levels**, so that the effects from section 1 come out cleanly instead of
-being buried in noise.
+energy** converge along the two axes — method and basis — using a **fixed molecule and a fixed grid of levels**, so that the effects from section 1 come out cleanly instead of being buried in noise.
 
 ### 2.1 The system — the internal-rotation barrier of ethane
 
@@ -319,7 +319,7 @@ Your target relative energy is the **barrier to internal rotation of ethane**
 (C₂H₆): the energy difference between the **eclipsed** (higher) and **staggered**
 (lower) conformers as one CH₃ group twists against the other about the C–C bond:
 
-$$\Delta E_\text{rot} = E(\text{eclipsed}) - E(\text{staggered}).$$
+$\Delta E_\text{rot} = E(\text{eclipsed}) - E(\text{staggered}).$
 
 This system was chosen for you for four specific reasons, each tied to a lesson from
 section 1:
@@ -342,11 +342,12 @@ geometries** for the whole grid:
 
 1. **Staggered:** fully optimise ethane once at a single reference level,
    **`! B3LYP def2-TZVP Opt`** (this gives the D₃d staggered minimum).
+
 2. **Eclipsed:** starting from the staggered structure, set the H–C–C–H torsion to
    $0^\circ$ and optimise with **that dihedral frozen** — a constrained optimisation.
    In ORCA Workbench this is the Calc-tab right-click **"Geometry constraints /
    scan…"** (freeze the H–C–C–H dihedral at 0°); the underlying ORCA block is:
-
+   
    ```
    ! B3LYP def2-TZVP Opt
    %geom Constraints
@@ -354,15 +355,14 @@ geometries** for the whole grid:
    end end
    * xyzfile 0 1 ethane_staggered.xyz
    ```
-
+   
    *(Tip: read off the four atom indices from the Molecules-tab atom list. The `C` at
    the end of the constraint line means "constrain"; indices are 0-based in Workbench's
    dialog.)*
 
 Then run **single-point** energies of every grid cell below on these two frozen
 geometries. (You may also obtain the barrier directly with a **relaxed dihedral scan**
-from 60°→0° — Workbench's scan tool plots it — but the frozen-geometry single points are
-what make the convergence study clean.)
+from 60°→0° — Workbench's scan tool plots it — but the frozen-geometry single points are what make the convergence study clean.)
 
 ### 2.3 The curated grid + ORCA keyword lines
 
@@ -387,9 +387,7 @@ Plus **one reference** at your best affordable level:
   matter to ORCA, but keep it consistent.
 - `HF`, `PBE`, `B3LYP`, `MP2`, `CCSD(T)` and the four `def2`/`STO-3G` bases all work as
   **bare** keyword lines — no auxiliary basis needed.
-- **Cores/memory** are set with `%pal nprocs <N> end` and `%maxcore <MB> end` (or via
-  Workbench's global hardware defaults). For timing comparisons keep them **fixed**
-  across the grid.
+- **Cores/memory** are set with `%pal nprocs <N> end` and `%maxcore <MB> end` (or via Workbench's global hardware defaults). For timing comparisons keep them **fixed** across the grid.
 - To **record wall-clock time**: ORCA prints `TOTAL RUN TIME` at the bottom of each
   `.out`. Read it from there (or Workbench's live timing).
 
@@ -419,8 +417,8 @@ CCSD(T) reference:
 To make Question 3 concrete, compute a relative energy that **involves an anion**, the
 **deprotonation energy** of methanol:
 
-$$\text{CH}_3\text{OH} \;\longrightarrow\; \text{CH}_3\text{O}^- + \text{H}^+,
-\qquad \Delta E = E(\text{CH}_3\text{O}^-) + E(\text{H}^+) - E(\text{CH}_3\text{OH}).$$
+$\text{CH}_3\text{OH} \;\longrightarrow\; \text{CH}_3\text{O}^- + \text{H}^+,
+\qquad \Delta E = E(\text{CH}_3\text{O}^-) + E(\text{H}^+) - E(\text{CH}_3\text{OH}).$
 
 (The bare proton H⁺ has no electrons, so $E(\text{H}^+)=0$; set the methoxide anion's
 **charge = −1** in Workbench.) Run it **without** and **with** diffuse functions:
@@ -494,13 +492,14 @@ The maths uses standard LaTeX `$…$`/`$$…$$`, so:
 
 - **View** with live maths: VS Code's built-in Markdown preview (KaTeX, no extension
   needed) or GitHub.
+
 - **Export to PDF:** install **Pandoc** + a TeX engine (**MiKTeX** or the lighter
   **TinyTeX**) and run
-
+  
   ```
   pandoc A1_method_basis_convergence.md -o A1.pdf --pdf-engine=xelatex
   ```
-
+  
   which typesets the equations and tables into a clean report.
 
 ## References
