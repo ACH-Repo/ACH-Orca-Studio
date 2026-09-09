@@ -5,5 +5,5 @@
   "variant": "",
   "favorite": true,
   "created_at": "2026-05-30T16:51:29",
-  "template": "# DEFAULT frequencies / thermochemistry. Run on an optimized geometry.\n\n! B3LYP def2-TZVPP RIJCOSX def2/J D4 Freq VeryTightSCF\n\n%maxcore 5000\n\n%pal nprocs 12\nend\n\n!!##COORDS_SEC##!!\n"
+  "template": "# DEFAULT frequencies / thermochemistry. Run on an optimized geometry.\n\n! B3LYP def2-TZVPP RIJCOSX def2/J D4 Freq VeryTightSCF\n\n%maxcore 3000\n\n%pal nprocs 4\nend\n\n!!##COORDS_SEC##!!\n"
 }
