@@ -14,6 +14,7 @@ from typing import Optional
 
 from orca_workbench.core import config as config_mod
 from orca_workbench.core import coords as coords_mod
+from orca_workbench.core import molom_link
 from orca_workbench.core import resolve as resolve_mod
 from orca_workbench.core import roundtrip as roundtrip_mod
 from orca_workbench.ui import extprog as extprog_mod
@@ -2028,6 +2029,69 @@ def open_xyz_3d(parent, app, xyz_path, slot="viewer_3d_path"):
             return
     OpenXyzDialog(parent, abs_xyz)
 
+
+def define_geom_in_molom(parent, app, xyz_path, on_spec, slot="editor_3d_path"):
+    """Launch MoloM to DEFINE a `%geom` block, and load its answer back.
+
+    The other direction of the geometry round trip. `open_xyz_3d` hands a
+    geometry out; this asks a question and waits for the reply, which arrives
+    as JSON in `core.geomspec`'s own spec shape - see `core.molom_link` for
+    why it goes through the environment rather than the command line.
+
+    **POLLED, NOT BLOCKED.** Tk has one thread and one main loop, so waiting
+    on the child would freeze the app for as long as somebody is thinking
+    about their constraint. `after()` looks for the answer once a second and
+    stops when the child exits; the user can carry on using OWB meanwhile,
+    and the dialog simply fills in when the reply lands.
+    """
+    abs_xyz = xyz_path
+    if not os.path.isabs(abs_xyz):
+        abs_xyz = os.path.join(app.project.root(), abs_xyz)
+    if not os.path.isfile(abs_xyz):
+        messagebox.showerror("File missing",
+                             "File not found:\n{}".format(abs_xyz))
+        return
+    program = extprog_mod.program_path(slot) or \
+        extprog_mod.program_path("viewer_3d_path")
+    if not (program and (os.path.isfile(program) or _on_path(program))):
+        messagebox.showinfo(
+            "MoloM not configured",
+            "Set the 3D editor program in Settings to MoloM's launcher "
+            "first.\n\nRun `molom --where` to find it.")
+        return
+
+    scratch = tempfile.mkdtemp(prefix="orca_wb_geomspec_")
+    target = molom_link.request_path(scratch)
+    try:
+        child = subprocess.Popen([program, abs_xyz],
+                                 env=molom_link.launch_env(target))
+    except Exception as exc:
+        messagebox.showerror("Launch failed",
+                             "Could not launch:\n{}\n\n{}".format(program,
+                                                                    exc))
+        return
+    app.set_status("MoloM opened - define the constraints there and press "
+                   "'Send to ORCA Workbench'.")
+
+    def _poll():
+        spec = molom_link.read_spec(target)
+        if spec is not None:
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            on_spec(spec)
+            app.set_status("Geometry spec received from MoloM.")
+            return
+        if child.poll() is None:
+            parent.after(1000, _poll)
+            return
+        # The child is gone and nothing arrived. Said once, here, rather than
+        # on every poll - and it is not an error: closing MoloM without
+        # sending anything is a perfectly ordinary way to change your mind.
+        app.set_status("MoloM closed without sending a geometry spec.")
+
+    parent.after(1000, _poll)
 
 class OpenXyzDialog(tk.Toplevel):
     """Shown when no local Avogadro is available (the usual cluster case).

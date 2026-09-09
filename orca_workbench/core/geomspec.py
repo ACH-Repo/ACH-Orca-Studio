@@ -3,8 +3,18 @@
 A *geometry spec* describes optional geometry manipulations for an OPT job:
   - constraints: freeze an internal coordinate (bond / angle / dihedral) or a
     Cartesian atom position, optionally pinned at a specific value.
-  - scan: ONE relaxed surface scan of an internal coordinate over a range (the rest
-    of the structure relaxes at each step → an energy profile).
+  - scans: relaxed surface scans of internal coordinates over a range (the rest
+    of the structure relaxes at each step -> an energy profile). SEVERAL are
+    allowed, because ORCA allows several: it runs the full GRID.
+
+**MULTI-DIMENSIONAL SCANS, measured against ORCA 6.0.1 rather than assumed.**
+Two `Scan` lines produced a 3 x 3 = 9-point relaxed surface scan, and the
+surface table carries one column per coordinate in the order they were
+declared - so the FIRST line is the outer loop and the last is the inner one,
+and the order of this list is meaningful rather than cosmetic. Christian's
+point is the one that settled it: "can you just make OWB allow multiple scans
+because the entire point of it is being a GUI for orca?" A GUI for a program
+should not be more restrictive than the program.
 
 It's stored as a plain dict (so it serialises straight onto a PlannedCalc / workflow
 node), rendered into ORCA's `%geom … end` block, and injected into the input by
@@ -20,8 +30,20 @@ Spec shape::
         {"type": "D", "atoms": [0, 1, 2, 3], "value": 180.0},
         {"type": "C", "atoms": [5]},                     # freeze atom 5's Cartesian position
       ],
-      "scan": {"type": "B", "atoms": [0, 1], "start": 1.5, "end": 3.0, "steps": 10},  # or None
+      "scans": [
+        {"type": "B", "atoms": [0, 1], "start": 1.5, "end": 3.0, "steps": 10},
+        {"type": "D", "atoms": [0, 1, 2, 3], "start": -180, "end": 180, "steps": 13},
+      ],
     }
+
+`steps` is the number of GEOMETRIES, not the number of intervals: ORCA ran
+`= -180, -60, 4` as four points at -180, -140, -100 and -60, so the spacing is
+`(end - start) / (steps - 1)`. Also measured rather than assumed.
+
+A spec saved before multi-scan support carries `"scan": {...}` instead;
+`scans_of` reads either, so old projects load unchanged. Only `scans` is
+written, so a project saved here and opened in an older build would lose the
+scan - a one-way version step, noted rather than worked around.
 
 A "value"/"start"/"end" field may also be a geometry-derived EXPRESSION string —
 `current`, `B(2,4)`, `A(0,1,2)`, `D(...)`, plus `+ - * /` — resolved against the input
@@ -54,14 +76,41 @@ def n_atoms_for(ctype):
 
 def empty_spec():
     # type: () -> dict
-    return {"constraints": [], "scan": None}
+    return {"constraints": [], "scans": []}
+
+
+def scans_of(spec):
+    # type: (Optional[dict]) -> List[dict]
+    """The scans, in declaration order, from either shape.
+
+    ONE place reads the key, so a spec saved before multi-scan support
+    (`"scan": {...}`) and one saved after (`"scans": [...]`) cannot diverge
+    anywhere else in the module.
+    """
+    if not spec:
+        return []
+    scans = spec.get("scans")
+    if isinstance(scans, list):
+        return [s for s in scans if isinstance(s, dict) and s]
+    one = spec.get("scan")
+    return [one] if isinstance(one, dict) and one else []
+
+
+def with_scans(spec, scans):
+    # type: (Optional[dict], List[dict]) -> dict
+    """`spec` with its scans replaced, in the canonical shape."""
+    out = dict(spec or {})
+    out["constraints"] = list(out.get("constraints") or [])
+    out["scans"] = [dict(s) for s in (scans or []) if s]
+    out.pop("scan", None)
+    return out
 
 
 def is_empty(spec):
     # type: (Optional[dict]) -> bool
     if not spec:
         return True
-    return not spec.get("constraints") and not spec.get("scan")
+    return not spec.get("constraints") and not scans_of(spec)
 
 
 def _atoms(item):
@@ -83,21 +132,65 @@ def validate(spec, n_atoms=None, atoms=None):
         errs += _check_coord(where, c, n_atoms)
         if c.get("type") != "C" and c.get("value") not in (None, ""):
             errs += _check_value(where, c.get("value"), atoms, (c.get("type"), _atoms(c)))
-    s = spec.get("scan")
-    if s:
-        errs += _check_coord("Scan", s, n_atoms)
+    scans = scans_of(spec)
+    seen = []
+    for i, s in enumerate(scans):
+        where = "Scan" if len(scans) == 1 else "Scan {}".format(i + 1)
+        errs += _check_coord(where, s, n_atoms)
         if s.get("type") not in SCAN_TYPES:
-            errs.append("Scan: only Bond/Angle/Dihedral can be scanned.")
+            errs.append("{}: only Bond/Angle/Dihedral can be scanned.".format(
+                where))
         try:
             steps = int(s.get("steps"))
             if steps < 2:
-                errs.append("Scan: needs at least 2 steps.")
+                errs.append("{}: needs at least 2 points.".format(where))
         except (TypeError, ValueError):
-            errs.append("Scan: steps must be a whole number (>= 2).")
+            errs.append("{}: points must be a whole number (>= 2).".format(
+                where))
         scanned = (s.get("type"), _atoms(s))
         for k in ("start", "end"):
-            errs += _check_value("Scan {}".format(k), s.get(k), atoms, scanned)
+            errs += _check_value("{} {}".format(where, k), s.get(k), atoms,
+                                 scanned)
+        # SCANNING ONE COORDINATE TWICE is not a 2-D surface, it is a
+        # contradiction: the inner loop would be asked to hold the value the
+        # outer loop just set.
+        key = (s.get("type"), tuple(_atoms(s)))
+        if key in seen:
+            errs.append("{}: this coordinate is already being scanned.".format(
+                where))
+        seen.append(key)
+        # ...and so is scanning something that is also frozen.
+        for c in spec.get("constraints") or []:
+            if (c.get("type"), tuple(_atoms(c))) == key:
+                errs.append(
+                    "{}: this coordinate is also constrained - it cannot be "
+                    "both held and scanned.".format(where))
+        # The same contradiction wearing different clothes: EVERY atom of the
+        # scanned coordinate pinned by Cartesian freezes. Christian found it
+        # by freezing a whole molecule and then scanning a bond inside it -
+        # the types differ, so the check above says nothing, and ORCA is
+        # handed a coordinate nothing can walk. Deliberately not "any atom
+        # frozen": a scan with one end pinned is an ordinary thing to want.
+        if _atoms(s) and set(_atoms(s)) <= cartesian_frozen(
+                spec.get("constraints") or []):
+            errs.append(
+                "{}: every atom of this coordinate is frozen in place, so "
+                "nothing can walk it.".format(where))
     return errs
+
+
+def cartesian_frozen(constraints):
+    # type: (list) -> set
+    """Every atom held in place by a Cartesian freeze.
+
+    Named to match MoloM's `orca.cartesian_frozen`, which had to avoid an
+    existing `frozen_atoms` there meaning something else entirely.
+    """
+    out = set()
+    for c in constraints or []:
+        if c.get("type") == "C":
+            out.update(_atoms(c))
+    return out
 
 
 def _check_value(where, v, atoms, scanned):
@@ -123,7 +216,13 @@ def _check_coord(where, c, n_atoms):
         return errs
     need = n_atoms_for(ctype)
     atoms = _atoms(c)
-    if len(atoms) != need:
+    # `C` is the exception: it freezes POSITIONS, so any number of them is
+    # meaningful and several become several lines. Every other type names an
+    # internal coordinate with a fixed arity.
+    if ctype == "C":
+        if not atoms:
+            errs.append("{}: nothing selected to freeze.".format(where))
+    elif len(atoms) != need:
         errs.append("{}: {} needs {} atom(s), got {}.".format(
             where, COORD_TYPES[ctype][0], need, len(atoms)))
     if len(set(atoms)) != len(atoms):
@@ -212,7 +311,17 @@ def measure(ctype, idxs, atoms):
     if ctype == "D":
         b1, b2, b3 = _vsub(pts[1], pts[0]), _vsub(pts[2], pts[1]), _vsub(pts[3], pts[2])
         n1, n2 = _vcross(b1, b2), _vcross(b2, b3)
-        m1 = _vcross(n1, _vunit(b2))
+        # The order of THIS cross product is the sign of the dihedral, and it
+        # was the wrong way round until 2026-09-06: every value came back as
+        # its own negative, i.e. describing the MIRROR IMAGE of the geometry
+        # in front of the user. Nothing failed - a `current` or `D(0,1,2,3)`
+        # in a scan simply started from the enantiomeric conformation and the
+        # input file read perfectly plausibly. Settled against a THIRD
+        # implementation rather than by argument: over 400 random geometries
+        # RDKit's `GetDihedralDeg` (the IUPAC convention ORCA itself uses)
+        # and MoloM's `measure.dihedral` agree with each other every time,
+        # and this line disagreed with both by an exact sign.
+        m1 = _vcross(_vunit(b2), n1)
         return math.degrees(math.atan2(_vdot(m1, n2), _vdot(n1, n2)))
     raise ValueError("cannot measure coordinate type {!r}".format(ctype))
 
@@ -319,24 +428,65 @@ def _resolve(spec, atoms):
             except ValueError as e:
                 raise ValueError("Constraint {} value {}".format(i + 1, e))
         cons.append(c2)
-    s = spec.get("scan")
-    s2 = None
-    if s:
+    scans = scans_of(spec)
+    out = []
+    for i, s in enumerate(scans):
         s2 = dict(s)
         scanned = (s.get("type"), _atoms(s))
+        where = "Scan" if len(scans) == 1 else "Scan {}".format(i + 1)
         for k in ("start", "end"):
             try:
                 s2[k] = eval_value(s.get(k), atoms, scanned)
             except ValueError as e:
-                raise ValueError("Scan {} {}".format(k, e))
-    return {"constraints": cons, "scan": s2}
+                raise ValueError("{} {} {}".format(where, k, e))
+        out.append(s2)
+    return {"constraints": cons, "scans": out}
+
+
+def cartesian_runs(indices):
+    # type: (list) -> list
+    """Sorted indices as ORCA range tokens: [0,1,2,5] -> ['0:2', '5'].
+
+    ORCA freezes ONE atom or a CONTIGUOUS RANGE and nothing else - measured
+    on 6.0.1, where `{ C 0 2 5 C }` and `{ C 0,2,5 C }` are both a syntax
+    error ("Expecting C(onstraint) in ScanConstraints") while `{ C 0:3 C }`
+    holds all four exactly. So a set of atoms becomes several lines, and
+    consecutive runs are collapsed so that freezing a phenyl ring reads as
+    one line rather than six.
+
+    A run of two is written out in full, because `3:4` is longer than the
+    thing it abbreviates and reads as a range when it is a pair.
+    """
+    idxs = sorted({int(i) for i in indices})
+    out, start = [], None
+    for k, i in enumerate(idxs):
+        if start is None:
+            start = i
+        nxt = idxs[k + 1] if k + 1 < len(idxs) else None
+        if nxt is None or nxt != i + 1:
+            if i - start >= 2:
+                out.append("{}:{}".format(start, i))
+            else:
+                out.extend(str(v) for v in range(start, i + 1))
+            start = None
+    return out
 
 
 def constraint_line(c):
     # type: (dict) -> str
-    """One ORCA constraint, e.g. '{ B 0 1 1.5 C }' or '{ B 0 1 C }' or '{ C 5 C }'."""
+    """One ORCA constraint, e.g. '{ B 0 1 1.5 C }' or '{ B 0 1 C }' or '{ C 5 C }'.
+
+    A Cartesian freeze over several atoms becomes several lines - see
+    `cartesian_runs`, and note MoloM's `core/orca.py` does exactly the same,
+    pinned against this by a cross-check test.
+    """
     ctype = c["type"]
-    atoms = " ".join(str(a) for a in _atoms(c))
+    idxs = _atoms(c)
+    if ctype == "C" and len(idxs) > 1:
+        joiner = "\n    "
+        return joiner.join("{{ C {} C }}".format(r)
+                           for r in cartesian_runs(idxs))
+    atoms = " ".join(str(a) for a in idxs)
     val = c.get("value")
     if ctype == "C" or val is None or val == "":
         return "{{ {} {} C }}".format(ctype, atoms)
@@ -369,10 +519,15 @@ def build_geom_inner(spec, atoms=None):
         for c in cons:
             lines.append("    " + constraint_line(c))
         lines.append("  end")
-    s = spec.get("scan")
-    if s:
+    scans = scans_of(spec)
+    if scans:
+        # ONE Scan block holding every coordinate, which is what ORCA takes -
+        # and the ORDER is the loop order, the first line being the outer
+        # loop. Measured: two lines gave a 3 x 3 grid with the first
+        # coordinate varying slowest.
         lines.append("  Scan")
-        lines.append("    " + scan_line(s))
+        for s in scans:
+            lines.append("    " + scan_line(s))
         lines.append("  end")
     return "\n".join(lines)
 
@@ -386,12 +541,19 @@ def describe(spec):
     cons = spec.get("constraints") or []
     if cons:
         bits.append("{} constraint{}".format(len(cons), "" if len(cons) == 1 else "s"))
-    s = spec.get("scan")
-    if s:
+    scans = scans_of(spec)
+    for s in scans:
         atoms = ",".join(str(a) for a in _atoms(s))
         bits.append("scan {}({}) {}->{} {} x{}".format(
             s.get("type"), atoms, _fmt(s.get("start", 0)), _fmt(s.get("end", 0)),
             _UNIT.get(s.get("type"), ""), int(s.get("steps", 0) or 0)))
+    if len(scans) > 1:
+        # What the grid COSTS, said out loud: ORCA runs every combination, so
+        # two 10-point scans is a hundred optimisations and not twenty.
+        total = 1
+        for s in scans:
+            total *= max(1, int(s.get("steps", 0) or 0))
+        bits.append("{} grid points".format(total))
     return "; ".join(bits)
 
 

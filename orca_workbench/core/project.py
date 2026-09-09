@@ -85,7 +85,7 @@ class PlannedCalc(object):
     orbital_source: Optional[str] = None
     # Geometry constraints / a relaxed surface scan for an OPT job, injected into the
     # ORCA input's %geom block (see core/geomspec.py). None = plain optimization.
-    # Shape: {"constraints": [{type, atoms, value?}, ...], "scan": {type, atoms, start,
+    # Shape: {"constraints": [{type, atoms, value?}, ...], "scans": [{type, atoms, start,
     # end, steps} | None}. Atom indices are 0-based (ORCA's convention).
     geom_spec: Optional[dict] = None
     # Extra ORCA simple-input keywords appended to the `!` line at build time (e.g.

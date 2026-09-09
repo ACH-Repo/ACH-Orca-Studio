@@ -29,6 +29,7 @@ from orca_workbench.core import config as config_mod
 from orca_workbench.core import coords as coords_mod
 from orca_workbench.core import discovery as discovery_mod
 from orca_workbench.core import geomspec as geomspec_mod
+from orca_workbench.core import molom_link
 from orca_workbench.core import inputs as inputs_mod
 from orca_workbench.ui.shortcuts import install_tree_shift_select
 from orca_workbench.core import local_runner as local_runner_mod
@@ -2623,8 +2624,19 @@ class CalculationsTab(ttk.Frame):
             if vref:
                 self._open_3d(vref)
 
+        def _define(on_spec):
+            from orca_workbench.ui.molecules_tab import define_geom_in_molom
+            define_geom_in_molom(self, self.app, vref, on_spec)
+
+        # The button is offered only when the configured 3D EDITOR is MoloM.
+        # Anything else would be handed a question it cannot answer, and the
+        # user would be left waiting for a reply that is never coming.
+        editor = (extprog_mod.program_path("editor_3d_path")
+                  or extprog_mod.program_path("viewer_3d_path"))
+        can_define = bool(vref) and molom_link.looks_like_molom(editor)
         GeomSpecDialog(self, atoms, getattr(calc, "geom_spec", None), _save,
-                       view_xyz=(_view if vref else None))
+                       view_xyz=(_view if vref else None),
+                       define_in_molom=(_define if can_define else None))
 
     def _plot_scan(self, calc):
         """Plot the relaxed-scan energy profile from a finished OPT+Scan calc's .out."""
@@ -2641,7 +2653,10 @@ class CalculationsTab(ttk.Frame):
 
     @staticmethod
     def _scan_xlabel(calc):
-        s = (getattr(calc, "geom_spec", None) or {}).get("scan")
+        # The FIRST scan names the plot's x axis: with several, ORCA's
+        # surface table puts the outer loop first and that is this one.
+        scans = geomspec_mod.scans_of(getattr(calc, "geom_spec", None))
+        s = scans[0] if scans else None
         if s:
             atoms = "-".join(str(a) for a in (s.get("atoms") or []))
             unit = {"B": "Å", "A": "°", "D": "°"}.get(s.get("type"), "")

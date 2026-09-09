@@ -7,6 +7,8 @@ coordinate->energy surface).
 Run:  python -m pytest tests/test_geomspec.py -q
 """
 
+import math
+
 from orca_workbench.core import geomspec as G
 from orca_workbench.core import inputs as I
 from orca_workbench.core import orca_parser as P
@@ -193,3 +195,158 @@ def test_validate_expressions_with_geometry():
     bad = {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
            "start": "B(0,9)", "end": "2.0", "steps": 10}}
     assert G.validate(bad, n_atoms=3, atoms=_WATER)
+
+
+# ---------------------------------------------------------------- multi-scan
+def test_SEVERAL_scans_are_allowed_because_ORCA_ALLOWS_THEM():
+    """Measured against ORCA 6.0.1: two `Scan` lines gave a 3 x 3 = 9-point
+    relaxed surface scan, with the FIRST line the outer loop and one column
+    per coordinate in the surface table. Christian: "can you just make OWB
+    allow multiple scans because the entire point of it is being a GUI for
+    orca?\""""
+    spec = {"constraints": [{"type": "A", "atoms": [0, 1, 2]}],
+            "scans": [{"type": "B", "atoms": [0, 1], "start": 1.5,
+                       "end": 1.6, "steps": 3},
+                      {"type": "D", "atoms": [0, 1, 2, 3], "start": -180,
+                       "end": -120, "steps": 3}]}
+    inner = G.build_geom_inner(spec)
+    assert inner.count("  Scan") == 1, "one Scan block holding both"
+    lines = [ln.strip() for ln in inner.splitlines()]
+    assert lines.index("B 0 1 = 1.5, 1.6, 3") < \
+        lines.index("D 0 1 2 3 = -180, -120, 3"), "declaration order is kept"
+    assert G.validate(spec, n_atoms=14) == []
+    assert "9 grid points" in G.describe(spec)
+
+
+def test_a_spec_saved_BEFORE_multi_scan_still_reads():
+    """`scans_of` is the one place that knows about the two shapes."""
+    old = {"constraints": [], "scan": {"type": "B", "atoms": [0, 1],
+                                       "start": 1.5, "end": 3.0, "steps": 10}}
+    assert len(G.scans_of(old)) == 1
+    assert not G.is_empty(old)
+    assert "B 0 1 = 1.5, 3, 10" in G.build_geom_inner(old)
+    assert G.validate(old, n_atoms=5) == []
+    # ...and `with_scans` writes only the canonical key
+    fresh = G.with_scans(old, G.scans_of(old))
+    assert "scan" not in fresh and len(fresh["scans"]) == 1
+
+
+def test_one_coordinate_cannot_be_scanned_twice_or_frozen_and_scanned():
+    """Neither is a richer request. Scanning a coordinate twice would ask the
+    inner loop to hold the value the outer loop just set, and freezing what
+    is scanned is a flat contradiction."""
+    twice = {"constraints": [],
+             "scans": [{"type": "B", "atoms": [0, 1], "start": 1, "end": 2,
+                        "steps": 3},
+                       {"type": "B", "atoms": [0, 1], "start": 1, "end": 3,
+                        "steps": 4}]}
+    assert any("already being scanned" in e
+               for e in G.validate(twice, n_atoms=5))
+    clash = {"constraints": [{"type": "B", "atoms": [0, 1]}],
+             "scans": [{"type": "B", "atoms": [0, 1], "start": 1, "end": 2,
+                        "steps": 3}]}
+    assert any("also constrained" in e for e in G.validate(clash, n_atoms=5))
+
+
+def test_an_expression_resolves_per_scan():
+    """`current` means THIS scan's own coordinate, so two scans resolve it
+    to two different numbers."""
+    atoms = [("C", 0.0, 0.0, 0.0), ("C", 1.5, 0.0, 0.0),
+             ("C", 1.5, 1.2, 0.0), ("C", 3.0, 1.2, 0.0)]
+    spec = {"constraints": [],
+            "scans": [{"type": "B", "atoms": [0, 1], "start": "current",
+                       "end": "current + 0.5", "steps": 3},
+                      {"type": "B", "atoms": [1, 2], "start": "current",
+                       "end": "current + 0.5", "steps": 3}]}
+    inner = G.build_geom_inner(spec, atoms)
+    assert "B 0 1 = 1.5, 2, 3" in inner
+    assert "B 1 2 = 1.2, 1.7, 3" in inner
+
+
+def test_the_dihedral_SIGN_is_the_IUPAC_one():
+    """A dihedral of the wrong sign describes the MIRROR IMAGE.
+
+    This was wrong until 2026-09-06 and nothing caught it, because nothing
+    here measured a dihedral whose sign was KNOWN - every test used a value
+    typed by hand, which passes through unchanged. A `current` or a
+    `D(0,1,2,3)` in a scan therefore started from the enantiomeric
+    conformation, and the generated input file read perfectly plausibly.
+
+    The geometry states its own answer rather than carrying a number from
+    somewhere: atoms 1 and 2 lie on +z, so +z IS the b2 axis; atom 0 sticks
+    out along +x; atom 3 is atom 0's direction turned by phi about that axis.
+    The dihedral is then phi by construction, for a right-handed convention.
+    Cross-checked against RDKit's `GetDihedralDeg` (which is what ORCA uses)
+    over 400 random geometries at the time of the fix - RDKit is not a
+    dependency here, which is exactly why the fixture has to be self-evident.
+    """
+    def geometry(phi):
+        r = math.radians(phi)
+        return [("C", 1.0, 0.0, 0.0), ("C", 0.0, 0.0, 0.0),
+                ("C", 0.0, 0.0, 1.5),
+                ("C", math.cos(r), math.sin(r), 1.5)]
+
+    for phi in (60.0, 90.0, 120.0, 180.0, -60.0, -90.0, -150.0):
+        got = G.measure("D", [0, 1, 2, 3], geometry(phi))
+        assert abs((got - phi + 180.0) % 360.0 - 180.0) < 1e-9, \
+            "turning by {:+} came back as {:+}".format(phi, got)
+
+    # ...and it reaches the two places a user meets it
+    atoms = geometry(75.0)
+    spec = {"constraints": [],
+            "scans": [{"type": "D", "atoms": [0, 1, 2, 3],
+                       "start": "current", "end": "current + 30", "steps": 3}]}
+    inner = G.build_geom_inner(spec, atoms=atoms)
+    assert "= 75, 105, 3" in inner, inner
+    assert abs(G.eval_value("D(0,1,2,3)", atoms, None) - 75.0) < 1e-9
+    assert abs(G.eval_value("current", atoms,
+                            ("D", [0, 1, 2, 3])) - 75.0) < 1e-9
+
+
+def test_bonds_and_angles_were_never_in_doubt():
+    """Scoped deliberately: the sign fix touched the D branch alone, and a
+    length and an unsigned angle cannot have a sign to get wrong."""
+    atoms = [("C", 0.0, 0.0, 0.0), ("C", 1.5, 0.0, 0.0), ("C", 1.5, 2.0, 0.0)]
+    assert abs(G.measure("B", [0, 1], atoms) - 1.5) < 1e-12
+    assert abs(G.measure("B", [1, 0], atoms) - 1.5) < 1e-12
+    assert abs(G.measure("A", [0, 1, 2], atoms) - 90.0) < 1e-12
+    assert abs(G.measure("A", [2, 1, 0], atoms) - 90.0) < 1e-12
+
+
+def test_a_multi_atom_CARTESIAN_freeze_uses_RANGES():
+    """`{ C 0 1 2 3 6 C }` is what this used to write, and ORCA 6.0.1
+    answers "Expecting C(onstraint) in ScanConstraints" - as it does for the
+    comma form. What it takes is one atom or a CONTIGUOUS RANGE, which holds
+    every atom in it to 0.000000 A and mixes freely with single-atom lines.
+
+    Latent rather than reported: nothing here could produce a multi-atom
+    freeze until MoloM grew one, and the two are pinned to identical text.
+    """
+    assert G.cartesian_runs([5]) == ["5"]
+    assert G.cartesian_runs([0, 1, 2, 3]) == ["0:3"]
+    assert G.cartesian_runs([0, 1, 2, 5]) == ["0:2", "5"]
+    assert G.cartesian_runs([1, 2, 3, 7, 8, 9, 20]) == ["1:3", "7:9", "20"]
+    # a PAIR is written out: "3:4" is longer than what it abbreviates
+    assert G.cartesian_runs([3, 4]) == ["3", "4"]
+
+    line = G.constraint_line({"type": "C", "atoms": [0, 1, 2, 3, 6]})
+    assert line.splitlines()[0].strip() == "{ C 0:3 C }"
+    assert line.splitlines()[1].strip() == "{ C 6 C }"
+
+    spec = {"constraints": [{"type": "C", "atoms": [0, 1, 2, 3, 6]}],
+            "scans": []}
+    assert G.validate(spec, n_atoms=10) == [], "any number of atoms is fine"
+    inner = G.build_geom_inner(spec)
+    assert "{ C 0:3 C }" in inner and "{ C 6 C }" in inner
+    assert "0 1 2 3 6" not in inner, "the form ORCA refuses"
+
+    # ...and an EMPTY freeze is still refused: it names nothing
+    assert G.validate({"constraints": [{"type": "C", "atoms": []}],
+                       "scans": []}, n_atoms=10)
+
+
+def test_one_atom_is_unchanged_by_that():
+    """The common case must not have grown a range."""
+    assert G.constraint_line({"type": "C", "atoms": [5]}) == "{ C 5 C }"
+    assert G.validate({"constraints": [{"type": "C", "atoms": [5]}],
+                       "scans": []}, n_atoms=10) == []

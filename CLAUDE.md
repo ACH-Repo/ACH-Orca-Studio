@@ -906,6 +906,234 @@ off the core path and gracefully degradable.
   also got wheel y-zoom about the cursor (log-aware on the gradient panel).
 
 ## Open work / TODO
+- **PRE-OPTIMISED RELAXED SCAN FROM MoloM -> N SEPARATE ORCA JOBS.** Christian,
+  2026-09-09: "If I do a relaxed Scan in ORCA, doesn't it make sense to do a
+  relaxed, preoptimized scan in MoloM and then do separate calculations on the
+  preoptimized structures? Seems wasteful to scan a dihedral while rigidly
+  rotating something in orca and then orca doing a QM opt for each step."
+  MoloM already HAS the relaxed scan (`core/scan.py`, round 106): it steps the
+  coordinate and relaxes the rest with a force field at each point, each point
+  continuing from the last, which is what makes it relaxed rather than a row
+  of independent optimisations. Butane's torsional profile comes out at the
+  measured values (anti 0.00 / gauche 0.63 / H-eclipsed 3.86 / syn 6.54
+  kcal/mol) at 3 ms per point. What is missing is the EXPORT: nothing writes N
+  input files from those frames.
+  **The OWB half is ingestion.** If MoloM writes a numbered directory of
+  geometries, OWB should be able to take it as a job GROUP - one calculation
+  per scan point, sharing a recipe, with the scanned coordinate frozen
+  (`{ B i j C }`) so a QM optimiser cannot walk back off the coordinate being
+  scanned - and then plot the resulting energies as one surface. That is close
+  to what the calculations tab already does for a batch; what it does not have
+  is the notion that the members are POINTS ON A SCAN and belong on one curve.
+  Worth deciding early whether that is a new object or just a tag on a batch.
+  Recorded in MoloM's `docs/OPEN_ITEMS.md` as S6, with the MoloM-side
+  decisions (freeze vs single point, filenames, directory shape).
+- ~~**Let MoloM hand a `%geom` spec BACK.**~~ **DONE** (2026-09-06, with the
+  MoloM side). `core/molom_link.py` is the channel: `MOLOM_GEOMSPEC_FILE`
+  names a file, `launch_env` puts it in a COPY of the environment (never the
+  live one - the variable is a question asked of ONE launch),
+  `molecules_tab.define_geom_in_molom` launches and POLLS with `after()`
+  rather than blocking Tk's one loop, and `GeomSpecDialog` grows a "Define in
+  MoloM..." button that is offered only when the configured 3D editor IS
+  MoloM (`looks_like_molom`, by executable name - wrong in the harmless
+  direction either way). The reply REPLACES the dialog's contents rather than
+  merging, because MoloM was shown the same spec and its answer is the newer
+  one. Verified end to end with real processes, and then by running the
+  result: ORCA 6.0.1 accepted the injected block and ran the scan to
+  convergence.
+  **AND IT SETTLED A NUMBER**: a scan's third argument is a POINT COUNT, not
+  a number of intervals. `D 0 1 2 3 = -180, -60, 4` gave four geometries at
+  -180, -140, -100 and -60, and `= -180, -60, 6` gave six at 24 degrees. This
+  repo's `scan_line` is unaffected - it writes what it is given - but
+  anything that DESCRIBES or plots a scan's sampling should use
+  `(end - start) / (N - 1)`. MoloM's own preview had it wrong and now does
+  not.
+  The original entry, kept for the reasoning:
+- **~~Let MoloM hand a `%geom` spec BACK~~ - the return channel for the
+  geometry round trip.** Christian's design, 2026-09-06, worked out with the MoloM
+  side (see that repo's `docs/OPEN_ITEMS.md` Q14). His framing: "it only
+  makes sense that you click on something in OWB, molom opens and then you
+  get a GUI with which you can do the thing you wish to do."
+  **MOST OF THIS REPO'S HALF ALREADY EXISTS**, which is the useful finding.
+  `calc.geom_spec` is per-calculation state; `calculations_tab
+  ._edit_geom_spec` is already a right-click entry ("Geometry constraints /
+  scan (job input)... [describe]"); `GeomSpecDialog` is already the text
+  editor for people who do not use MoloM; `inputs.add_geom_block` already
+  injects it at build time, which is his "general recipes need to be
+  overwritten for particular mols"; it already refuses non-OPT recipes and
+  already tells the user to generate the XYZ first so the atom indices
+  exist. **And `GeomSpecDialog` already takes a `view_xyz` callback that
+  opens the reference geometry in the external 3D program** - so the
+  launch-MoloM button exists in skeleton form and merely opens MoloM
+  read-only.
+  **What is missing is one channel.** MoloM (round 106) can build the same
+  `%geom` text from a selection - byte for byte, pinned by a test that
+  imports `geomspec` and compares - and can only put it on the clipboard.
+  Nothing asks it for an answer.
+  The shape to copy is the geometry round trip's: **an environment variable
+  naming a file**. OWB sets e.g. `MOLOM_GEOMSPEC_FILE=<abs path>` when the
+  dialog's 3D button launches MoloM; MoloM writes the spec there as JSON in
+  THIS repo's own spec shape (not `%geom` text, so nothing has to be parsed
+  back); OWB reads it when the child exits and offers it as the calc's
+  `geom_spec`. A program that does not read the variable cannot be affected
+  by it, which is what makes it safe to set on every external-editor launch
+  - the same argument as `MOLOM_ROUNDTRIP_FILE`.
+  Note the button then wants a different label from the plain 3D view, since
+  it means "go and define this" rather than "go and look".
+
+- ~~**FREEZING EVERY ATOM OF A SCANNED COORDINATE WAS NOT REFUSED.**~~
+  **FIXED 2026-09-07.** `validate` compares a scan against the constraints by
+  TYPE AND ATOMS, so a `C` over eighteen atoms and a `B` over two are
+  different coordinates and nothing objected - while ORCA is handed a
+  coordinate nothing can walk. Christian found it in MoloM by freezing a
+  whole terephthalic acid and then scanning a C-C bond inside it; the
+  elongation animated happily.
+  `cartesian_frozen` plus the containment test, and deliberately only the
+  unambiguous case - EVERY atom of the coordinate frozen. Not "any atom": a
+  scan with one end pinned is an ordinary way to walk a bond, and refusing it
+  would refuse the useful case to catch the useless one. MoloM refuses the
+  same pair at the point of adding, so it can never store a spec this
+  rejects.
+
+- ~~**A CARTESIAN FREEZE OVER SEVERAL ATOMS WROTE SYNTAX ORCA REJECTS.**~~
+  **FIXED 2026-09-07.** `{ C 0 1 2 3 6 C }` is what `constraint_line`
+  produced for a multi-atom freeze, and ORCA 6.0.1 answers "Error - Expecting
+  C(onstraint) in ScanConstraints" - as it does for the comma form. What it
+  DOES take is one atom or a **contiguous range**, `{ C 0:3 C }`, which holds
+  every atom in it to 0.000000 A and mixes freely with single-atom lines
+  (measured, both ways). So a set of atoms is written as several lines with
+  consecutive runs collapsed (`cartesian_runs`), which is also what makes
+  freezing a phenyl ring read as one line rather than six.
+  `validate` no longer demands exactly one atom for `C` either - it is a
+  freeze of POSITIONS, so any number is meaningful; only an empty selection
+  is refused. Latent rather than reported, because nothing here could produce
+  a multi-atom freeze until MoloM grew one; the two are pinned to identical
+  text, so it had to be fixed in both.
+
+- ~~**`geomspec.measure` HAS AN INVERTED DIHEDRAL SIGN.**~~ **FIXED
+  2026-09-07.** MoloM's round-106 cross-check found it and correctly left it
+  alone as another repository's code; it is fixed here now that the round
+  trip is being built in both at once. One cross product had its operands the
+  wrong way round, so every dihedral came back as its own negative - i.e.
+  describing the MIRROR IMAGE of the geometry in front of the user.
+  **Nothing failed**: a literal number typed into a value box passes through
+  `measure` untouched, so only `current` and `D(i,j,k,l)` EXPRESSIONS were
+  affected, and a scan starting from the enantiomeric conformation produces
+  an input file that reads perfectly plausibly.
+  Settled against a THIRD implementation rather than by argument - RDKit's
+  `GetDihedralDeg`, the IUPAC convention ORCA itself uses. Over 400 random
+  geometries RDKit and MoloM agreed every time and this line disagreed with
+  both by an exact sign; bonds and angles were exact throughout, which is
+  what scoped the fix to the `D` branch alone.
+  **All 463 tests passed BEFORE the fix as well**, which is the useful part:
+  the sign was never tested, because every existing case measured a value
+  typed by hand. The new test carries no number from anywhere - atoms 1 and 2
+  lie on +z so +z IS the axis, atom 0 sticks out along +x, atom 3 is atom 0
+  turned by phi about that axis, and the dihedral is phi by construction.
+
+- ~~**DECIDE WHETHER `geomspec` SHOULD CARRY MORE THAN ONE SCAN.**~~ **DONE**
+  (2026-09-06). Christian settled it in one line - "can you just make OWB
+  allow multiple scans because the entire point of it is being a GUI for
+  orca?" - and the restriction was ours, not ORCA's. **Checked before the
+  data model was touched**: two `Scan` lines on ORCA 6.0.1 ran as a
+  **3 x 3 = 9-point grid**, and the surface table carries one column per
+  coordinate in declaration order, so the FIRST line is the outer loop and
+  the order of the list is meaningful rather than cosmetic.
+  `spec["scans"]` is a list; `scans_of` is the ONE place that knows about the
+  old `spec["scan"]`, so every existing project reads unchanged - and the
+  whole existing test suite, written in the old shape, passes untouched,
+  which is the compatibility proof. Only `scans` is written, so a project
+  saved here and opened in an older build loses the scan: a one-way version
+  step, noted rather than worked around.
+  `GeomSpecDialog`'s scan section is a ROW LIST now, mirroring the
+  constraints, and says what the grid costs - two 10-point scans is a hundred
+  optimisations, not twenty. **Two new refusals** come with it, both
+  contradictions rather than limits: one coordinate scanned twice (the inner
+  loop would hold what the outer loop just set), and a coordinate both frozen
+  and scanned. Neither was reachable while there could be only one.
+  MoloM follows byte for byte and still ANIMATES only the first - a grid is a
+  surface, not a path.
+  The original entry, kept for the reasoning:
+- **~~DECIDE WHETHER `geomspec` SHOULD CARRY MORE THAN ONE SCAN.~~** Today it
+  carries exactly one (`"scan": {...} or None`, and the module docstring
+  says "ONE relaxed surface scan"). ORCA itself, as far as I know, runs a
+  MULTI-DIMENSIONAL relaxed surface scan as a nested loop over the grid of
+  two or three coordinates - which would make the current shape a
+  restriction rather than a reflection of the program. **Worth confirming
+  against the ORCA manual before changing anything**, because MoloM
+  reproduces this repo's text byte for byte and a list here means a list
+  there. Christian raised it from the MoloM side: "If two scans, say bond
+  elongation and dihedral rotation, are on the same mol in orca, orca will
+  generate an NxM matrix of starting geometries that will be optimised under
+  the given constraints from both scans, right?"
+  If the answer is yes, this repo decides the shape FIRST and MoloM follows.
+  Note MoloM will still only ANIMATE one at a time, deliberately: a
+  two-coordinate scan is a surface rather than a path, so previewing it
+  would mean choosing an arbitrary route through the grid.
+
+- **Let a molecule be opened in the 3D editor with NO geometry yet.** Christian,
+  2026-09-03, testing the MoloM round trip: "Cannot launch molom on an empty new
+  mol. Asks to generate geometry first. I think OWB should allow to create mols
+  from scratch on an empty mol entry." Right, and it is a small change: MoloM
+  opens on an empty scene perfectly well and has a full drawing mode (Tab, the
+  periodic table, the draw tool), so the geometry can be BUILT there and come
+  back on the round trip. Today the editor slot is gated behind having
+  coordinates, which is exactly backwards for the case where you have none.
+  The launch is the same `[program, file.xyz]`; what changes is writing a valid
+  EMPTY xyz ("0
+
+", or a single placeholder atom) and not refusing the click.
+  Note `coords_locked` should NOT be set for such a launch - the whole point is
+  that the geometry that comes back is new.
+- **Ask for the MoloM round trip through the ENVIRONMENT, not the argv.**
+  Raised 2026-09-03 with the MoloM side, where the behaviour has already
+  changed. MoloM no longer treats "opened with a file argument" as a round
+  trip: `molom some.xyz` just imports it, Ctrl+S saves a `.molom` project, and
+  writing the geometry back out is a separate export. That was Christian's
+  design decision ("round trips that automatically overwrite geometry should
+  only activate if molom is used as an external editor launched from OWB").
+  So OWB has to say so explicitly, and the safe channel is an environment
+  variable rather than a flag:
+
+      MOLOM_ROUNDTRIP_FILE=<absolute path of the file being handed over>
+
+  set in the child process's environment when launching the editor slot. A
+  FLAG cannot be used here: OWB launches whatever program the user put in the
+  slot as `[program, file]`, and whether Avogadro or molden tolerates an
+  unknown argument, exits non-zero, or treats it as a filename is not
+  consistent and is not something OWB can know. **A program that does not read
+  an environment variable cannot be affected by one**, so this can be set on
+  EVERY editor launch and only MoloM will notice - including after the user
+  repoints the slot at something else. It carries the PATH rather than a bare
+  "1" so that a variable left in a shell cannot arm a write-back for some
+  unrelated file opened later. (`molom --roundtrip <file>` exists too, for
+  driving it by hand.)
+- **Show that MoloM is STARTING after "Open in 3D".** Christian, 2026-08-27:
+  "on first launch MoloM is kinda slow and there is no indication after double
+  click that something is even happening. I think there should be a visual
+  indicator that the mol entry is being opened. Maybe an indeterminate loading
+  bar in the lower left or something?" MEASURED on his machine: MoloM's cold
+  start is ~2.35 s, and almost all of it is Qt building its first window
+  (926 ms) plus the first paint (595 ms) - i.e. it is not something MoloM can
+  shrink much, so the fix belongs HERE, in the launcher. An indeterminate
+  progress line in the status area from `QProcess.started` until the window
+  appears (or simply for a couple of seconds) is enough; the point is that a
+  double-click currently looks like nothing happened.
+- **Table headers should auto-fit on a double-click of the border between two
+  column headers**, the way Excel does - Christian, 2026-08-27, about the
+  calculation tables specifically but wanted for any table in the app. Qt gives
+  this almost for free: `QHeaderView.setSectionResizeMode(Interactive)` plus
+  `sectionHandleDoubleClicked` -> `resizeColumnToContents(index)`. Worth doing
+  once in a shared helper and applying to every table rather than per tab.
+- **Take the SMILES back from MoloM on a round trip** (raised 2026-08-27 with
+  the MoloM side). MoloM can derive a SMILES from the drawn graph
+  (`io.structure_to_smiles`), so after "adjust the geometry, then Save" it can
+  write the updated SMILES alongside the coordinates - which is what would let
+  OWB refresh its skeletal depiction instead of keeping the one from before
+  the edit. MoloM writes it on the .xyz COMMENT line (plain text, round 76);
+  OWB's `core/coords.py` reader currently ignores that line, so the work here
+  is to read it and, when it parses, update the molecule's stored SMILES
+  WITHOUT clobbering `coords_locked`.
 - `--execute_project` now expands the Workflow graph AND materialises Transform/Combine
   geometries headlessly (see `core/workflow_expand.py`) — the old `--expand_and_execute` gap is
   closed. Remaining headless gaps: (1) no live monitoring (reopen in the GUI to watch/harvest);

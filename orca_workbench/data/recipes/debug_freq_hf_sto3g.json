@@ -4,6 +4,6 @@
   "method_label": "HF_STO-3G",
   "variant": "debug",
   "favorite": false,
-  "created_at": null,
-  "template": "# DEBUG frequencies — HF/STO-3G, 1 core. Writes a .hess (so it also feeds a\n# ZPVA node) for cheap end-to-end mechanics testing. NOT for chemistry; at this\n# level you may well get imaginary modes (handy for testing a Condition gate).\n\n! HF STO-3G Freq\n\n%maxcore 1000\n\n%pal nprocs 1\nend\n\n!!##COORDS_SEC##!!\n"
+  "created_at": "2026-06-29T12:10:51",
+  "template": "# DEBUG frequencies \u2014 HF/STO-3G, 1 core. Writes a .hess (so it also feeds a\n# ZPVA node) for cheap end-to-end mechanics testing. NOT for chemistry; at this\n# level you may well get imaginary modes (handy for testing a Condition gate).\n\n! HF STO-3G Freq\n\n%maxcore 1000\n\n%pal nprocs 4\nend\n\n!!##COORDS_SEC##!!\n"
 }
