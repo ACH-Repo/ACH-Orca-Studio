@@ -906,6 +906,28 @@ off the core path and gracefully degradable.
   also got wheel y-zoom about the cursor (log-aware on the gradient panel).
 
 ## Open work / TODO
+- **PRE-OPTIMISED RELAXED SCAN FROM MoloM -> N SEPARATE ORCA JOBS.** Christian,
+  2026-09-09: "If I do a relaxed Scan in ORCA, doesn't it make sense to do a
+  relaxed, preoptimized scan in MoloM and then do separate calculations on the
+  preoptimized structures? Seems wasteful to scan a dihedral while rigidly
+  rotating something in orca and then orca doing a QM opt for each step."
+  MoloM already HAS the relaxed scan (`core/scan.py`, round 106): it steps the
+  coordinate and relaxes the rest with a force field at each point, each point
+  continuing from the last, which is what makes it relaxed rather than a row
+  of independent optimisations. Butane's torsional profile comes out at the
+  measured values (anti 0.00 / gauche 0.63 / H-eclipsed 3.86 / syn 6.54
+  kcal/mol) at 3 ms per point. What is missing is the EXPORT: nothing writes N
+  input files from those frames.
+  **The OWB half is ingestion.** If MoloM writes a numbered directory of
+  geometries, OWB should be able to take it as a job GROUP - one calculation
+  per scan point, sharing a recipe, with the scanned coordinate frozen
+  (`{ B i j C }`) so a QM optimiser cannot walk back off the coordinate being
+  scanned - and then plot the resulting energies as one surface. That is close
+  to what the calculations tab already does for a batch; what it does not have
+  is the notion that the members are POINTS ON A SCAN and belong on one curve.
+  Worth deciding early whether that is a new object or just a tag on a batch.
+  Recorded in MoloM's `docs/OPEN_ITEMS.md` as S6, with the MoloM-side
+  decisions (freeze vs single point, filenames, directory shape).
 - ~~**Let MoloM hand a `%geom` spec BACK.**~~ **DONE** (2026-09-06, with the
   MoloM side). `core/molom_link.py` is the channel: `MOLOM_GEOMSPEC_FILE`
   names a file, `launch_env` puts it in a COPY of the environment (never the
